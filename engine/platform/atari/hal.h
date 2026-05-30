@@ -91,6 +91,15 @@ struct Hal {
         return atari::pm_strip_size(res == 0);
     }
 
+    // ── POKEY sound ──
+    //
+    // POKEY voice registers interleave AUDFn/AUDCn from $D200 (AUDF1=$D200,
+    // AUDC1=$D201, AUDF2=$D202, …), so a channel's frequency register is
+    // AUDF1[channel*2] and its control register is AUDC1[channel*2]. The sound
+    // subsystem (engine/sound.h) writes these during the VBI tick.
+    static void write_audf(uint8_t channel, uint8_t freq) { reg::AUDF1[channel * 2] = freq; }
+    static void write_audc(uint8_t channel, uint8_t ctrl) { reg::AUDC1[channel * 2] = ctrl; }
+
     // TODO: interrupt install, scroll setup.
 };
 
