@@ -948,3 +948,214 @@ The modification is confined to a single well-documented
 location in the dispatcher. Future platforms that use ROM-
 resident code would need a different approach (RTS trick or
 jump table).
+
+---
+
+## ADR-022: Tracked-Range P/M Clear Over Full Clear
+
+**Status:** Accepted
+
+**Context:**
+Each frame, the sprite commit phase must clear old sprite data
+from player memory before writing new positions. A full clear
+zeros all 4 player strips (4 × 256 = 1024 bytes), costing
+roughly 5000 cycles. Most of those bytes were already zero.
+
+**Options Considered:**
+
+1. **Full clear** (rejected): Zero all 1024 bytes. Simple but
+   wastes ~4000 cycles clearing bytes that were never written.
+
+2. **Tracked-range clear** (chosen): Track the min and max Y
+   scanline written for each player last frame. Clear only
+   that range. Cost: 8 bytes of bookkeeping (min_y + max_y
+   per player). Savings: typically clear ~256 bytes instead
+   of 1024, saving ~3750 cycles.
+
+**Decision:**
+Track min/max Y per player. Clear only the dirty range.
+
+**Rationale:**
+On a 6502, 3750 saved cycles is roughly 12% of the NTSC
+frame budget. That's significant. The bookkeeping cost (8
+bytes RAM, ~32 cycles to update min/max during write) is
+trivial in comparison.
+
+**Tradeoff:**
+Slightly more complex commit logic. If a sprite moves from
+Y=20 to Y=180 between frames, the clear range spans most of
+the strip anyway. But this worst case is no worse than full
+clear, and the common case (sprites move by small deltas) is
+dramatically better.
+
+---
+
+## ADR-023: P/M Resolution as Per-Screen Configuration
+
+**Status:** Accepted
+
+**Context:**
+ANTIC supports single-line (256 bytes per player, 1-scanline
+precision) and double-line (128 bytes per player, 2-scanline
+steps) P/M resolution. Should this be a global setting or
+per-screen?
+
+**Options Considered:**
+
+1. **Global (GameConfig)**: One resolution for all screens.
+   Simpler. Problem: a title screen with no sprites wastes
+   memory if resolution is set for gameplay.
+
+2. **Per-screen** (chosen): Each screen struct declares its
+   resolution. P/M memory block is allocated at the maximum
+   size needed by any screen. No extra memory cost since the
+   block is sized to the largest anyway.
+
+**Decision:**
+P/M resolution is a per-screen setting:
+
+```cpp
+struct GameplayScreen {
+    static constexpr auto pm_resolution = PMRes::SingleLine;
+    // ...
+};
+```
+
+**Rationale:**
+P/M memory is a single block separate from screen memory,
+always allocated at the maximum size. Per-screen resolution
+adds no memory cost. A game can use double-line for a
+lower-fidelity screen (minimap, menu) and single-line for
+gameplay. The screen manager handles the DMACTL bit change
+during `set_screen`.
+
+**Tradeoff:**
+Slightly more complex screen configuration. Most games will
+use single-line everywhere, which is the default.
+
+---
+
+## ADR-024: Always-Sort Sprites Over Skip-Sort
+
+**Status:** Accepted
+
+**Context:**
+The multiplexer needs sprites sorted by Y position each frame
+for zone assignment. Should it sort unconditionally, or detect
+changes first and skip the sort when nothing moved?
+
+**Options Considered:**
+
+1. **Skip-sort**: Compare each sprite's Y to its previous Y.
+   If nothing changed, skip the sort. Cost: ~90 cycles for
+   comparison + N bytes of bookkeeping (old_y array). Risk:
+   misses non-position changes (sprite added, removed,
+   activated, deactivated).
+
+2. **Always-sort** (chosen): Insertion sort every frame.
+   Cost: ~80-120 cycles on nearly-sorted data (common case,
+   since sprites move by small deltas). No bookkeeping. No
+   edge cases.
+
+**Decision:**
+Sort sprites by Y every frame using insertion sort.
+
+**Rationale:**
+Insertion sort on nearly-sorted data is nearly O(N). For 9
+sprites, it costs ~80-120 cycles in the common case — trivial
+relative to the ~30,000 cycle frame budget. The skip-sort
+approach saves maybe 80 cycles on static frames but adds
+bookkeeping, complexity, and failure modes (forgetting to
+detect sprite addition/removal). Simplicity wins.
+
+**Tradeoff:**
+Wastes ~80 cycles on frames where nothing moved. This is
+negligible and the code is simpler and more robust.
+
+---
+
+## ADR-025: Deferred Missile Multiplexing
+
+**Status:** Accepted
+
+**Context:**
+Should the engine multiplex missiles (4 hardware, 2-bit-
+packed memory) the same way it multiplexes players?
+
+**Analysis:**
+Missile multiplexing is technically feasible:
+- DLI cost: +32 cycles per zone (HPOSM0-3 writes)
+- Combined zone DLI: ~85 cycles (players + missiles)
+- Memory write: bit-packed read-modify-write, ~1.75× cost
+  per scanline versus players
+- Data structures: +8 bytes per zone for missile assignments
+
+However, 4 hardware missiles cover most game use cases
+(bullets, projectiles are typically few on screen). Adding
+missile multiplexing increases zone DLI time from 53 to 85
+cycles, reducing margin for user DLIs on the same scanline.
+
+**Decision:**
+Design ZoneInfo and the DLI handler to accommodate missile
+multiplexing in the future, but do not implement it initially.
+Missiles are limited to the 4 hardware missiles in the first
+version.
+
+**Rationale:**
+Shipping sooner with 4 missiles is better than shipping later
+with multiplexed missiles most games won't use. The zone
+DLI handler is modular — adding missile position writes is
+an extension, not a rewrite.
+
+**Tradeoff:**
+Games needing more than 4 on-screen projectiles must manage
+them via software (e.g., bitmap blitting into the playfield).
+This is acceptable for the initial release.
+
+---
+
+## ADR-026: Two-Phase Display List Construction
+
+**Status:** Accepted
+
+**Context:**
+The engine constructs ANTIC display lists from `DisplayLayout`
+templates. The display list structure (mode bytes, blank lines,
+DLI bits) is known at compile time, but the LMS (Load Memory
+Scan) addresses pointing into screen memory depend on where
+the shared buffer lands in RAM — a link-time decision.
+
+**Options Considered:**
+
+1. **Fully runtime construction**: Build the display list byte
+   by byte at `set_screen` time. Flexible. Problem: wastes
+   cycles computing what the compiler already knows.
+
+2. **Fully compile-time construction**: `constexpr` display
+   list with embedded addresses. Problem: screen memory
+   addresses aren't `constexpr` (link-time resolved).
+
+3. **Two-phase construction** (chosen): Compile time builds
+   the display list template with placeholder LMS addresses
+   and records where the LMS bytes are. `set_screen` copies
+   the template and patches the LMS addresses.
+
+**Decision:**
+Phase 1 (compile time): build display list template — the
+byte sequence with placeholder LMS addresses, region offsets
+into the shared buffer, and a table of LMS byte positions.
+
+Phase 2 (`set_screen` time): copy the template into the
+active display list area, patch LMS addresses using the
+actual shared buffer address plus region offsets.
+
+**Rationale:**
+Maximizes compile-time work. The `set_screen` phase only
+copies the template (~30-200 bytes) and patches 1-4 LMS
+entries (6-12 byte writes). Fast and predictable.
+
+**Tradeoff:**
+Each screen needs its own display list in RAM (they have
+different structures). Display lists are small (30-200 bytes)
+so this is acceptable. The template data lives in ROM; the
+active display list is in RAM (ANTIC reads it via DMA).

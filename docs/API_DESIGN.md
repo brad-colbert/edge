@@ -299,9 +299,10 @@ struct GameplayScreen {
         engine::BitmapRegion<antic::Mode::BITMAP_E, 180>,
         engine::TextRegion<antic::Mode::MODE_2, 1>
     >;
-    static constexpr bool sprites_active = true;
-    static constexpr bool scroll_active  = true;
-    static constexpr bool use_row_table  = true;
+    static constexpr bool sprites_active  = true;
+    static constexpr auto pm_resolution   = PMRes::SingleLine;
+    static constexpr bool scroll_active   = true;
+    static constexpr bool use_row_table   = true;
 };
 
 struct HighScoreScreen {
@@ -866,7 +867,7 @@ platform's capacity returns false (no crash, no UB).
 ### Logical Sprite Model
 
 The game works with logical sprites identified by slot index.
-The engine maps logical sprites to hardware resources:
+The engine maps logical sprites to hardware P/M resources:
 
 ```cpp
 // Set logical sprite 0 to player_shape at position (x, y)
@@ -875,6 +876,10 @@ Game::sprite(0, player_shape, player.x, player.y);
 // Set logical sprite 3 to enemy_shape
 Game::sprite(3, enemy_shape, e.x, e.y);
 ```
+
+`Game::sprite()` updates the logical sprite's state (position,
+shape) in a buffer. It does NOT write to P/M hardware — that
+happens during VBI to avoid tearing. See DECISIONS.md ADR-009.
 
 The engine resolves logical-to-hardware mapping:
 
@@ -910,77 +915,164 @@ Missiles are separate from players on Atari (4 available,
 Game::missile(index, x, y, height);
 ```
 
-Index 0-3. On platforms without separate missiles, these map
-to narrow sprites or software rendering.
+Index 0-3. Missiles are NOT multiplexed in the initial
+implementation (see DECISIONS.md ADR-025). The 4 hardware
+missiles are available directly. On platforms without
+separate missiles, these map to narrow sprites or software
+rendering.
 
-### Sprite Visibility and Clearing
+### Sprite Visibility
 
 ```cpp
 Game::sprite_hide(3);     // hide logical sprite 3
 Game::sprite_hide_all();  // hide all sprites
 ```
 
-Hidden sprites are not rendered and not included in collision
-detection.
+Hidden sprites are not rendered, not included in collision
+detection, and not assigned to multiplexer zones.
+
+### P/M Resolution
+
+P/M resolution is configured per-screen (see ADR-023):
+
+```cpp
+struct GameplayScreen {
+    // ...
+    static constexpr auto pm_resolution = PMRes::SingleLine;
+};
+```
+
+`PMRes::SingleLine`: 1-scanline Y precision, 256 bytes per
+player, 1792 bytes P/M RAM total. Most games use this.
+
+`PMRes::DoubleLine`: 2-scanline Y steps, 128 bytes per
+player, 896 bytes P/M RAM total. Lower fidelity, saves 896
+bytes.
+
+P/M memory is allocated at the maximum size needed by any
+screen. The screen manager sets the DMACTL resolution bit
+during `set_screen`.
 
 ### Multiplexing
 
-When `GameConfig::max_sprites` exceeds hardware sprite count,
-the engine automatically multiplexes. The screen is divided
-into vertical zones. Each zone can display up to 4 players.
-DLIs reprogram P/M registers at zone boundaries.
+When `GameConfig::max_sprites` exceeds 4 (hardware player
+count), the engine automatically multiplexes. The screen is
+divided into vertical zones (default max 4 zones = up to 16
+logical sprites). The game author does not manage zones.
 
-The game author does not manage zones directly. The engine
-sorts sprites by Y position, assigns zones, and builds the
-DLI chain.
+**How it works:**
 
-The multiplexer implementation is detailed in a separate design
-document (pending). The API contract is stable.
+Each frame during VBI, the multiplexer:
+
+1. Sorts active sprites by Y (insertion sort, ~80-120 cycles)
+2. Groups sprites into zones of up to 4, placing zone
+   boundaries in the gaps between sprite groups
+3. Assigns each sprite in a zone to a hardware player (0-3)
+4. Registers a raw DLI at each zone boundary that writes
+   HPOSP0-3 for the new zone (~53 cycles per DLI)
+5. The game's render phase pre-writes all sprite shape data
+   into P/M memory at the correct Y offsets — the DLI only
+   changes horizontal positions, not shape data
 
 **Querying multiplex state:**
 
 ```cpp
-// How many zones is the multiplexer using?
-uint8_t zones = Game::multiplex.zone_count();
+// How many zones this frame?
+u8 zones = Game::multiplex.zone_count();
 
-// Resolve hardware collision back to logical sprite
-// (needed because GTIA reports hardware player index,
-// not logical sprite index)
-auto* enemy = Game::multiplex.resolve_player(hw_player_index);
+// Which logical sprites could be on this hardware player?
+// Returns bitmask — may have multiple bits set when multiplexing
+u16 candidates = Game::multiplex.sprites_on_player(hw_player);
+
+// Which hardware player is this logical sprite on (in its zone)?
+u8 hw = Game::multiplex.player_for_sprite(logical_index);
+
+// What zone is this logical sprite in?
+u8 zone = Game::multiplex.zone_for_sprite(logical_index);
 ```
+
+**Zone limits:**
+
+MaxZones is a template parameter on the SpriteManager
+(default 4). Each zone costs one DLI slot (~53 cycles) and
+9 bytes of zone state. With 4 zones and 4 players per zone,
+the engine supports up to 16 multiplexed sprites. If sprites
+can't fit in the available zones (too many overlapping
+vertically), the lowest-priority sprites are dropped.
 
 ### Collision Detection
 
 GTIA provides hardware collision registers, latched once per
-frame during VBI:
+frame during VBI.
+
+**Non-multiplexed games (≤ 4 sprites):**
+
+Collision is straightforward — each hardware player maps to
+exactly one logical sprite:
 
 ```cpp
 auto col = Game::pm_collisions();
 
-// Player-to-player collision
-col.player_to_player(0)    // did Player 0 hit any other player?
-
-// Missile-to-player collision
+col.player_to_player(0)    // did Player 0 hit any player?
 col.missile_to_player(2)   // did Missile 2 hit any player?
-                            // returns bitmask of which players
-
-// Player-to-playfield collision
-col.player_to_playfield(0) // did Player 0 hit a playfield color?
-                            // returns bitmask of which colors
+col.player_to_playfield(0) // did Player 0 hit playfield?
 ```
 
-Collision data is read-only. It reflects the previous frame's
-rendering (due to one-frame buffer latency). The engine handles
-latch timing and register clearing.
+**Multiplexed games (> 4 sprites):**
+
+GTIA collision registers accumulate across the whole frame
+and don't distinguish zones. If Player 0 shows Sprite A in
+zone 0 and Sprite E in zone 1, a P0PL collision could be
+either. The engine provides a candidates bitmask:
+
+```cpp
+auto col = Game::pm_collisions();
+
+if (col.player_to_player(0)) {
+    // Which logical sprites were on Player 0?
+    u16 candidates = Game::multiplex.sprites_on_player(0);
+
+    // Check each candidate with bounding-box overlap
+    for (u8 i = 0; i < max_sprites; i++) {
+        if (candidates & (1 << i)) {
+            if (bbox_overlap(target, sprites[i])) {
+                // Confirmed collision
+            }
+        }
+    }
+}
+```
+
+This is honest — the engine tells you what's possible, the
+game confirms with geometry. The bounding-box check is a few
+comparisons per candidate, which is cheap.
+
+### Sprite Commit (Internal)
+
+During VBI, the sprite commit phase writes buffered positions
+to P/M hardware:
+
+1. Clear dirty ranges of player memory (tracked-range clear,
+   see ADR-022, ~1250 cycles vs ~5000 for full clear)
+2. For each active logical sprite: copy shape data into the
+   assigned player's memory at the sprite's Y offset
+3. Write HPOSP0-3 for zone 0 (VBI sets first zone positions)
+4. Update min/max Y tracking for next frame's clear
 
 ### Memory Cost
 
-Approximate for baseline Atari:
+```
+Logical sprites:  MaxSprites × 6 bytes   (9 × 6 = 54)
+Zone info:        MaxZones × 9 bytes      (4 × 9 = 36)
+Zone state:       2 bytes
+Dirty tracking:   8 bytes (min/max Y per player)
+P/M memory:       1792 bytes (single-line)
+                  or 896 bytes (double-line)
+Collision state:  ~8 bytes
 
-- P/M graphics area: 1280 bytes (single-line resolution) or
-  640 bytes (double-line resolution)
-- Multiplex state: ~2 bytes per logical sprite for zone mapping
-- Sprite position buffer: 2 bytes per logical sprite (x, y)
+Total (excl. P/M): ~108 bytes for 9 sprites, 4 zones
+P/M memory:        896-1792 bytes (the dominant cost)
+```
 
 ## Bitmap Drawing
 

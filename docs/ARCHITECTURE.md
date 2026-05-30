@@ -245,13 +245,39 @@ manages frame timing. The game provides a callback via `run()`
 exit). The loop handles everything else.
 
 **Screen Manager** — owns display list construction and screen
-transitions. Holds the compiled display lists for all declared
-screens in `ScreenSet`. `set_screen<S>()` reconfigures ANTIC,
-rebuilds the DLI chain via the Interrupt Manager, enables or
-disables sprites and scroll per the screen's configuration,
-clears screen memory, and calls the user's transition callback.
-All declared screens share a single screen memory buffer sized
-to the largest screen's requirements.
+transitions. Uses two-phase display list construction (see
+DECISIONS.md ADR-026): at compile time, builds a display list
+template from the `DisplayLayout` (mode bytes, blank lines,
+region structure) with placeholder LMS addresses and a table
+of LMS byte positions; at `set_screen` time, copies the
+template into RAM and patches LMS addresses to point into the
+shared screen buffer at the correct offsets.
+
+Each screen has its own display list in RAM (30-200 bytes
+depending on complexity). All screens share a single screen
+memory buffer sized to the largest screen's requirements. The
+`set_screen<S>()` transition sequence:
+
+1. Wait for VBI
+2. Disable ANTIC DMA (screen goes blank)
+3. Clear shared screen buffer
+4. Copy display list template, patch LMS addresses
+5. Set ANTIC DLISTL/H to the new display list
+6. Update region view pointers
+7. Clear non-persistent DLIs, rebuild DLI chain
+8. Enable/disable P/M DMA per sprites_active
+9. Set P/M resolution per pm_resolution (DMACTL bit)
+10. Enable/disable scroll per scroll_active
+11. Generate row address table if use_row_table
+12. Re-enable ANTIC DMA
+13. Call user transition callback
+14. Resume frame loop
+
+Region views are typed handles (`TextRegionView`,
+`BitmapRegionView`) that store a pointer into the shared
+buffer and expose only operations valid for their mode type.
+Invalid operations (e.g., `plot()` on a text region) are
+compile errors.
 
 **Bitmap Drawing (gfx)** — provides pixel-level drawing
 primitives for bitmap display regions. Available only on
@@ -296,21 +322,55 @@ during VBI. Provides level (held) and edge (pressed/released)
 detection. Debouncing handled internally. Game code receives
 a snapshot, never polls hardware directly.
 
-**Sprites** — manages logical sprites mapped to hardware
-resources. On Atari baseline, this means Player-Missile
-graphics with DLI-based multiplexing when logical sprite count
-exceeds hardware count. On VBXE, this means blitter-rendered
-sprites. The game author works with logical sprites; the
-subsystem handles the hardware mapping.
+**Sprites** — manages logical sprites mapped to hardware P/M
+resources. Each logical sprite has position (x, y), shape
+pointer, height, and active flag (6 bytes per sprite). The
+game writes logical sprite state during its render phase;
+the engine commits to P/M hardware during VBI.
+
+P/M memory management uses tracked-range clearing (see
+DECISIONS.md ADR-022): only the scanline range that was
+written last frame is cleared, saving ~3750 cycles versus
+full clear. Min/max Y per player (8 bytes bookkeeping)
+tracks the dirty range.
+
+P/M resolution (single-line or double-line) is per-screen
+(see ADR-023). Single-line: 1-scanline precision, 256 bytes
+per player, 1792 bytes total. Double-line: 2-scanline steps,
+128 bytes per player, 896 bytes total. The P/M memory block
+is allocated at the maximum size needed by any screen.
 
 **Multiplex** — a sub-component of Sprites, active when
-logical sprite count exceeds hardware sprite count. Divides
-the screen into vertical zones, assigns hardware sprites to
-logical sprites per zone, generates the DLI chain to reprogram
-P/M registers at zone boundaries. Provides reverse mapping
-(hardware slot → logical entity) for collision resolution.
-The multiplexer implementation is detailed in a separate design
-document (pending). The API contract is stable.
+logical sprite count exceeds 4 hardware players. Divides the
+screen into vertical zones (default max 4 zones = 16 sprites).
+Zone assignment algorithm:
+
+1. Sort all active sprites by Y position using insertion sort
+   every frame (see ADR-024 — nearly-sorted data makes this
+   ~80-120 cycles for typical sprite counts)
+2. Walk sorted list, greedily assign to zones: each zone holds
+   up to 4 sprites, zone boundary placed at the midpoint
+   between adjacent groups
+3. Validate no sprite straddles a zone boundary (boundary must
+   fall in a gap between sprites)
+4. Build per-zone data: player assignments and HPOS values
+
+Zone DLI handlers are engine-internal raw handlers (~53 cycles
+each): save A, write HPOSP0-3 for the new zone, chain VDSLST,
+restore A, RTI. These are registered as dynamic DLIs with the
+interrupt manager and rebuilt every frame during VBI.
+
+Collision reverse-mapping: GTIA collision registers accumulate
+across the whole frame and don't distinguish zones. The
+multiplex provides a candidates table — for each hardware
+player, a bitmask of which logical sprites were assigned to it
+across all zones. The game uses bounding-box overlap checks to
+disambiguate. For non-multiplexed games (≤ 4 sprites), each
+player maps to exactly one sprite with no ambiguity.
+
+Missiles are not multiplexed in the initial implementation
+(see ADR-025). The 4 hardware missiles are available directly.
+ZoneInfo reserves space for future missile multiplexing.
 
 **Tiles** — manages character-mode or map-mode backgrounds.
 Owns tileset loading (into character set RAM), tilemap storage,

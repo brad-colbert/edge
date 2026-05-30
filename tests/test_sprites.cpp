@@ -1,0 +1,243 @@
+// test_sprites.cpp — unit tests for engine/sprites.h.
+//
+// Built for the llvm-mos `mos-sim` platform and run under `mos-sim`; main()'s
+// return value becomes the process exit code (0 = pass) for CTest.
+//
+// The SpriteManager is exercised against a MOCK platform whose HAL records HPOS
+// writes and reports the standard single-line P/M layout, so commit() can be
+// driven into a plain buffer (not real P/M RAM) and the zone/dirty bookkeeping
+// asserted exactly without Atari hardware. The live P/M + zone-DLI path is
+// verified separately on Altirra/Fujisan.
+
+#include <stdint.h>
+#include <stdio.h>
+
+#include <engine/interrupt.h>
+#include <engine/sprites.h>
+
+using engine::u8;
+using engine::u16;
+
+using engine::SpriteShape;
+using engine::PMRes;
+using engine::ZoneInfo;
+
+// ── Mock platform ─────────────────────────────────────────────────────
+//
+// pm_player_offset returns the standard single-line layout (player N at
+// 1024 + N*256); write_hposp/m record the last value written per index.
+struct MockHal {
+    static u8 hposp[4];
+    static u8 hposm[4];
+
+    static void write_hposp(u8 player,  u8 x) { hposp[player]  = x; }
+    static void write_hposm(u8 missile, u8 x) { hposm[missile] = x; }
+
+    static u16 pm_player_offset(u8 res, u8 player) {
+        const bool single = (res == 0);
+        const u16 base   = single ? 1024 : 512;
+        const u16 stride = single ? 256  : 128;
+        return static_cast<u16>(base + player * stride);
+    }
+    static u16 pm_strip_size(u8 res) { return (res == 0) ? 256 : 128; }
+};
+u8 MockHal::hposp[4] = {};
+u8 MockHal::hposm[4] = {};
+
+struct MockPlatform {
+    using hal = MockHal;
+};
+
+using SM = engine::SpriteManager<MockPlatform, 9, 4>;
+using IM = engine::InterruptManager<MockPlatform>;
+
+// A shape whose rows are all 0xFF, so committed bytes are easy to spot.
+static const SpriteShape<8, 8> g_shape = {
+    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}};
+
+// ── Harness ────────────────────────────────────────────────────────────
+
+static unsigned g_failures = 0;
+
+#define CHECK(cond)                                                        \
+    do {                                                                   \
+        if (!(cond)) {                                                     \
+            printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond);         \
+            ++g_failures;                                                  \
+        }                                                                  \
+    } while (0)
+
+// Player layout base used by the tests (matches MockHal single-line).
+static u16 pbase(u8 player) { return static_cast<u16>(1024 + player * 256); }
+
+// ── 5 sprites → 2 zones, sorted by Y, boundary in the gap ──────────────
+
+static void test_five_sprites_two_zones() {
+    static SM mgr;
+    // Deliberately out of Y order: indices 0..4 at Y 50,10,90,30,70.
+    mgr.sprite(0, g_shape, 100, 50);
+    mgr.sprite(1, g_shape, 100, 10);
+    mgr.sprite(2, g_shape, 100, 90);
+    mgr.sprite(3, g_shape, 100, 30);
+    mgr.sprite(4, g_shape, 100, 70);
+    mgr.update_zones();
+
+    CHECK(mgr.active_count() == 5);
+    CHECK(mgr.zone_count() == 2);          // 5 sprites need 2 zones (4 + 1)
+
+    // Zone 0's four players are the four lowest-Y sprites, in ascending Y.
+    const ZoneInfo& z0 = mgr.zone(0);
+    CHECK(mgr.logical(z0.player_assignment[0]).y == 10);
+    CHECK(mgr.logical(z0.player_assignment[1]).y == 30);
+    CHECK(mgr.logical(z0.player_assignment[2]).y == 50);
+    CHECK(mgr.logical(z0.player_assignment[3]).y == 70);
+
+    // Zone 1 holds the remaining (highest-Y) sprite on player 0.
+    const ZoneInfo& z1 = mgr.zone(1);
+    CHECK(mgr.logical(z1.player_assignment[0]).y == 90);
+    CHECK(z1.player_assignment[1] == ZoneInfo::UNUSED);
+
+    // The boundary falls between zone 0's last sprite (70) and zone 1's (90).
+    CHECK(z1.boundary_scanline > 70 && z1.boundary_scanline < 90);
+    CHECK(z1.boundary_scanline == 80);     // midpoint
+    CHECK(z0.boundary_scanline == 0);      // zone 0 is active from the top
+}
+
+// ── 4 sprites → 1 zone, each on a unique player ────────────────────────
+
+static void test_four_sprites_one_zone() {
+    static SM mgr;
+    mgr.sprite(0, g_shape, 100, 40);
+    mgr.sprite(1, g_shape, 100, 10);
+    mgr.sprite(2, g_shape, 100, 30);
+    mgr.sprite(3, g_shape, 100, 20);
+    mgr.update_zones();
+
+    CHECK(mgr.zone_count() == 1);
+
+    // Each of the four logical sprites maps to a distinct hardware player 0-3.
+    u8 seen = 0;
+    for (u8 i = 0; i < 4; ++i) {
+        const u8 p = mgr.player_for_sprite(i);
+        CHECK(p < 4);
+        CHECK((seen & (1u << p)) == 0);    // not previously assigned
+        seen |= static_cast<u8>(1u << p);
+    }
+    CHECK(seen == 0x0F);                   // all four players used exactly once
+}
+
+// ── 9 sprites → ≤4 zones; bitmask / mapping consistency ────────────────
+
+static void test_nine_sprites_mapping() {
+    static SM mgr;
+    // Y = 10,20,...,90, so the sorted order is the natural index order.
+    for (u8 i = 0; i < 9; ++i) mgr.sprite(i, g_shape, 100, (u8)((i + 1) * 10));
+    mgr.update_zones();
+
+    CHECK(mgr.active_count() == 9);
+    CHECK(mgr.zone_count() == 3);          // ceil(9/4)
+    CHECK(mgr.zone_count() <= 4);
+
+    // Zones: [0..3] / [4..7] / [8]. Player p collects sorted[p], sorted[4+p],
+    // sorted[8] (only player 0 in zone 2).
+    CHECK(mgr.sprites_on_player(0) ==
+          static_cast<u16>((1u << 0) | (1u << 4) | (1u << 8)));
+    CHECK(mgr.sprites_on_player(1) ==
+          static_cast<u16>((1u << 1) | (1u << 5)));
+    CHECK(mgr.sprites_on_player(2) ==
+          static_cast<u16>((1u << 2) | (1u << 6)));
+    CHECK(mgr.sprites_on_player(3) ==
+          static_cast<u16>((1u << 3) | (1u << 7)));
+
+    // player_for_sprite / zone_for_sprite agree with the assignment.
+    CHECK(mgr.player_for_sprite(0) == 0 && mgr.zone_for_sprite(0) == 0);
+    CHECK(mgr.player_for_sprite(4) == 0 && mgr.zone_for_sprite(4) == 1);
+    CHECK(mgr.player_for_sprite(8) == 0 && mgr.zone_for_sprite(8) == 2);
+    CHECK(mgr.player_for_sprite(7) == 3 && mgr.zone_for_sprite(7) == 1);
+}
+
+// ── Tracked-range commit: only dirty Y ranges written / cleared ────────
+
+static void test_commit_dirty_tracking() {
+    static SM mgr;
+    static u8 buf[2048] = {};
+
+    // Two sprites on different players (single zone): idx0 Y=50, idx1 Y=60.
+    mgr.sprite(0, g_shape, 100, 50);
+    mgr.sprite(1, g_shape, 110, 60);
+    mgr.update_zones();
+    mgr.commit(buf);
+
+    // Sorted by Y: player 0 = idx0 (Y50), player 1 = idx1 (Y60).
+    for (u8 r = 0; r < 8; ++r) {
+        CHECK(buf[pbase(0) + 50 + r] == 0xFF);
+        CHECK(buf[pbase(1) + 60 + r] == 0xFF);
+    }
+    // Bytes just outside each sprite's range are untouched.
+    CHECK(buf[pbase(0) + 49] == 0);
+    CHECK(buf[pbase(0) + 58] == 0);
+
+    // Zone-0 horizontal positions reached the HAL.
+    CHECK(MockHal::hposp[0] == 100);
+    CHECK(MockHal::hposp[1] == 110);
+
+    // Move both sprites; old ranges must be cleared, new ranges written.
+    mgr.sprite(0, g_shape, 100, 100);
+    mgr.sprite(1, g_shape, 110, 120);
+    mgr.update_zones();
+    mgr.commit(buf);
+
+    for (u8 r = 0; r < 8; ++r) {
+        CHECK(buf[pbase(0) + 50 + r] == 0);    // old range cleared
+        CHECK(buf[pbase(1) + 60 + r] == 0);
+        CHECK(buf[pbase(0) + 100 + r] == 0xFF);
+        CHECK(buf[pbase(1) + 120 + r] == 0xFF);
+    }
+}
+
+// ── sprite_hide removes a sprite from zone assignment ──────────────────
+
+static void test_sprite_hide() {
+    static SM mgr;
+    for (u8 i = 0; i < 5; ++i) mgr.sprite(i, g_shape, 100, (u8)((i + 1) * 10));
+    mgr.sprite_hide(2);
+    mgr.update_zones();
+
+    CHECK(mgr.active_count() == 4);
+    CHECK(mgr.zone_count() == 1);
+
+    // The hidden sprite is in no zone / on no player.
+    CHECK(mgr.player_for_sprite(2) == 0xFF);
+    CHECK(mgr.zone_for_sprite(2) == 0xFF);
+    const ZoneInfo& z0 = mgr.zone(0);
+    for (u8 p = 0; p < 4; ++p) CHECK(z0.player_assignment[p] != 2);
+}
+
+// ── build_dli_handlers registers one boundary DLI per extra zone ───────
+
+static void test_dli_registration() {
+    static SM mgr;
+    static IM im;
+    for (u8 i = 0; i < 5; ++i) mgr.sprite(i, g_shape, 100, (u8)((i + 1) * 10));
+    mgr.update_zones();                    // 2 zones
+    mgr.build_dli_handlers(im);
+    // Zone 0 is armed by the VBI commit; only zone 1's boundary needs a DLI.
+    CHECK(im.dli_count() == 1);
+    CHECK(im.slot(0).scanline == mgr.zone(1).boundary_scanline);
+}
+
+int main() {
+    test_five_sprites_two_zones();
+    test_four_sprites_one_zone();
+    test_nine_sprites_mapping();
+    test_commit_dirty_tracking();
+    test_sprite_hide();
+    test_dli_registration();
+
+    if (g_failures == 0) {
+        printf("ALL TESTS PASSED\n");
+    } else {
+        printf("%u FAILURES\n", g_failures);
+    }
+    return g_failures != 0;
+}

@@ -1,12 +1,161 @@
 #ifndef ENGINE_PLATFORM_ATARI_ANTIC_H
 #define ENGINE_PLATFORM_ATARI_ANTIC_H
 
-// platform/atari/antic.h — placeholder. See docs/ARCHITECTURE.md "File Organization".
-// Not yet implemented; scaffolding only.
+// platform/atari/antic.h — ANTIC display modes, display-list encoding, and the
+// per-mode geometry the display subsystem is built on.
+//
+// This header is the single source of truth for ANTIC mode geometry. The
+// portable display layer (engine/display.h) parameterises its region and view
+// templates on `antic::Mode` and derives bytes-per-line / bits-per-pixel from
+// the constexpr helpers here. That is a deliberate coupling: ANTIC modes are the
+// engine's display vocabulary today (the documented API spells
+// `engine::TextRegion<antic::Mode::MODE_2, ...>`, and game code already names
+// `antic::` — see API_DESIGN.md). When a second platform family is added, `Mode`
+// should be lifted into a portable enum with per-platform geometry traits; until
+// then keeping the geometry beside the hardware definitions is the clearest home.
+//
+// Depends only on hardware documentation (Dependency Rule 7) and types.h.
+
+#include "../../types.h"
 
 namespace atari {
 
-// TODO: implement Atari antic.
+using engine::u8;
+using engine::u16;
+
+// ── ANTIC display modes ──────────────────────────────────────────────
+//
+// The enum value is the ANTIC display-list mode nibble, so the display-list
+// "mode line" instruction byte for a region is simply `u8(Mode)` (optionally
+// OR'd with the LMS/DLI bits below). Text modes draw characters from the set at
+// CHBASE; bitmap modes draw packed pixels.
+//
+//   text:    MODE_2 (40×24, 1bpp text)   MODE_4 (40×24, 4-colour text)
+//            MODE_6 (20×24, 5-colour)    MODE_3/5/7 variants
+//   bitmap:  MODE_8 (40×24, 4-colour)    BITMAP_D (160×192, 2bpp, "GR.7")
+//            BITMAP_E (160×192, 2bpp)    BITMAP_F (320×192, 1bpp, "GR.8")
+enum class Mode : u8 {
+    MODE_2   = 0x02,
+    MODE_3   = 0x03,
+    MODE_4   = 0x04,
+    MODE_5   = 0x05,
+    MODE_6   = 0x06,
+    MODE_7   = 0x07,
+    MODE_8   = 0x08,
+    BITMAP_9 = 0x09,
+    BITMAP_A = 0x0A,
+    BITMAP_B = 0x0B,
+    BITMAP_C = 0x0C,
+    BITMAP_D = 0x0D,
+    BITMAP_E = 0x0E,
+    BITMAP_F = 0x0F,
+};
+
+// ── Display-list instruction bits / opcodes ──────────────────────────
+//
+// A display list is a byte program ANTIC's DMA executes: blank-line counts,
+// mode-line bytes (optionally with an LMS load-address prefix and/or a DLI
+// trigger), and a terminating jump. See DECISIONS.md ADR-026.
+inline constexpr u8 DL_LMS = 0x40;   // mode byte | DL_LMS => 2 address bytes follow
+inline constexpr u8 DL_DLI = 0x80;   // mode byte | DL_DLI => fire a DLI on this line
+inline constexpr u8 DL_JMP = 0x01;   // jump (2 address bytes follow)
+inline constexpr u8 DL_JVB = 0x41;   // jump + wait for vertical blank (loops the DL)
+
+// Blank-line instruction for `n` blank scanlines (1..8). Encoded as (n-1)<<4.
+constexpr u8 dl_blank(u8 n) { return static_cast<u8>((n - 1) << 4); }
+
+// ── Mode geometry ────────────────────────────────────────────────────
+//
+// `bytes_per_line` is the screen-memory width of one mode line. For text modes
+// it is the column count; for bitmap modes it is ceil(width_px * bpp / 8).
+constexpr u8 bytes_per_line(Mode m) {
+    switch (m) {
+        case Mode::MODE_2: case Mode::MODE_3:
+        case Mode::MODE_4: case Mode::MODE_5:
+            return 40;                       // 40-column text
+        case Mode::MODE_6: case Mode::MODE_7:
+            return 20;                       // 20-column text
+        case Mode::MODE_8: case Mode::BITMAP_9:
+            return 10;                       // 40 px, 2bpp / 1bpp narrow
+        case Mode::BITMAP_A: case Mode::BITMAP_B:
+            return 20;                       // 80 px
+        case Mode::BITMAP_C: case Mode::BITMAP_D: case Mode::BITMAP_E:
+            return 40;                       // 160 px (2bpp) / 320 px (1bpp C)
+        case Mode::BITMAP_F:
+            return 40;                       // 320 px, 1bpp
+    }
+    return 40;
+}
+
+// True for character (text) modes, false for bitmap/map modes.
+constexpr bool is_text(Mode m) {
+    return static_cast<u8>(m) >= 0x02 && static_cast<u8>(m) <= 0x07;
+}
+
+// Bits per pixel for bitmap modes (undefined/irrelevant for text modes, where
+// "pixels" are characters). F is hi-res 1bpp; 8/9/A..E are 2bpp; B is 1bpp.
+constexpr u8 bits_per_pixel(Mode m) {
+    switch (m) {
+        case Mode::BITMAP_F: case Mode::MODE_8: case Mode::BITMAP_C:
+            return 1;
+        case Mode::BITMAP_9: case Mode::BITMAP_B:
+            return 1;
+        default:
+            return 2;                        // 4/D/E and the 4-colour map modes
+    }
+}
+
+// Scanlines ANTIC draws for one mode line of this mode. Text rows are 8 tall;
+// the high-resolution bitmap modes (C/E/F) are 1 scanline per line, D is 2.
+constexpr u8 scanlines_per_line(Mode m) {
+    switch (m) {
+        case Mode::MODE_2: case Mode::MODE_4: case Mode::MODE_6:
+        case Mode::MODE_8:
+            return 8;
+        case Mode::MODE_3:
+            return 10;
+        case Mode::MODE_5: case Mode::MODE_7:
+            return 16;
+        case Mode::BITMAP_9: case Mode::BITMAP_A:
+            return 4;
+        case Mode::BITMAP_B: case Mode::BITMAP_D:
+            return 2;
+        case Mode::BITMAP_C: case Mode::BITMAP_E: case Mode::BITMAP_F:
+            return 1;
+    }
+    return 1;
+}
+
+// The display-list mode-line instruction byte for this mode (no LMS/DLI bits).
+constexpr u8 dl_mode_byte(Mode m) { return static_cast<u8>(m); }
+
+// ── Player/Missile memory layout ──────────────────────────────────────
+//
+// The single source of truth for the ANTIC P/M DMA layout, the basis for where
+// the sprite manager writes shape bytes (API_DESIGN.md "P/M Resolution",
+// DECISIONS.md ADR-022/023). `single` selects single-line resolution (2K block,
+// 1-scanline Y precision) vs double-line (1K block, 2-scanline steps).
+//
+// Within a block the four player strips follow the missile strip; a player's
+// byte offset for scanline Y is `pm_player_base + N*pm_strip_size + Y` (single)
+// or `... + (Y>>1)` (double). The engine reaches these through Platform::hal
+// (Dependency Rule 2) — see hal.h pm_player_offset.
+constexpr u16 pm_player_base (bool single) { return single ? 1024 : 512; }
+constexpr u16 pm_strip_size  (bool single) { return single ? 256  : 128; }
+constexpr u16 pm_missile_base(bool single) { return single ? 768  : 384; }
+
+// ── Character encoding ────────────────────────────────────────────────
+//
+// Convert an ASCII byte to its ANTIC internal screen code (the value stored in
+// screen memory, which differs from ATASCII). The internal code rotates ASCII:
+//   $20-$3F -> $00-$1F,  $40-$5F -> $20-$3F,  $60-$7F -> $40-$5F,
+//   $00-$1F -> $40-$5F.  Used by TextRegionView::print / print_num.
+constexpr u8 ascii_to_internal(char c) {
+    const u8 a = static_cast<u8>(c);
+    if (a < 0x20)  return static_cast<u8>(a + 0x40);
+    if (a < 0x60)  return static_cast<u8>(a - 0x20);
+    return a;                                 // $60-$7F map to themselves
+}
 
 } // namespace atari
 
