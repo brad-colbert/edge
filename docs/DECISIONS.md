@@ -1,9 +1,9 @@
 # Architecture Decision Records
 
 Decisions made during design, with rationale. These explain the
-“why” behind architectural choices and document tradeoffs.
+"why" behind architectural choices and document tradeoffs.
 
------
+---
 
 ## ADR-001: Bitmap-Based Slot Pools Over Free Lists
 
@@ -21,10 +21,12 @@ on a 6502.
    finds first set bit (O(N) worst case, ~40 cycles). Release is
    O(1) bit set. Iteration needs per-slot bitmap test (~8 cycles
    per slot).
-1. **Free list pool**: N-byte free list for intrusive linking.
+
+2. **Free list pool**: N-byte free list for intrusive linking.
    Acquire/release O(1) but requires separate active-tracking.
    Total overhead: N+1 bytes vs 1 byte for bitmap.
-1. **Packed pool**: Dense array with count, swap-on-release.
+
+3. **Packed pool**: Dense array with count, swap-on-release.
    Acquire O(1), release is swap (~20 cycles for 4-byte struct).
    Iteration zero overhead. Trade: unstable indices.
 
@@ -37,14 +39,14 @@ timers, events).
 **Rationale:**
 Trying to unify both patterns into a single pool type either
 wastes memory (free list adds N bytes) or sacrifices features
-(can’t support both stable indices and dense iteration). Two
+(can't support both stable indices and dense iteration). Two
 types are clearer, each optimized for its use case.
 
 **Tradeoff:**
 Game authors must pick the right pool type. Documentation and
 naming (`SlotPool` vs `PackedPool`) make the choice clear.
 
------
+---
 
 ## ADR-002: No Zero-Initialization on Pool Acquire
 
@@ -58,9 +60,10 @@ zero-initialize it?
 
 1. **Zero-initialize on acquire** (rejected): Costs ~4 cycles
    per byte of struct per acquire. For a 4-byte enemy struct,
-   that’s ~16 cycles. In a game that spawns 60 enemies per
-   second, that’s ~960 cycles per frame wasted on zeroing.
-1. **Don’t initialize; caller fills in all fields** (chosen):
+   that's ~16 cycles. In a game that spawns 60 enemies per
+   second, that's ~960 cycles per frame wasted on zeroing.
+
+2. **Don't initialize; caller fills in all fields** (chosen):
    Caller is responsible for initializing. Mirrors `malloc`
    semantics, which C++ developers understand.
 
@@ -78,7 +81,7 @@ Risk of uninitialized-field bugs if the caller forgets.
 Mitigation: document it prominently and provide examples
 showing proper usage.
 
------
+---
 
 ## ADR-003: Both Pointer and Index Release Overloads
 
@@ -92,9 +95,11 @@ showing proper usage.
 1. **Pointer only**: `release(T* ptr)`. Natural when you have
    the pointer from `acquire()`. Cost: pointer subtraction to
    recover index if needed elsewhere.
-1. **Index only**: `release(uint8_t idx)`. Efficient on 6502.
+
+2. **Index only**: `release(uint8_t idx)`. Efficient on 6502.
    Cost: game author must track indices separately.
-1. **Both overloads** (chosen): `release(T*)` and
+
+3. **Both overloads** (chosen): `release(T*)` and
    `release(uint8_t)`. Code size cost: ~20 bytes of ROM.
    Ergonomic benefit: major.
 
@@ -111,7 +116,7 @@ arithmetic in hot code. 20 bytes of ROM is cheap insurance.
 Slight code size increase. No performance impact (both are
 O(1)).
 
------
+---
 
 ## ADR-004: Capabilities as Compile-Time Traits, Not Runtime Flags
 
@@ -128,12 +133,14 @@ checks (`if (has_blitter)`) or compile-time decisions
    unused code paths remain in the binary. Dead code cannot be
    eliminated. Especially problematic for platforms where
    capability tiers have completely different rendering paths.
-1. **Compile-time traits** (chosen): Capabilities as `static constexpr` members. The compiler’s `if constexpr` eliminates
+
+2. **Compile-time traits** (chosen): Capabilities as `static
+   constexpr` members. The compiler's `if constexpr` eliminates
    dead branches entirely. Unused platform code generates zero
    bytes.
 
 **Decision:**
-Capabilities are `static constexpr` members on a platform’s
+Capabilities are `static constexpr` members on a platform's
 capability profile. The engine queries them via `if constexpr`.
 
 **Rationale:**
@@ -144,7 +151,7 @@ perfect information for optimization.
 
 **Tradeoff:**
 Less runtime flexibility. A game cannot dynamically detect
-hardware and adapt (e.g., “is VBXE present?”). This is
+hardware and adapt (e.g., "is VBXE present?"). This is
 acceptable because:
 
 - The platform is known at compile time. Games target a specific
@@ -154,7 +161,7 @@ acceptable because:
 - Dynamic detection would require the binary to include code for
   all variants anyway.
 
------
+---
 
 ## ADR-005: Independent Hardware Extension Axes Over Linear Tiers
 
@@ -171,7 +178,8 @@ independent. How should the architecture model this?
    capabilities. Problem: a real Atari can have any combination.
    U1MB + VBXE is valid. VBXE + single POKEY is valid. Linear
    tiers force false dependencies.
-1. **Independent axes** (chosen): Each extension (RAM, graphics,
+
+2. **Independent axes** (chosen): Each extension (RAM, graphics,
    sound) is a separate template parameter. Any combination is
    valid. The platform type composes them.
 
@@ -199,7 +207,7 @@ Platform configuration is slightly more verbose (four template
 parameters instead of one). The explicitness is worth it — it
 forces clarity about what hardware is expected.
 
------
+---
 
 ## ADR-006: User Assembly Integration Via Defined Seams
 
@@ -215,10 +223,12 @@ over the same hardware resources?
 1. **No assembly allowed**: Pure C++ only. Safe but excludes
    real Atari developers who need cycle-critical or hardware-
    specific routines. A ceiling, not a floor.
-1. **Assembly is allowed, users on their own**: No contracts,
+
+2. **Assembly is allowed, users on their own**: No contracts,
    no integration. Results: silent register clobbers, DLI chain
    breakage, timing overruns. Disasters.
-1. **Defined seams with cooperative resource release** (chosen):
+
+3. **Defined seams with cooperative resource release** (chosen):
    Assembly integrates through specific APIs (DLI registration,
    VBI hooks, ZP reservation, resource release). The engine
    documents the contract at each seam.
@@ -237,7 +247,7 @@ Six integration points:
 Atari development is incomplete without assembly. Rather than
 prevent it, provide clean contracts. The resource release
 pattern is the key innovation: instead of fighting over a
-register, the user tells the engine “I’m taking over channel 3”
+register, the user tells the engine "I'm taking over channel 3"
 and the engine stops touching it. Cooperation.
 
 **Tradeoff:**
@@ -246,7 +256,7 @@ things. This is acceptable because the contracts are explicit,
 the user chose to ignore them, and experienced Atari developers
 expect this level of control.
 
------
+---
 
 ## ADR-007: Static Dispatch Over Virtual Functions
 
@@ -260,12 +270,14 @@ renderers for VBXE vs baseline hardware)?
 
 1. **Virtual functions** (rejected): `virtual void render_sprite()`.
    Vtable pointer costs 2 bytes per object. With 64 sprites on
-   screen, that’s 128 bytes wasted. Indirect calls also add
+   screen, that's 128 bytes wasted. Indirect calls also add
    overhead on 6502 (no branch prediction, no pipelining).
-1. **Static dispatch via templates** (chosen): `if constexpr`
+
+2. **Static dispatch via templates** (chosen): `if constexpr`
    selects implementation at compile time. Dead branches
    eliminated entirely. Zero runtime overhead.
-1. **Function pointers** (rejected for hot paths): Used sparingly
+
+3. **Function pointers** (rejected for hot paths): Used sparingly
    (e.g., user assembly entry points) but not for inner loops.
 
 **Decision:**
@@ -279,10 +291,10 @@ branches entirely, so static dispatch is both smaller and
 faster than dynamic dispatch.
 
 **Tradeoff:**
-Less flexibility at runtime. But the flexibility isn’t needed —
+Less flexibility at runtime. But the flexibility isn't needed —
 the platform and its capabilities are compile-time constants.
 
------
+---
 
 ## ADR-008: Compile-Time Asset Construction Over Runtime Conversion
 
@@ -298,7 +310,8 @@ When should they be converted to hardware format?
    format at startup. Flexible. Problem: costs RAM for temporary
    buffers, costs cycles on startup, asset data must be editable
    (ROM not available).
-1. **Compile-time construction** (chosen): Use `constexpr`
+
+2. **Compile-time construction** (chosen): Use `constexpr`
    functions to build assets in hardware format at compile time.
    Data lives in ROM. Zero startup cost, zero RAM cost.
 
@@ -322,7 +335,7 @@ Assets must be expressed in code (not loaded from disk at
 runtime). This is acceptable for a game engine targeting
 embedded systems. Asset pipelines are a future concern.
 
------
+---
 
 ## ADR-009: One-Frame Render Buffering for Atomic Sprite Commits
 
@@ -338,7 +351,8 @@ visible frame (risky) or during VBI (safe)?
    writes directly to P/M RAM immediately. Risky: ANTIC may be
    reading P/M RAM while the CPU is writing it, causing visual
    glitches (sprite corruption mid-frame).
-1. **Write during VBI** (chosen): Game updates sprite positions
+
+2. **Write during VBI** (chosen): Game updates sprite positions
    into a buffer during the visible frame. VBI commits all
    buffered positions to hardware at once. Safe: atomic update,
    no tearing. One-frame latency.
@@ -358,7 +372,7 @@ Input-to-visual latency is two frames minimum (one frame for
 game logic, one frame for hardware commit). This is acceptable
 and expected on 6502 systems.
 
------
+---
 
 ## ADR-010: Explicit ZP Allocation Over Free-For-All
 
@@ -372,7 +386,8 @@ managed explicitly or left as a free-for-all?
 
 1. **Free-for-all**: Each subsystem and user code grabs whatever
    ZP it wants. Problem: collisions are silent and catastrophic.
-1. **Explicit allocation** (chosen): Engine declares its ZP
+
+2. **Explicit allocation** (chosen): Engine declares its ZP
    usage. Game config declares user ZP needs. Linker script
    places each region. Compiler enforces boundaries.
 
@@ -390,7 +405,7 @@ Slightly more boilerplate in the config (declare
 `user_zp_bytes`). Worth it to prevent a class of catastrophic
 bugs.
 
------
+---
 
 ## ADR-011: No Floating Point, Fixed-Point Instead
 
@@ -404,7 +419,8 @@ Math on a 6502. Floating point or fixed-point?
 1. **Floating point**: IEEE 754 or similar. No FPU on 6502.
    Software FP is very slow and very large (~500+ bytes per
    operation).
-1. **Fixed-point** (chosen): Represent numbers as scaled integers
+
+2. **Fixed-point** (chosen): Represent numbers as scaled integers
    (e.g., 8.8 fixed-point). Add, subtract, multiply use integer
    ops. Divide and square root use lookup tables.
 
@@ -414,14 +430,14 @@ Games use fixed-point for any math beyond integers.
 
 **Rationale:**
 6502 has no FPU. Fixed-point is the practical middle ground
-between “integer only” and “floating point at any cost.”
+between "integer only" and "floating point at any cost."
 
 **Tradeoff:**
 Game author must understand fixed-point scaling and be careful
 with overflow. Mitigation: provide examples and a small math
 library.
 
------
+---
 
 ## ADR-012: Header-Only Engine Libraries Over Linked Modules
 
@@ -436,7 +452,8 @@ units?
 1. **Separate translation units**: Faster compilation, smaller
    object files. Problem: link-time overhead on a 6502 build,
    requires careful symbol management.
-1. **Header-only** (chosen, with exceptions): Templates are
+
+2. **Header-only** (chosen, with exceptions): Templates are
    header-only by necessity. Most small subsystems are header-
    only. Larger subsystems that need per-platform implementation
    may have a thin .cpp file.
@@ -452,28 +469,29 @@ one header.
 
 **Tradeoff:**
 Longer compilation times. Mitigation: most games will not
-rebuild the engine frequently (it’s stable); only game code
+rebuild the engine frequently (it's stable); only game code
 changes often.
 
------
+---
 
 ## ADR-013: No Scanline-Sync Hook (Busy-Wait Is Anti-Pattern)
 
 **Status:** Accepted
 
 **Context:**
-Should the engine provide an easy way to say “run this code at
-scanline N”?
+Should the engine provide an easy way to say "run this code at
+scanline N"?
 
 **Options Considered:**
 
 1. **Scanline-sync hook**: `Game::at_scanline(100, callback)`.
    Internally polls VCOUNT until scanline 100. Problem: wastes
    hundreds of cycles per frame polling.
-1. **No dedicated hook; redirect to better patterns** (chosen):
-- DLI for scanline-precise effects
-- Main-thread effect for non-precise effects
-- POKEY timer for timed interrupts
+
+2. **No dedicated hook; redirect to better patterns** (chosen):
+   - DLI for scanline-precise effects
+   - Main-thread effect for non-precise effects
+   - POKEY timer for timed interrupts
 
 **Decision:**
 Do not provide an `at_scanline` hook. Document why in
@@ -489,7 +507,7 @@ timer).
 Slightly less convenience. Gain: honesty about costs, and game
 authors learn the right patterns.
 
------
+---
 
 ## ADR-014: Shared-Buffer Screen Switching Over Per-Screen Allocation
 
@@ -508,13 +526,15 @@ engine manage memory across these states?
    Problem: a title screen bitmap (7680 bytes) + gameplay bitmap
    (7200 bytes) + high score text (960 bytes) = 15,840 bytes of
    screen RAM. Wasteful — only one screen is active at a time.
-1. **Manual management**: Engine provides no screen concept. Game
+
+2. **Manual management**: Engine provides no screen concept. Game
    author tears down and rebuilds display lists, DLI chains, and
    screen memory manually on each transition. Works, but this is
    exactly the boilerplate an engine should eliminate.
-1. **Shared buffer with compile-time union** (chosen): Engine
+
+3. **Shared buffer with compile-time union** (chosen): Engine
    computes the maximum screen RAM across all declared screens.
-   Allocates one shared buffer of that size. Each screen’s
+   Allocates one shared buffer of that size. Each screen's
    display list points into the same buffer. `set_screen<S>()`
    reconfigures the display list, clears memory, and rebuilds
    the DLI chain.
@@ -549,5 +569,382 @@ perfect knowledge of all possible screens, enabling:
   infrequent events.
 - DLIs registered with `add_dli` are cleared on screen change.
   Persistent DLIs require `add_persistent_dli`. This prevents
-  stale DLI handlers from firing on a screen they weren’t
+  stale DLI handlers from firing on a screen they weren't
   designed for.
+
+---
+
+## ADR-015: State Sharing Over Input Sharing for Multiplayer
+
+**Status:** Accepted
+
+**Context:**
+Multiplayer games need to synchronize across machines. Two
+primary models exist: input sharing (every machine runs the
+full simulation with shared inputs) and state sharing (one
+authoritative host sends state snapshots to clients).
+
+**Options Considered:**
+
+1. **Input sharing**: Each player sends joystick state to all
+   others. Every machine runs the full simulation identically.
+   Low bandwidth. Problem: requires perfectly deterministic
+   game logic. Same inputs must produce same results on every
+   machine. Random numbers, frame timing differences, and
+   math precision drift cause desync. Debugging desync is
+   extremely difficult.
+
+2. **State sharing** (chosen): One machine is the authoritative
+   host. It runs the simulation, sends state snapshots to
+   clients. Clients send their input to the host and render
+   received state. Higher bandwidth but tolerates non-
+   determinism. No desync possible — host is the truth.
+
+**Decision:**
+The engine uses state sharing. One machine hosts, others are
+clients. The host runs the game simulation. Clients are thin
+renderers that send input and display received state.
+
+**Rationale:**
+State sharing is more robust on a 6502 where random number
+generators, timing, and math precision can vary between
+machines. Deterministic input sharing is fragile in this
+environment.
+
+Fujinet's SIO latency (~1-3ms per transaction) makes frame-
+by-frame input sharing impractical anyway. State snapshots
+sent every 2-4 frames work within the bandwidth budget.
+
+**Tradeoffs:**
+
+- Higher bandwidth than input sharing. Mitigation: state
+  messages are game-defined and can be as compact as needed.
+  A 16-byte snapshot every 2 frames is ~480 bytes/sec.
+- Visible lag on clients (2-4 frames, 33-66ms at 60 FPS).
+  Usually acceptable. Client-side prediction can reduce
+  perceived lag.
+- Host has more CPU load (simulation + network I/O).
+- The game must define and maintain compact state structs.
+
+---
+
+## ADR-016: Polled Network I/O Over Interrupt-Driven
+
+**Status:** Accepted
+
+**Context:**
+When should network I/O happen during the frame?
+
+**Options Considered:**
+
+1. **VBI-driven**: Poll network during vertical blank. Problem:
+   Fujinet SIO transactions take 1-3ms. VBI budget is already
+   contested by sound, input, and sprite commits. A 2ms SIO
+   transaction would consume most of the available VBI time.
+
+2. **Interrupt-driven**: Network hardware fires interrupt on
+   packet arrival. Problem: Fujinet uses SIO which is polled,
+   not interrupt-driven. Would require custom hardware support.
+
+3. **Polled during game loop** (chosen): Game calls
+   `Game::net.poll()` once per frame during the main game
+   callback. Predictable timing, no VBI budget impact.
+
+**Decision:**
+Network I/O is polled by the game during its frame callback.
+The game controls when the SIO transaction happens.
+
+**Rationale:**
+SIO transactions are too slow for VBI context. Polling gives
+the game author explicit control over when network I/O happens
+in their frame budget. They can skip polling on frames where
+they're tight, or poll early when they have cycles to spare.
+
+**Tradeoff:**
+Adds ~1-3ms to the game's frame time on frames that poll.
+The game must explicitly call `poll()`. Forgetting to poll
+means no network activity. This is acceptable — explicit is
+better than hidden cost.
+
+---
+
+## ADR-017: Register Pointers as Inline Const, Not Constexpr
+
+**Status:** Accepted
+
+**Context:**
+The engine needs to provide hardware register addresses as
+typed pointers (e.g., `*atari::reg::COLPF0 = 0x2A`). The
+natural C++ approach is `constexpr volatile uint8_t*`, but
+`reinterpret_cast` from integer to pointer is not a constant
+expression in standard C++. This was discovered empirically
+when `mos-clang++` rejected the constexpr form.
+
+**Options Considered:**
+
+1. **`constexpr` pointer** (rejected): Not legal C++.
+   `reinterpret_cast<volatile uint8_t*>(0xD016)` is not a
+   constant expression. The compiler rejects it.
+
+2. **`inline volatile uint8_t* const`** (chosen): Statically
+   initialized to the absolute address. No `.init_array` or
+   runtime initialization overhead. Usage syntax is identical
+   to constexpr (`*atari::reg::COLPF0 = value`).
+
+3. **Preprocessor macros** (rejected): `#define COLPF0
+   (*(volatile uint8_t*)0xD016)`. Works but loses type safety,
+   namespace scoping, and IDE support. Not C++.
+
+**Decision:**
+Register pointers are `inline volatile uint8_t* const`.
+Each register also gets a `constexpr uint16_t NAME_ADDR`
+constant for compile-time address arithmetic.
+
+**Rationale:**
+The `inline const` form produces identical code to a constexpr
+pointer — the compiler statically embeds the address. The
+`constexpr` address constant covers the rare case where
+compile-time math on register addresses is needed.
+
+**Impact:**
+This applies to every platform HAL, not just Atari. All future
+platform register definitions should follow this pattern.
+
+---
+
+## ADR-018: PAL/NTSC as a Sixth Platform Axis
+
+**Status:** Accepted
+
+**Context:**
+PAL and NTSC Atari machines differ in CPU frequency, frame
+rate, cycles per frame, and visible scanline count. These
+differences affect timing budgets throughout the engine. The
+original design listed PAL/NTSC under "Variant Considerations"
+but did not model it as a platform axis.
+
+**Options Considered:**
+
+1. **Runtime detection**: Read the PAL register at startup and
+   set a runtime flag. Flexible. Problem: timing budgets are
+   used in compile-time calculations (DLI cycle budgets, frame
+   budget validation). Runtime detection defeats `static_assert`
+   validation and forces both code paths into the binary.
+
+2. **GameConfig parameter**: Put PAL/NTSC in the game config
+   rather than the platform. Problem: it's a property of the
+   hardware, not the game. A game doesn't choose PAL or NTSC —
+   the machine determines it.
+
+3. **Platform axis** (chosen): Add `atari::TV::NTSC` /
+   `atari::TV::PAL` as a sixth template parameter on
+   `atari::Platform`. Consistent with the independent-axis
+   model. PAL and NTSC builds are separate binaries with
+   different timing constants.
+
+**Decision:**
+TV standard is a sixth independent axis on the Platform
+template:
+
+```cpp
+using MyPlatform = atari::Platform<
+    atari::Machine::XL,
+    atari::RAM::Baseline,
+    atari::Graphics::Baseline,
+    atari::Sound::Mono,
+    atari::TV::NTSC,
+    atari::Network::None
+>;
+```
+
+**Rationale:**
+PAL/NTSC is a hardware property, not a game choice. It affects
+timing capabilities that are queried at compile time. Modeling
+it as an axis means:
+
+- `static_assert` on frame budgets uses the correct cycle count
+- DLI cycle budgets are accurate for the target system
+- Dead code elimination removes the wrong timing path entirely
+- A developer ships two binaries (PAL and NTSC), which is
+  standard practice in Atari development
+
+**Tradeoff:**
+The Platform template now has six parameters. This is more
+verbose but each parameter is meaningful. Type aliases
+(`StockXL_NTSC`, `StockXL_PAL`) mitigate the verbosity.
+
+TV is the 5th parameter (before Network) because it has no
+default — you must specify your target system. Network is 6th
+with a default of None, since most games don't use it. C++
+requires defaulted template parameters to follow non-defaulted
+ones.
+
+Developers who want a single binary that detects PAL/NTSC at
+runtime can still do so by querying the PAL register and
+branching — but they lose compile-time timing validation. The
+engine doesn't prevent this; it just doesn't optimize for it.
+
+---
+
+## ADR-019: Two-Tier DLI Dispatch (Engine Raw, User Wrapped)
+
+**Status:** Accepted
+
+**Context:**
+DLI handlers on the Atari have tight cycle budgets (50-100
+usable cycles depending on the scanline). A general-purpose
+dispatcher that saves all registers, looks up the handler in
+a table, calls it via self-modifying JSR, chains to the next
+handler, restores registers, and executes RTI costs roughly
+80 cycles of overhead. That leaves almost nothing for actual
+work.
+
+llvm-mos does not support `__attribute__((interrupt))`, so
+the compiler cannot generate minimal interrupt prologues
+automatically. Manual assembly wrappers are required.
+
+**Options Considered:**
+
+1. **All DLIs through dispatcher**: Uniform, simple. Problem:
+   80-cycle overhead makes most DLIs useless. The multiplexer
+   needs to reprogram P/M registers in tight scanline windows
+   and can't afford the overhead.
+
+2. **All DLIs raw**: No overhead. Problem: every user who wants
+   a simple color change must write assembly.
+
+3. **Two-tier dispatch** (chosen): Engine-internal DLIs
+   (multiplex, scroll) are raw handlers authored by the engine,
+   saving only the registers they actually use (~20-30 cycle
+   overhead). User C++ DLIs go through the dispatcher (~80
+   cycle overhead). User raw DLIs bypass the dispatcher
+   entirely (zero engine overhead).
+
+**Decision:**
+Engine DLIs are raw handlers. User C++ DLIs go through a
+dispatcher. User raw DLIs are direct.
+
+**Rationale:**
+The engine knows exactly which registers its own handlers
+touch and can minimize save/restore. User C++ handlers get
+the convenience of automatic save/restore at the cost of
+~80 cycles — acceptable for color changes and register writes
+on generous scanlines. Users who need tighter timing write raw
+handlers, which is expected for advanced Atari development.
+
+The cycle overhead (~80 cycles for C++ handlers) is documented
+in the API so the user can make an informed choice.
+
+**Tradeoff:**
+User C++ DLI handlers have limited useful cycle budget.
+Documentation must be clear about the overhead and when to
+switch to raw handlers.
+
+---
+
+## ADR-020: Non-Capturing Lambdas Only for C++ DLI Handlers
+
+**Status:** Accepted
+
+**Context:**
+The C++ DLI handler API accepts a lambda:
+
+```cpp
+Game::interrupts.add_dli(scanline, [](DLIContext& ctx) {
+    ctx.write_colpf0(0x2A);
+});
+```
+
+Should capturing lambdas be supported?
+
+**Options Considered:**
+
+1. **Allow capturing lambdas**: The DLI slot must store the
+   capture data alongside the function pointer. For a lambda
+   capturing one `u8`, that's 1 extra byte per slot. For
+   arbitrary captures, storage is unbounded. The dispatcher
+   must pass the capture data to the handler, adding complexity
+   and cycles.
+
+2. **Non-capturing only** (chosen): The lambda converts to a
+   plain function pointer (`void (*)()`). DLI slot remains
+   4 bytes. No capture storage, no capture passing overhead.
+   Any data the handler needs must be in static variables.
+
+**Decision:**
+C++ DLI handlers must be non-capturing lambdas (or plain
+function pointers). The DLIContext object provides typed
+register write methods. Any runtime data (colors, scroll
+values) should be in static variables the handler references.
+
+**Rationale:**
+DLI handlers run in interrupt context with brutal cycle
+budgets. Every byte of capture storage and every cycle of
+capture-passing overhead matters. Non-capturing lambdas are
+zero-cost — the compiler converts them to plain function
+pointers. Static variables for handler data is the standard
+6502 pattern and has zero indirection overhead.
+
+**Tradeoff:**
+Slightly less ergonomic — the user can't write
+`[color](auto& ctx) { ctx.write_colpf0(color); }`. They
+must use a static variable:
+
+```cpp
+static u8 dli_color = 0x2A;
+Game::interrupts.add_dli(scanline, [](DLIContext& ctx) {
+    ctx.write_colpf0(dli_color);
+});
+```
+
+This is a minor inconvenience that avoids a class of memory
+and performance problems.
+
+---
+
+## ADR-021: Self-Modifying JSR for DLI Dispatcher
+
+**Status:** Accepted
+
+**Context:**
+The DLI dispatcher needs to call a handler whose address is
+known only at runtime (looked up from a table). The 6502 does
+not have a JSR (indirect) instruction. How does the dispatcher
+call the handler?
+
+**Options Considered:**
+
+1. **JMP (indirect)**: 6502 has JMP ($addr). Problem: JMP
+   doesn't push a return address, so the handler can't return
+   to the dispatcher. Also has the NMOS page-boundary bug.
+
+2. **RTS trick**: Push return_address-1 on the stack, then JMP
+   to the handler. Handler executes RTS which pops the return
+   address. Works but adds stack manipulation overhead (~10
+   extra cycles).
+
+3. **Self-modifying JSR** (chosen): Patch the operand of a JSR
+   instruction in RAM before executing it. The dispatcher
+   writes the handler address into the two bytes following the
+   JSR opcode, then falls through to execute the patched JSR.
+   Standard 6502 technique.
+
+**Decision:**
+The dispatcher uses self-modifying code to patch a JSR target.
+This is safe because all code runs from RAM (no ROM cartridges
+in scope — see ADR-018 discussion), and the modification
+happens in the dispatcher's own code, not in user code.
+
+**Rationale:**
+Self-modifying code is a standard, well-understood 6502
+pattern. It's the most cycle-efficient way to do an indirect
+subroutine call. The code is in RAM (disk-loaded programs,
+not burned ROMs), so modification is safe. The JSR pushes a
+proper return address, so the handler returns cleanly with RTS.
+
+**Tradeoff:**
+Self-modifying code is harder to reason about than pure code.
+The modification is confined to a single well-documented
+location in the dispatcher. Future platforms that use ROM-
+resident code would need a different approach (RTS trick or
+jump table).

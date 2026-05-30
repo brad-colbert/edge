@@ -12,17 +12,17 @@ functions, compile-time configuration).
 
 Before describing subsystems in isolation, here is a minimal
 but complete game written against the engine API. This is the
-reference for what “feels right” — if any subsystem API makes
+reference for what "feels right" — if any subsystem API makes
 this game harder to write, the API is wrong.
 
-The game: “Survivors.” Single screen. Player moves in 4
+The game: "Survivors." Single screen. Player moves in 4
 directions. Enemies spawn from edges, move toward player.
 Player shoots in the direction they face. Score at top, three
 lives. Exercises: P/M graphics, collision, sound, input,
 display list, game state, game loop.
 
 This sketch uses the single-screen shorthand for simplicity.
-For games with multiple screen states, see “Screen Management.”
+For games with multiple screen states, see "Screen Management."
 
 ```cpp
 #include <engine/engine.h>
@@ -33,7 +33,8 @@ using Platform = atari::Platform<
     atari::Machine::XL,
     atari::RAM::Baseline,
     atari::Graphics::Baseline,
-    atari::Sound::Mono
+    atari::Sound::Mono,
+    atari::TV::NTSC
 >;
 
 struct GameConfig {
@@ -226,16 +227,19 @@ using Platform = atari::Platform<
     atari::Machine::XL,       // 400, 800, XL, XE
     atari::RAM::Baseline,     // Baseline, XE128, Rambo256, U1MB
     atari::Graphics::Baseline, // Baseline, VBXE
-    atari::Sound::Mono        // Mono, Stereo, PokeyMax
+    atari::Sound::Mono,       // Mono, Stereo, PokeyMax
+    atari::TV::NTSC,          // NTSC, PAL
+    atari::Network::None      // None, Fujinet (default: None)
 >;
 ```
 
 Common combinations are provided as aliases:
 
 ```cpp
-using Platform = atari::StockXL;     // XL, Baseline everything
-using Platform = atari::ExpandedXE;  // XE, 128K, Baseline gfx/snd
-using Platform = atari::FullUpgrade; // XL, U1MB, VBXE, PokeyMax
+using Platform = atari::StockXL_NTSC;   // XL, Baseline everything, NTSC
+using Platform = atari::StockXL_PAL;    // XL, Baseline everything, PAL
+using Platform = atari::ExpandedXE;     // XE, 128K, Baseline gfx/snd, NTSC
+using Platform = atari::FullUpgrade;    // XL, U1MB, VBXE, PokeyMax, NTSC
 ```
 
 ### GameConfig — Canonical Structure
@@ -328,6 +332,14 @@ struct GameConfig {
     // ── User Extension ──
     static constexpr uint8_t user_zp_bytes = 0;
     static constexpr uint16_t user_ram     = 0;
+
+    // ── Network (only if platform has network) ──
+    static constexpr uint8_t net_max_players    = 4;
+    static constexpr uint8_t net_send_buffer    = 32;  // bytes
+    static constexpr uint8_t net_recv_buffer    = 32;  // bytes
+    static constexpr uint8_t net_state_size     = 16;  // bytes per snapshot
+    static constexpr uint8_t net_input_size     = 2;   // bytes per input msg
+    static constexpr uint8_t net_send_interval  = 2;   // send every N frames
 };
 ```
 
@@ -430,7 +442,7 @@ struct GameConfig {
 
 With this option, the engine does not construct a display list.
 The user builds it manually via platform HAL calls or inline
-data. The engine’s text and bitmap subsystems are unavailable
+data. The engine's text and bitmap subsystems are unavailable
 unless the user registers screen memory regions manually.
 
 This is an escape hatch. Most games should use single mode or
@@ -483,7 +495,7 @@ All screens are collected in `ScreenSet` within GameConfig.
 ### Memory Sharing
 
 All screens share a single screen memory buffer, sized to the
-largest screen’s requirements. Only one screen is active at a
+largest screen's requirements. Only one screen is active at a
 time. This mirrors what experienced Atari developers do
 manually — reuse screen RAM across game states. See
 DECISIONS.md ADR-014 for rationale.
@@ -497,12 +509,12 @@ Game::set_screen<GameplayScreen>();
 This single call:
 
 1. Waits for VBI (safe transition point)
-1. Installs new display list
-1. Clears screen memory
-1. Reconfigures DLI chain (removes old DLIs, installs new
+2. Installs new display list
+3. Clears screen memory
+4. Reconfigures DLI chain (removes old DLIs, installs new
    engine DLIs per screen config)
-1. Enables/disables sprites and scroll per screen config
-1. Updates CHBASE if character set differs
+5. Enables/disables sprites and scroll per screen config
+6. Updates CHBASE if character set differs
 
 ### Screen Transition Callback
 
@@ -520,7 +532,7 @@ Game::set_screen<GameplayScreen>([]() {
 
 Non-persistent user DLIs are cleared on screen change. The
 engine reinstalls its own DLIs (multiplex, scroll) based on
-the new screen’s configuration.
+the new screen's configuration.
 
 ```cpp
 // Cleared on screen change (default)
@@ -824,7 +836,7 @@ input.select()        // SELECT key
 input.option()        // OPTION key
 ```
 
-These are exposed through the input snapshot even though they’re
+These are exposed through the input snapshot even though they're
 Atari-specific, because they map to equivalent concepts on other
 platforms (pause, menu, option).
 
@@ -841,7 +853,7 @@ input.fire_pressed(1)
 ```
 
 Port count is capability-gated. Querying a port beyond the
-platform’s capacity returns false (no crash, no UB).
+platform's capacity returns false (no crash, no UB).
 
 ### Memory Cost
 
@@ -957,7 +969,7 @@ col.player_to_playfield(0) // did Player 0 hit a playfield color?
                             // returns bitmask of which colors
 ```
 
-Collision data is read-only. It reflects the previous frame’s
+Collision data is read-only. It reflects the previous frame's
 rendering (due to one-frame buffer latency). The engine handles
 latch timing and register clearing.
 
@@ -1143,6 +1155,230 @@ documentation).
   counter, current frequency, current volume)
 - Total: `sound_channels * 4` bytes
 
+## Network (Implementation Deferred)
+
+Multiplayer networking via Fujinet. Uses a state-sharing model:
+one machine is the authoritative host, clients send input and
+receive state. The API is designed; implementation is deferred.
+
+Network is capability-gated. Games compiled without
+`atari::Network::Fujinet` (or equivalent) do not have
+`Game::net` available — referencing it is a compile error.
+Zero cost when unused.
+
+### Game-Defined Messages
+
+The game defines its own state and input message structs.
+The engine sends raw bytes — it doesn't impose a format.
+Messages must be plain data (no pointers, no padding-sensitive
+layouts):
+
+```cpp
+// Input sent from client to host
+struct NetInput {
+    uint8_t joy;       // packed: up/down/left/right/fire
+    uint8_t sequence;  // frame counter for ordering
+};
+
+// State sent from host to clients
+struct NetState {
+    uint8_t player_x[4];
+    uint8_t player_y[4];
+    uint8_t player_lives[4];
+    uint8_t enemy_count;
+    uint8_t score_hi;
+    uint8_t score_lo;
+    uint8_t frame;
+};
+
+static_assert(sizeof(NetState) <= GameConfig::net_state_size,
+    "NetState exceeds declared net_state_size");
+static_assert(sizeof(NetInput) <= GameConfig::net_input_size,
+    "NetInput exceeds declared net_input_size");
+```
+
+### Connection Management
+
+```cpp
+// Host a game — listen on specified port
+Game::net.host(port);
+
+// Join a game — connect to host
+Game::net.join(host_address, port);
+
+// Disconnect
+Game::net.disconnect();
+
+// Connection state
+Game::net.connected()        // bool: active connection?
+Game::net.is_host()          // bool: are we the host?
+Game::net.player_count()     // connected player count
+Game::net.local_player_id()  // our player index (0-based)
+```
+
+### Network I/O
+
+Network I/O is polled explicitly by the game. The engine does
+not poll automatically — the game controls when the (expensive)
+SIO transaction happens:
+
+```cpp
+// Poll network — processes incoming, flushes outgoing
+// Call once per frame (or every N frames to save cycles)
+Game::net.poll();
+```
+
+### Sending
+
+```cpp
+// Host: broadcast state to all clients
+Game::net.broadcast_state(state);
+
+// Client: send input to host
+Game::net.send_input(input);
+```
+
+The engine handles framing, addressing, and delivery. The game
+provides the raw struct. Messages are queued internally and
+flushed on the next `poll()`.
+
+### Receiving
+
+```cpp
+// Host: read client inputs
+while (auto msg = Game::net.receive_input()) {
+    uint8_t from = msg->player_id;
+    apply_remote_input(from, msg->data);
+}
+
+// Client: read latest state from host
+if (auto state = Game::net.receive_state()) {
+    apply_state(state->data);
+}
+```
+
+`receive_state` returns the most recent state snapshot,
+discarding older ones if multiple arrived since last poll.
+This is intentional — stale state is useless, only the
+latest matters.
+
+### Host Game Loop
+
+```cpp
+void game_loop_host() {
+    Game::set_screen<GameplayScreen>([]() { init_game(); });
+
+    Game::run_until([](const engine::Input& input) -> bool {
+        Game::net.poll();
+
+        // Apply local input
+        update_player(Game::net.local_player_id(), input);
+
+        // Apply remote inputs
+        while (auto msg = Game::net.receive_input()) {
+            apply_remote_input(msg->player_id, msg->data);
+        }
+
+        // Run simulation (host is authoritative)
+        update_enemies();
+        check_collisions();
+
+        // Send state to clients (every N frames)
+        if (frame % GameConfig::net_send_interval == 0) {
+            NetState state = build_state_snapshot();
+            Game::net.broadcast_state(state);
+        }
+
+        render();
+        frame++;
+        return game_over;
+    });
+}
+```
+
+### Client Game Loop
+
+```cpp
+void game_loop_client() {
+    Game::set_screen<GameplayScreen>([]() { init_game(); });
+
+    Game::run_until([](const engine::Input& input) -> bool {
+        Game::net.poll();
+
+        // Send our input to host
+        NetInput my_input{pack_joystick(input), frame_counter};
+        Game::net.send_input(my_input);
+
+        // Receive and apply latest state
+        if (auto state = Game::net.receive_state()) {
+            apply_state(state->data);
+        }
+
+        // Client only renders — no simulation
+        render();
+        frame_counter++;
+        return disconnected;
+    });
+}
+```
+
+### Lobby / Connection Screen
+
+```cpp
+void lobby() {
+    Game::set_screen<LobbyScreen>([]() { draw_lobby(); });
+
+    if (hosting) {
+        Game::net.host(5000);
+    } else {
+        Game::net.join(host_addr, 5000);
+    }
+
+    Game::run_until([](const engine::Input& input) -> bool {
+        Game::net.poll();
+        draw_player_count(Game::net.player_count());
+        return input.start_pressed()
+            && Game::net.player_count() >= 2;
+    });
+}
+```
+
+### Network Resource Release
+
+For user assembly that needs direct Fujinet/SIO access:
+
+```cpp
+Game::net.suspend();    // engine stops network polling
+// user can issue raw SIO commands to Fujinet
+
+Game::net.resume();     // engine resumes management
+```
+
+### Memory Cost
+
+All network memory is statically allocated:
+
+- Send buffer: `net_send_buffer` bytes
+- Receive buffer: `net_recv_buffer` bytes
+- Connection state: ~8 bytes (addresses, player IDs, flags)
+- Per-player state: ~2 bytes × `net_max_players`
+- Total: `net_send_buffer + net_recv_buffer + 8 + 2*max_players`
+
+Example: 32-byte buffers, 4 players = 80 bytes total.
+
+### Bandwidth Budget
+
+Approximate, assuming Fujinet over UDP:
+
+- SIO transaction overhead: ~1ms base + ~0.1ms per byte
+- 16-byte state packet: ~2.6ms per send
+- 2-byte input packet: ~1.2ms per send
+- At send_interval=2 (every other frame): ~1.3ms average
+  per frame for host, ~0.6ms average for client
+
+These are rough estimates. Actual performance depends on
+Fujinet firmware, WiFi conditions, and SIO bus contention.
+
 ## Tiles and Screen
 
 ### Region-Scoped Text Operations
@@ -1242,21 +1478,83 @@ Game::scroll.resume();    // engine resumes management
 
 ## Interrupts and Hooks
 
-### DLI Registration
+The interrupt manager uses a two-tier DLI dispatch model.
+Understanding the overhead of each tier helps you choose the
+right approach. See DECISIONS.md ADR-019/020/021 for rationale.
+
+### DLI Handler Tiers
+
+**Tier 1: C++ handlers (~80 cycle overhead)**
+
+The engine wraps the handler with automatic register save/
+restore (A, X, Y), chain-to-next-handler setup, and RTI.
+The wrapper uses a self-modifying JSR to call the handler.
+Suitable for color changes, simple register writes, and other
+work on scanlines with generous cycle budgets.
 
 ```cpp
-// C++ handler (engine manages save/restore and chaining)
-Game::interrupts.add_dli(scanline, [](auto& ctx) {
-    ctx.write_colpf0(0x2A);
-    ctx.write_colpf1(0x84);
-});
+// Handler must be a non-capturing lambda or function pointer.
+// Any data the handler needs goes in static variables.
+static u8 sky_color = 0x94;
 
-// Raw assembly handler (user manages everything)
-extern "C" void my_dli_handler();
+Game::interrupts.add_dli(scanline, []() {
+    *atari::reg::COLBK = sky_color;
+});
+```
+
+Handlers are non-capturing lambdas only (see ADR-020). The
+compiler converts them to plain function pointers at zero
+cost. Capturing lambdas would require per-slot capture storage
+and passing overhead, which is unacceptable in interrupt
+context.
+
+Approximate cycle budget for C++ handlers:
+
+```
+DLI budget (typical):    ~100 cycles
+Engine overhead:          ~80 cycles
+Available for handler:    ~20 cycles (3-4 register writes)
+```
+
+For wider mode lines or blank lines, budgets are more generous
+and more work fits in a C++ handler.
+
+**Tier 2: Raw handlers (zero engine overhead)**
+
+User manages register save/restore, VDSLST chaining, and RTI.
+Full cycle budget available. Required for timing-critical work.
+
+```cpp
+extern "C" void my_dli_handler();  // defined in .s file
 Game::interrupts.add_raw_dli(scanline, my_dli_handler);
 ```
 
-The DLI context object (`ctx`) provides typed register writes:
+The raw handler contract:
+
+- Save any registers you modify (PHA, TXA/PHA, TYA/PHA)
+- Do your work
+- Load the next handler address and store it in VDSLST
+  ($0200/$0201). The engine provides a helper:
+  `Game::interrupts.next_dli_addr()` returns the address
+  of the next handler in the chain.
+- Restore registers
+- Execute RTI
+
+### DLI Context Object
+
+For C++ handlers that need typed register writes without
+including platform headers, a DLIContext is available:
+
+```cpp
+Game::interrupts.add_dli(scanline, [](DLIContext& ctx) {
+    ctx.write_colpf0(0x2A);
+    ctx.write_colpf1(0x84);
+});
+```
+
+Each `write_*` method compiles to a single `LDA #imm / STA addr`
+pair. The DLIContext struct has zero storage — it's purely a
+namespace for these operations:
 
 ```cpp
 ctx.write_colpf0(value)   // COLPF0
@@ -1268,6 +1566,10 @@ ctx.write_chbase(value)   // character set base
 ctx.write_hscrol(value)   // horizontal scroll
 ctx.write_vscrol(value)   // vertical scroll
 ```
+
+Note: when using DLIContext, the handler signature takes
+`DLIContext&` as a parameter. The engine provides a static
+instance; the reference adds no runtime cost.
 
 ### DLI Persistence Across Screen Changes
 
@@ -1281,12 +1583,31 @@ Game::interrupts.add_persistent_dli(scanline, handler);
 
 ### DLI Priority
 
-When multiple subsystems request DLIs on the same scanline,
-the interrupt manager chains them in priority order:
+When multiple DLIs land on the same scanline, the interrupt
+manager chains them in priority order:
 
 1. Engine multiplex (sprite register reprogramming)
-1. Engine scroll (scroll register updates)
-1. User DLI handlers (in registration order)
+2. Engine scroll (scroll register updates)
+3. User DLI handlers (in registration order)
+
+Engine DLIs are raw handlers internally — the engine knows
+exactly which registers they touch and saves only those,
+keeping overhead to ~20-30 cycles.
+
+### Interrupt Manager Configuration
+
+MaxDLIs and MaxVBIHooks are template parameters on the
+InterruptManager, not GameConfig fields:
+
+```cpp
+// Engine default: 12 DLI slots, 4 VBI hooks
+// Override if your game needs more or fewer:
+using MyInterrupts = engine::InterruptManager<Platform, 16, 2>;
+```
+
+Memory cost: `MaxDLIs * 8 + MaxVBIHooks * 2 + 44` bytes RAM
+plus 2 bytes of zero page. For defaults (12 DLIs, 4 VBI hooks):
+approximately 152 bytes RAM.
 
 ### VBI Hooks
 
@@ -1294,6 +1615,11 @@ the interrupt manager chains them in priority order:
 extern "C" void my_vbi_work();
 Game::interrupts.add_vbi_hook(my_vbi_work);
 ```
+
+User VBI hooks run after all engine VBI housekeeping (input
+capture, sound tick, sprite commit, collision latch, multiplex
+zone computation, DLI chain build). The user gets whatever
+cycles remain in the deferred VBI period.
 
 ### Render Phase Hooks
 
@@ -1419,13 +1745,15 @@ released:
 Game::sound.release_channel(n);    // sound channel
 Game::sprites.release_player(n);   // P/M player
 Game::scroll.suspend();            // scroll registers
+Game::net.suspend();               // network (Fujinet/SIO)
 
 Game::sound.reclaim_channel(n);
 Game::sprites.reclaim_player(n);
 Game::scroll.resume();
+Game::net.resume();
 ```
 
-See ARCHITECTURE.md “User Extension Points” for full contracts.
+See ARCHITECTURE.md "User Extension Points" for full contracts.
 
 ## Register Access
 
@@ -1441,4 +1769,4 @@ uint8_t vcount = *atari::reg::VCOUNT;
 
 These are `volatile uint8_t*` constants pointing to hardware
 addresses. Using them bypasses the engine entirely. Consequences
-are documented in ARCHITECTURE.md “Direct Hardware Access.”
+are documented in ARCHITECTURE.md "Direct Hardware Access."

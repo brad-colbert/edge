@@ -80,7 +80,9 @@ using MyPlatform = atari::Platform<
     atari::Machine::XL,
     atari::RAM::Rambo256,
     atari::Graphics::Baseline,
-    atari::Sound::Stereo
+    atari::Sound::Stereo,
+    atari::TV::NTSC,
+    atari::Network::Fujinet     // optional, default: None
 >;
 ```
 
@@ -172,12 +174,21 @@ distinguish platforms with fundamentally different pixel modes.
 - `has_vbi` — vertical blank interrupt
 - `has_raster_interrupt` — (shared with graphics)
 
+**Network capabilities:**
+
+- `has_network` — network hardware present
+- `network_transport` — transport type (UDP, TCP, serial)
+- `network_reliable` — whether transport guarantees delivery
+- `network_max_payload` — maximum bytes per send
+- `network_latency_ms` — approximate round-trip latency
+
 ## Engine Subsystems
 
 The Engine API is composed of subsystems. Each subsystem is a
 template parameterized by the platform type and optionally by
 game configuration values. Subsystems are not independent
-objects — they are facets of the single `engine::Core<Platform, GameConfig>` instance, sharing the same platform type and
+objects — they are facets of the single `engine::Core<Platform,
+GameConfig>` instance, sharing the same platform type and
 configuration.
 
 ```
@@ -187,9 +198,9 @@ configuration.
 │  │  Sprites  │ │  Tiles   │ │  Sound   │ │  Input  │ │
 │  └────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬────┘ │
 │       │            │            │             │       │
-│  ┌────┴─────┐ ┌────┴─────┐     │             │       │
-│  │Multiplex │ │ Scroll   │     │             │       │
-│  └────┬─────┘ └────┬─────┘     │             │       │
+│  ┌────┴─────┐ ┌────┴─────┐     │        ┌────┴────┐ │
+│  │Multiplex │ │ Scroll   │     │        │ Network │ │
+│  └────┬─────┘ └────┬─────┘     │        └────┬────┘ │
 │       │            │            │             │       │
 │  ┌────┴────────────┴────────────┴─────────────┴────┐ │
 │  │              Interrupt Manager                   │ │
@@ -237,10 +248,10 @@ exit). The loop handles everything else.
 transitions. Holds the compiled display lists for all declared
 screens in `ScreenSet`. `set_screen<S>()` reconfigures ANTIC,
 rebuilds the DLI chain via the Interrupt Manager, enables or
-disables sprites and scroll per the screen’s configuration,
-clears screen memory, and calls the user’s transition callback.
+disables sprites and scroll per the screen's configuration,
+clears screen memory, and calls the user's transition callback.
 All declared screens share a single screen memory buffer sized
-to the largest screen’s requirements.
+to the largest screen's requirements.
 
 **Bitmap Drawing (gfx)** — provides pixel-level drawing
 primitives for bitmap display regions. Available only on
@@ -250,15 +261,35 @@ tables for fast pixel addressing. Additional primitives (line,
 rect, masked blit) planned for future iterations.
 
 **Interrupt Manager** — owns DLI chain construction and VBI
-dispatch. Subsystems register interrupt needs (sprite multiplex
-needs DLIs at zone boundaries, scroll needs DLI for split-screen,
-sound uses VBI for envelope processing). The interrupt manager
-resolves conflicts and builds the actual chain. DLI priority
-order per-screen: engine multiplex first, engine scroll second,
-user DLI handlers third. When `set_screen<S>()` is called, all
-non-persistent user DLIs are cleared and the engine rebuilds
-the chain based on the new screen’s configuration. Game code
-never installs interrupts directly.
+dispatch. Uses a two-tier DLI model (see DECISIONS.md ADR-019):
+engine-internal DLIs (multiplex, scroll) are raw handlers with
+minimal overhead (~20-30 cycles); user C++ DLIs go through a
+dispatcher with automatic save/restore (~80 cycles overhead);
+user raw DLIs bypass the dispatcher entirely. All DLI types
+coexist in a single chain, sorted by scanline, with priority
+ordering: engine multiplex first, engine scroll second, user
+handlers third.
+
+The chain is stored as a table of DLI slots (4 bytes each:
+scanline, flags, handler pointer) with parallel handler and
+next-pointer tables for fast indexed access during interrupts.
+Static DLIs (registered at screen setup) and dynamic DLIs
+(rebuilt per-frame by the multiplexer) share the single table.
+The VBI merges and sorts them, sets DLI bits in the display
+list, and points VDSLST at the first handler.
+
+When `set_screen<S>()` is called, all non-persistent user DLIs
+are cleared and the engine rebuilds the chain based on the new
+screen's configuration. DLI priority order applies per-screen.
+
+C++ DLI handlers must be non-capturing lambdas or plain
+function pointers (see DECISIONS.md ADR-020). The dispatcher
+uses a self-modifying JSR for indirect handler calls (see
+DECISIONS.md ADR-021).
+
+The interrupt manager requires 2 bytes of zero page (chain
+index and scratch). MaxDLIs and MaxVBIHooks are template
+parameters on the InterruptManager, not GameConfig fields.
 
 **Input** — captures joystick and keyboard state once per frame
 during VBI. Provides level (held) and edge (pressed/released)
@@ -298,12 +329,24 @@ Processing happens during VBI (envelope advancement, frequency
 updates). Capability-gated for stereo POKEY and PokeyMax
 extended voices.
 
+**Network** — manages multiplayer connectivity via Fujinet or
+equivalent hardware. Uses a state-sharing model: one machine
+is the authoritative host running the full simulation, clients
+send input and receive state snapshots. The game defines its
+own state and input message structs; the engine handles
+transport, framing, connection management, and polling.
+Network I/O is polled once per frame during the main game
+loop (not during VBI — SIO transactions are too long for
+interrupt context). Capability-gated: games compiled without
+a network axis have no `Game::net` and incur zero cost.
+Implementation status: API designed, implementation deferred.
+
 ## Data Flow Per Frame
 
 A single frame follows this sequence:
 
 ```
-┌─ VERTICAL BLANK ──────────────────────────┐
+┌─ VERTICAL BLANK (deferred VBI) ───────────┐
 │                                            │
 │  1. VBI fires                              │
 │  2. Input: capture joystick/keyboard state │
@@ -312,12 +355,20 @@ A single frame follows this sequence:
 │     frame (from previous frame's render)   │
 │  5. Collision: latch GTIA collision regs,  │
 │     clear for next frame                   │
-│  6. VBI user hooks: run any user-provided  │
+│  6. Multiplex: sort sprites by Y, compute  │
+│     zone boundaries, build dynamic DLI     │
+│     entries for this frame                 │
+│  7. Interrupts: merge static + dynamic DLI │
+│     entries sorted by scanline, build      │
+│     handler/next tables, set DLI bits in   │
+│     display list, set VDSLST to first      │
+│     handler, reset chain index to 0        │
+│  8. VBI user hooks: run any user-provided  │
 │     VBI work (if installed)                │
 │                                            │
 ├─ VISIBLE FRAME ───────────────────────────┤
 │                                            │
-│  7. Game callback runs:                    │
+│  9. Game callback runs:                    │
 │     a. Read input snapshot                 │
 │     b. Update game state                   │
 │     c. Check collisions (from latched data)│
@@ -325,23 +376,30 @@ A single frame follows this sequence:
 │        tile changes, scroll offsets,       │
 │        bitmap drawing                      │
 │        (writes to buffers, not hardware)   │
+│     e. Network: poll if multiplayer active  │
 │                                            │
-│  8. DLIs fire as ANTIC draws:              │
-│     - Engine DLIs: multiplex, scroll,      │
-│       region boundaries                    │
-│     - User DLIs: custom effects            │
-│       (C++ or raw assembly)                │
+│ 10. DLIs fire as ANTIC draws:              │
+│     - Engine raw DLIs: multiplex zone      │
+│       boundaries (~20-30 cycle overhead),  │
+│       scroll register updates              │
+│     - User C++ DLIs: through dispatcher    │
+│       (~80 cycle overhead, auto save/      │
+│       restore)                             │
+│     - User raw DLIs: direct handler,       │
+│       zero engine overhead                 │
+│     Each handler chains to the next via    │
+│     VDSLST. Chain index advances per DLI.  │
 │                                            │
 ├─ VERTICAL BLANK (next frame) ─────────────┤
 │                                            │
-│  9. VBI fires — cycle repeats              │
-│     Buffered sprite positions from step 7d │
+│ 11. VBI fires — cycle repeats              │
+│     Buffered sprite positions from step 9d │
 │     are written to hardware in step 4      │
 │                                            │
 └────────────────────────────────────────────┘
 ```
 
-Key insight: the game’s render phase writes to buffers during
+Key insight: the game's render phase writes to buffers during
 the visible frame. The VBI commits those buffers to hardware.
 This one-frame latency avoids tearing and racing with ANTIC
 DMA. The game author does not need to think about this — the
@@ -420,7 +478,7 @@ struct GameConfig {
 };
 ```
 
-The engine’s ZP allocator ensures:
+The engine's ZP allocator ensures:
 
 - OS-reserved bytes are not touched
 - Engine-reserved bytes are not touched
@@ -452,7 +510,7 @@ Game::hooks.post_render(my_custom_effect);
 
 These hooks run in the main thread during the visible frame,
 so they have access to the full frame cycle budget. They are
-useful for effects that don’t fit in a DLI or need to
+useful for effects that don't fit in a DLI or need to
 coordinate with the game logic.
 
 ### 5. Resource Release and Reclamation
@@ -491,17 +549,17 @@ to COLPF0, AUDF1, or any other register at any time.
 If you do, you accept these consequences:
 
 - Writes to GTIA color registers will be overwritten by the
-  next DLI or VBI that touches them, unless you’ve released
+  next DLI or VBI that touches them, unless you've released
   that subsystem.
 - Writes to POKEY audio registers will conflict with the sound
   subsystem. Call `Game::sound.release_channel(N)` first.
 - Writes to ANTIC scroll registers will conflict with the scroll
   subsystem if active. Call `Game::scroll.suspend()` first.
 - Writes to P/M position registers will be overwritten at next
-  VBI commit, unless you’ve released that player.
+  VBI commit, unless you've released that player.
 
 The engine provides register addresses as constexpr values so
-assembly code doesn’t need to hardcode magic numbers:
+assembly code doesn't need to hardcode magic numbers:
 
 ```cpp
 #include <engine/platform/atari/registers.h>
@@ -510,7 +568,7 @@ assembly code doesn’t need to hardcode magic numbers:
 
 ## Why No Scanline-Sync Hook?
 
-You might want to write: “run this code at scanline 100.” The
+You might want to write: "run this code at scanline 100." The
 naive implementation is polling VCOUNT in a loop:
 
 ```cpp
@@ -527,8 +585,8 @@ Instead, use one of these patterns:
 **Pattern 1: DLI Handler (recommended)**
 
 If your effect needs scanline precision, write a DLI handler.
-If you’re out of DLI slots, the multiplexer is consuming them,
-which means you’re already pushing the engine hard. Consider
+If you're out of DLI slots, the multiplexer is consuming them,
+which means you're already pushing the engine hard. Consider
 whether the effect justifies the complexity.
 
 ```cpp
@@ -539,8 +597,8 @@ Game::interrupts.add_dli(100, [](auto& ctx) {
 
 **Pattern 2: Main-Thread Effect (often better)**
 
-If your effect doesn’t need precise scanline placement, move it
-into the game’s update/render phase. Simpler, no cycle stress,
+If your effect doesn't need precise scanline placement, move it
+into the game's update/render phase. Simpler, no cycle stress,
 no interrupt context switching:
 
 ```cpp
@@ -553,7 +611,7 @@ void update(...) {
 **Pattern 3: POKEY Timer (rare)**
 
 If you truly need a timer interrupt separate from VBI/DLI, use
-POKEY’s timer and poll it in a VBI hook. This requires you to
+POKEY's timer and poll it in a VBI hook. This requires you to
 manage POKEY timer state yourself.
 
 The engine provides the tools for patterns 1 and 2, which cover
@@ -577,12 +635,13 @@ engine/
 ├── interrupt.h         # Interrupt manager (DLI/VBI dispatch)
 ├── loop.h              # Game loop, run, run_until
 ├── hooks.h             # User extension hooks
+├── net.h               # Network subsystem (state sharing)
 ├── math.h              # Fixed-point, lookup tables, fast math
 ├── types.h             # Common types, bit_mask[], utility
 │
 ├── platform/
 │   ├── atari/
-│   │   ├── platform.h  # atari::Platform<Machine,RAM,Gfx,Snd>
+│   │   ├── platform.h  # atari::Platform<Machine,RAM,Gfx,Snd,TV,Net>
 │   │   ├── hal.h       # Hardware register access, DMA setup
 │   │   ├── antic.h     # ANTIC register and display list types
 │   │   ├── gtia.h      # GTIA register types
@@ -591,6 +650,7 @@ engine/
 │   │   ├── pm.h        # Player-Missile graphics HAL
 │   │   ├── vbxe.h      # VBXE blitter and overlay HAL
 │   │   ├── pokeymax.h  # PokeyMax extended sound HAL
+│   │   ├── fujinet.h   # Fujinet network transport HAL
 │   │   └── registers.h # Register address constants
 │   │
 │   └── (future: c64/, apple2/)
@@ -607,24 +667,28 @@ review. Breaking them means the architecture is degrading.
 1. **Game code includes only `engine/*.h`** — never
    `engine/platform/*`. If game code needs a platform header,
    the engine API is missing an abstraction.
-1. **Engine headers include `platform/*` only through the
+
+2. **Engine headers include `platform/*` only through the
    Platform template parameter** — never by name. No
    `#include "atari/hal.h"` in engine code. The platform
    type brings its own HAL.
-1. **Capability queries use feature names, not platform
+
+3. **Capability queries use feature names, not platform
    identity** — `if constexpr (caps::has_blitter)`, never
    `if constexpr (is_atari_vbxe)`.
-1. **No lateral dependencies between platform families** —
+
+4. **No lateral dependencies between platform families** —
    `atari/` never references `c64/`. Shared concepts belong
    in `engine/` or `config/`.
-1. **Subsystems depend downward only** — Sprites may use
+
+5. **Subsystems depend downward only** — Sprites may use
    Pools and Interrupts. Sprites never reference Sound.
    The dependency order is:
-   
+
    ```
    types / math (no dependencies)
      └─ pool (depends on types)
-         └─ input, sound (depend on pool, types)
+         └─ input, sound, network (depend on pool, types)
          └─ interrupt (depends on types)
              └─ screen (depends on interrupt, types)
                  └─ sprites, tiles, scroll, gfx (depend on
@@ -632,11 +696,13 @@ review. Breaking them means the architecture is degrading.
                      └─ core (depends on everything above)
                          └─ loop (depends on core)
    ```
-1. **User assembly integrates through defined seams** —
+
+6. **User assembly integrates through defined seams** —
    raw hardware access is permitted but documented as
-   “you own the consequences.” Cooperative resource release
+   "you own the consequences." Cooperative resource release
    is the preferred pattern for coexistence.
-1. **Platform HAL files depend only on hardware documentation**
+
+7. **Platform HAL files depend only on hardware documentation**
    — they are thin wrappers over registers and DMA. They do
    not contain game logic or engine policy.
 
@@ -645,26 +711,26 @@ review. Breaking them means the architecture is degrading.
 ### Adding a New Platform
 
 1. Create `platform/newplatform/` directory
-1. Implement `platform.h` with the `Platform<...>` template
+2. Implement `platform.h` with the `Platform<...>` template
    exposing a `capabilities` type and a `hal` type
-1. Implement HAL functions matching the interface the engine
+3. Implement HAL functions matching the interface the engine
    expects (sprite positioning, sound register writes,
    interrupt installation, etc.)
-1. The engine compiles against it with zero modifications
+4. The engine compiles against it with zero modifications
 
 ### Adding a New Hardware Extension (e.g., new Atari add-on)
 
 1. Add a new axis value (e.g., `atari::NewHardware::Present`)
-1. Add capability entries to the capability profile
-1. Add HAL functions for the new hardware
-1. Engine subsystems that can benefit add `if constexpr`
+2. Add capability entries to the capability profile
+3. Add HAL functions for the new hardware
+4. Engine subsystems that can benefit add `if constexpr`
    branches — existing code paths are unaffected
 
 ### Adding a New Engine Subsystem
 
 1. Create `engine/newsubsystem.h`
-1. Template on `Platform` type
-1. Query capabilities, call HAL as needed
-1. Register interrupt needs with the Interrupt Manager
-1. Integrate into `Core` — add as a facet
-1. Game code accesses via `Game::newsubsystem.method()`
+2. Template on `Platform` type
+3. Query capabilities, call HAL as needed
+4. Register interrupt needs with the Interrupt Manager
+5. Integrate into `Core` — add as a facet
+6. Game code accesses via `Game::newsubsystem.method()`

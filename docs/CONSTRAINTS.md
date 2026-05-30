@@ -30,7 +30,7 @@ architecture but not actively developed.
 
 All extensions below are independent axes. A real Atari can have
 any combination — VBXE without PokeyMax, Rambo RAM with PokeyMax,
-U1MB with VBXE and stereo POKEY, or pure baseline. The engine’s
+U1MB with VBXE and stereo POKEY, or pure baseline. The engine's
 capability system treats each axis as an independent template
 parameter, not a linear tier progression.
 
@@ -82,6 +82,22 @@ parameter, not a linear tier progression.
 - Engine exposes additional voices and capabilities through
   the capability system rather than special-casing
 
+#### Network Extensions (independent axis)
+
+##### Fujinet
+
+- WiFi networking via SIO bus
+- TCP and UDP support
+- Can act as client or server
+- SIO bus latency: ~1-3ms per transaction depending on
+  payload size
+- Primary target for multiplayer networking
+- Implementation status: API designed, implementation deferred
+
+Network is an independent axis like graphics and sound. Games
+compiled without a network axis incur zero cost — the network
+subsystem does not exist in the binary.
+
 #### Platform Configuration Model
 
 Extensions compose as independent template parameters:
@@ -91,7 +107,9 @@ using MyPlatform = atari::Platform<
     atari::Machine::XL,
     atari::RAM::Rambo256,
     atari::Graphics::Baseline,
-    atari::Sound::Stereo
+    atari::Sound::Stereo,
+    atari::TV::NTSC,
+    atari::Network::Fujinet     // optional, default: None
 >;
 ```
 
@@ -100,10 +118,32 @@ axis independently to select implementations. A game compiled for
 baseline graphics + PokeyMax works. VBXE + single POKEY works.
 The capability system enforces this orthogonality.
 
-#### Variant Considerations
+#### TV Standard (independent axis)
 
-- NTSC vs PAL: different CPU speed, frame rate (60 vs 50 Hz),
-  visible scanline count. Engine must support both.
+##### NTSC
+
+- CPU: 1.79 MHz
+- Frame rate: 60 Hz (approximately 59.94)
+- Cycles per frame: 29,780
+- Total scanlines: 262 (192 visible typical)
+
+##### PAL
+
+- CPU: 1.77 MHz
+- Frame rate: 50 Hz
+- Cycles per frame: 35,280
+- Total scanlines: 312 (240 visible typical)
+- More visible scanlines and more cycles per frame than NTSC
+- Color palette values differ from NTSC
+
+PAL and NTSC builds are separate binaries. This is standard
+practice in Atari development. The TV standard is modeled as
+an independent platform axis so timing budgets are compile-time
+constants available for `static_assert` validation. See
+DECISIONS.md ADR-018.
+
+#### Other Variant Considerations
+
 - 5200: shares ANTIC/GTIA/POKEY but has different I/O mapping.
   Not in initial scope but architecture should not preclude it.
 
@@ -177,10 +217,19 @@ gets a declared allocation. There is no free-for-all.
 
 ### Frame Budget
 
+Frame budget is determined by the TV axis (see TV Standard above):
+
 - NTSC: 16.67ms per frame (29,780 CPU cycles at 1.79 MHz)
 - PAL: 20ms per frame (35,280 CPU cycles at 1.77 MHz)
-- Of this, ANTIC steals cycles for DMA (screen, P/M, display
-  list). Actual available cycles vary by graphics mode.
+
+These values are compile-time constants derived from the
+Platform's TV parameter. The engine exposes them via
+`Platform::capabilities::cycles_per_frame` and
+`Platform::capabilities::frames_per_second` for use in
+`static_assert` budget validation.
+
+Of the total cycles, ANTIC steals cycles for DMA (screen, P/M,
+display list). Actual available cycles vary by graphics mode.
 
 ### DLI Budget
 
@@ -222,9 +271,9 @@ can query the overhead. No hidden magic.
 ### Independent Capability Axes
 
 Hardware extensions are modeled as orthogonal axes, not linear
-tiers. The engine never asks “are we on an upgraded Atari?” —
-it asks “does this configuration include hardware blitter
-support?” or “how many sound voices are available?” This keeps
+tiers. The engine never asks "are we on an upgraded Atari?" —
+it asks "does this configuration include hardware blitter
+support?" or "how many sound voices are available?" This keeps
 the architecture clean as new hardware extensions emerge and
 prepares the capability system for future platforms where the
 axes will be entirely different.
@@ -234,5 +283,5 @@ axes will be entirely different.
 This engine targets games that must fit in real memory budgets
 and run at stable frame rates. Tech demos and proof-of-concepts
 have different constraints. Every feature must justify its RAM
-and ROM cost against the question: “does a shipping game need
-this?”
+and ROM cost against the question: "does a shipping game need
+this?"
