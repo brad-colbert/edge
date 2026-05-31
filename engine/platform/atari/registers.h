@@ -98,7 +98,12 @@ EDGE_ATARI_REG(P0PL, 0xD00C);     // player 0 -> player collisions
 EDGE_ATARI_REG(P1PL, 0xD00D);
 EDGE_ATARI_REG(P2PL, 0xD00E);
 EDGE_ATARI_REG(P3PL, 0xD00F);
+EDGE_ATARI_REG(TRIG0, 0xD010);    // joystick 0 trigger (0 = pressed)
+EDGE_ATARI_REG(TRIG1, 0xD011);
+EDGE_ATARI_REG(TRIG2, 0xD012);
+EDGE_ATARI_REG(TRIG3, 0xD013);
 EDGE_ATARI_REG(PAL,  0xD014);     // (R) PAL/NTSC flag (low bits set => PAL)
+EDGE_ATARI_REG(CONSOL, 0xD01F);   // (R) console keys START/SELECT/OPTION (0 = pressed)
 
 // ── POKEY ($D200) — write registers ──────────────────────────────────
 EDGE_ATARI_REG(AUDF1,  0xD200);   // voice 1 frequency

@@ -12,6 +12,18 @@
 #include "pool.h"
 #include "input.h"
 
-// TODO: add core.h, sprites.h, sound.h, loop.h, ... as implemented.
+// Display + subsystems.
+#include "display.h"
+#include "screen.h"
+#include "sprites.h"
+#include "sound.h"
+#include "scroll.h"
+#include "tiles.h"
+#include "interrupt.h"
+
+// Integration layer.
+#include "hooks.h"
+#include "loop.h"
+#include "core.h"
 
 #endif // ENGINE_ENGINE_H

@@ -19,6 +19,12 @@
 
 namespace atari {
 
+// VVBLKD — the OS deferred vertical-blank vector ($0224/$0225). Like VDSLST in
+// dli_dispatch.h this is a RAM vector, not a chip register, so it lives here.
+// The OS dispatches the deferred VBI through it; a deferred handler exits via
+// XITVBV ($E462).
+inline constexpr uint16_t VVBLKD_ADDR = 0x0224;
+
 // All-static HAL (no instance state); the engine calls it via Platform::hal
 // (DECISIONS.md ADR-007 — static dispatch, never virtual).
 struct Hal {
@@ -100,7 +106,75 @@ struct Hal {
     static void write_audf(uint8_t channel, uint8_t freq) { reg::AUDF1[channel * 2] = freq; }
     static void write_audc(uint8_t channel, uint8_t ctrl) { reg::AUDC1[channel * 2] = ctrl; }
 
-    // TODO: interrupt install, scroll setup.
+    // ── Input capture ──
+    //
+    // The Core VBI service (engine/core.h) calls these once per frame and feeds
+    // the result to engine::InputState::update(). The returned bytes are already
+    // in the portable `engine::joy::` / `engine::console::` bit layout
+    // (engine/input.h) so the engine side stays platform-free: bit 0 up, 1 down,
+    // 2 left, 3 right, 4 fire; for port 0 the high bits carry the console keys
+    // (0x20 START, 0x40 SELECT, 0x80 OPTION). Hardware direction bits and the
+    // trigger/console registers are all active-low, so each is inverted here.
+    static uint8_t read_joystick(uint8_t port) {
+        const uint8_t pa  = *reg::PORTA;                       // sticks 0/1 nibbles
+        const uint8_t nib = (port == 0) ? (pa & 0x0F)
+                                        : static_cast<uint8_t>(pa >> 4);
+        uint8_t state = static_cast<uint8_t>(~nib) & 0x0F;     // 1 = direction held
+        const uint8_t trig = (port == 0) ? *reg::TRIG0 : *reg::TRIG1;
+        if ((trig & 0x01) == 0) state |= 0x10;                 // FIRE held
+        if (port == 0) {
+            const uint8_t c = *reg::CONSOL;                    // 0 = pressed
+            if ((c & 0x01) == 0) state |= 0x20;                // START
+            if ((c & 0x02) == 0) state |= 0x40;                // SELECT
+            if ((c & 0x04) == 0) state |= 0x80;                // OPTION
+        }
+        return state;
+    }
+    // Current keyboard scancode (low 7 bits), 0 if none. A full implementation
+    // also consults SKSTAT/IRQ for key-down; for now the latest KBCODE is
+    // returned and InputState's edge logic dedupes held keys.
+    static uint8_t read_keyboard() { return static_cast<uint8_t>(*reg::KBCODE & 0x7F); }
+
+    // ── P/M collision reads (GTIA read side) ──
+    //
+    // The collision registers accumulate across the frame; the Core VBI service
+    // latches them and then clears them with clear_collisions() for the next
+    // frame. The four register banks are contiguous, so the player/missile index
+    // is a direct subscript (registers.h).
+    static uint8_t coll_player_playfield(uint8_t p) { return reg::P0PF[p]; }
+    static uint8_t coll_player_player(uint8_t p)    { return reg::P0PL[p]; }
+    static uint8_t coll_missile_playfield(uint8_t m){ return reg::M0PF[m]; }
+    static uint8_t coll_missile_player(uint8_t m)   { return reg::M0PL[m]; }
+    static void    clear_collisions() { *reg::HITCLR = 0; }
+
+    // ── Player/Missile DMA setup ──
+    //
+    // pm_area_bytes is the single-line P/M window size; engine::Core sizes its
+    // (alignment-constrained) P/M buffer from it without including antic.h.
+    // set_pm_base points ANTIC at that buffer (high byte); pm_dma_enable arms the
+    // GTIA P/M latches. Full DMACTL P/M-DMA bit setup arrives with the live
+    // display path.
+    static constexpr uint16_t pm_area_bytes = 2048;
+    static void set_pm_base(uint8_t page) { *reg::PMBASE = page; }
+    static void pm_dma_enable()  { *reg::GRACTL = 0x03; }   // players + missiles
+    static void pm_dma_disable() { *reg::GRACTL = 0x00; }
+
+    // ── Deferred VBI install ──
+    //
+    // Point the OS deferred-VBI vector at `service` and enable the VBI NMI. The
+    // engine's service routine runs the per-frame sequence (engine/core.h) and,
+    // on real hardware, must exit via XITVBV. Like the DLI dispatcher this seam
+    // is never executed under `mos-sim` (no NMI) — it exists for compile coverage
+    // and the live ANTIC path.
+    static void install_vbi(void (*service)()) {
+        const uint16_t a =
+            static_cast<uint16_t>(reinterpret_cast<uintptr_t>(service));
+        volatile uint8_t* v =
+            reinterpret_cast<volatile uint8_t*>(static_cast<uintptr_t>(VVBLKD_ADDR));
+        v[0] = static_cast<uint8_t>(a & 0xFF);
+        v[1] = static_cast<uint8_t>(a >> 8);
+        *reg::NMIEN |= 0x40;   // bit 6 = VBI NMI (bit 7 = DLI)
+    }
 };
 
 } // namespace atari

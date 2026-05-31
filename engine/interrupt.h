@@ -165,6 +165,13 @@ public:
         hook_count_ = dst;
     }
 
+    // Invoke every registered VBI hook in registration order. The engine's VBI
+    // service (engine/core.h) calls this as the final step of the per-frame
+    // sequence (ARCHITECTURE.md "Data Flow Per Frame" — user VBI hooks).
+    void run_vbi_hooks() const {
+        for (u8 i = 0; i < hook_count_; ++i) hooks_[i]();
+    }
+
     // ── Chain construction ──
     //
     // Sort all live slots (static + dynamic) by scanline then priority, then
