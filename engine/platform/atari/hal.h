@@ -25,6 +25,52 @@ namespace atari {
 // XITVBV ($E462).
 inline constexpr uint16_t VVBLKD_ADDR = 0x0224;
 
+// XITVBV — the OS deferred-VBI exit routine ($E462). A deferred handler reached
+// via JMP (VVBLKD) must leave through here (it pulls the A/X/Y the OS VBI
+// prologue saved and RTIs); returning with RTS would corrupt the stack.
+inline constexpr uint16_t XITVBV_ADDR = 0xE462;
+
+// ── Deferred-VBI trampoline (the live ANTIC path) ─────────────────────
+//
+// engine::Core::vbi_service() is a normal C++ function: it ends in RTS and uses
+// the llvm-mos zero-page "imaginary registers" ($80-$9F on the atari8-dos
+// target — see its link.ld). The deferred VBI, though, is entered via
+// JMP (VVBLKD) and must exit via JMP XITVBV, and it interrupts the main thread
+// mid-computation — the main thread uses those same $80-$9F locations. This
+// trampoline bridges both gaps: it saves $80-$9F, JSRs the service, restores
+// $80-$9F, then JMP XITVBV. Hardware A/X/Y are saved by the OS VBI prologue and
+// restored by XITVBV, so the trampoline may clobber them freely.
+//
+// Mirrors dli_dispatch.h: a naked routine whose JSR operand is self-modified by
+// install_vbi() to point at the service. Never executed under mos-sim (no NMI).
+extern "C" {
+[[gnu::naked]] void edge_vbi_trampoline();
+extern uint8_t edge_vbi_jsr;   // first byte of the JSR; operand begins at +1
+}
+
+asm(R"(
+    .globl edge_vbi_trampoline
+    .globl edge_vbi_jsr
+edge_vbi_trampoline:
+    ldx #31
+.Ledge_vbi_save:
+    lda $80,x
+    sta edge_vbi_zp_save,x
+    dex
+    bpl .Ledge_vbi_save
+edge_vbi_jsr:
+    jsr $ffff                  ; → vbi_service (operand patched by install_vbi)
+    ldx #31
+.Ledge_vbi_restore:
+    lda edge_vbi_zp_save,x
+    sta $80,x
+    dex
+    bpl .Ledge_vbi_restore
+    jmp $e462                  ; XITVBV
+edge_vbi_zp_save:
+    .fill 32
+)");
+
 // All-static HAL (no instance state); the engine calls it via Platform::hal
 // (DECISIONS.md ADR-007 — static dispatch, never virtual).
 struct Hal {
@@ -167,13 +213,27 @@ struct Hal {
     // is never executed under `mos-sim` (no NMI) — it exists for compile coverage
     // and the live ANTIC path.
     static void install_vbi(void (*service)()) {
+        // Patch the trampoline's JSR target to the engine VBI service, then
+        // point the OS deferred-VBI vector at the trampoline (not the service
+        // directly — see edge_vbi_trampoline above).
         const uint16_t a =
             static_cast<uint16_t>(reinterpret_cast<uintptr_t>(service));
+        (&edge_vbi_jsr)[1] = static_cast<uint8_t>(a & 0xFF);
+        (&edge_vbi_jsr)[2] = static_cast<uint8_t>(a >> 8);
+
+        const uint16_t t =
+            static_cast<uint16_t>(reinterpret_cast<uintptr_t>(&edge_vbi_trampoline));
         volatile uint8_t* v =
             reinterpret_cast<volatile uint8_t*>(static_cast<uintptr_t>(VVBLKD_ADDR));
-        v[0] = static_cast<uint8_t>(a & 0xFF);
-        v[1] = static_cast<uint8_t>(a >> 8);
-        *reg::NMIEN |= 0x40;   // bit 6 = VBI NMI (bit 7 = DLI)
+
+        // NMIEN is write-only (reads return NMIST), so it can't be RMW'd: blank
+        // all NMIs while the two-byte vector is swapped to avoid a VBI firing on
+        // a half-written vector, then re-enable the VBI NMI (bit 6). The DLI NMI
+        // (bit 7) is armed separately by code that installs a DLI.
+        *reg::NMIEN = 0x00;
+        v[0] = static_cast<uint8_t>(t & 0xFF);
+        v[1] = static_cast<uint8_t>(t >> 8);
+        *reg::NMIEN = 0x40;
     }
 };
 
