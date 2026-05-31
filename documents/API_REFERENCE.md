@@ -1,16 +1,21 @@
-# Edge Engine API Reference
+# EDGE API Reference
 
-This reference describes the currently implemented public API intended for game/application authors.
+This reference is organized in two layers:
+
+1. the general engine-facing API a programmer writes against
+2. the current backend-specific details that leak into the public surface today
+
+Where a type or example uses Atari names, that is because the current backend is Atari-first, not because the entire engine model is supposed to be Atari-only.
 
 ## Include Strategy
 
-Use either the umbrella header:
+Most applications can start with:
 
 ```cpp
 #include <engine/engine.h>
 ```
 
-Or include specific headers when desired:
+Or include individual headers as needed:
 
 - `<engine/core.h>`
 - `<engine/display.h>`
@@ -21,9 +26,27 @@ Or include specific headers when desired:
 - `<engine/scroll.h>`
 - `<engine/tiles.h>`
 - `<engine/interrupt.h>`
-- `<engine/platform/atari/platform.h>`
 
-## Basic Types and Constants
+Backend headers, such as `<engine/platform/atari/platform.h>`, are only needed when selecting a concrete target platform.
+
+## General Program Model
+
+An EDGE program is centered around:
+
+- a concrete `Platform` type
+- a compile-time `GameConfig`
+- a `using Game = engine::Core<Platform, GameConfig>;` alias
+
+`Game` is the main façade. It exposes initialization, frame loop entry points, screen switching, convenience rendering calls, subsystem singletons, and compile-time resource queries.
+
+The frame model is:
+
+- input is captured once per frame
+- your callback runs with an immutable input snapshot
+- you update game state and write logical render/audio requests
+- the backend commits hardware-facing state at the proper time, typically during VBI
+
+## Basic Engine Types
 
 From `engine/types.h`:
 
@@ -31,126 +54,61 @@ From `engine/types.h`:
 - `engine::i8`, `engine::i16`, `engine::i32`
 - `engine::bit_mask[8]`
 
-## Platform Configuration
+`engine::bit_mask` is primarily useful for bitmaps, pool helpers, and manual SoA patterns.
 
-Platform is a compile-time type:
-
-```cpp
-using Platform = atari::Platform<
-    atari::Machine::XL,
-    atari::RAM::Baseline,
-    atari::Graphics::Baseline,
-    atari::Sound::Mono,
-    atari::TV::NTSC,
-    atari::Network::None
->;
-```
-
-Axes:
-
-- `atari::Machine`: `A400`, `A800`, `XL`, `XE`
-- `atari::RAM`: `Baseline`, `XE128`, `Rambo256`, `U1MB`
-- `atari::Graphics`: `Baseline`, `VBXE`
-- `atari::Sound`: `Mono`, `Stereo`, `PokeyMax`
-- `atari::TV`: `NTSC`, `PAL`
-- `atari::Network`: `None`, `Fujinet` (optional parameter)
-
-Common aliases:
-
-- `atari::StockXL_NTSC`
-- `atari::StockXL_PAL`
-- `atari::ExpandedXE`
-- `atari::FullUpgrade`
-
-Capabilities are exposed as `Platform::capabilities::<field>`.
-
-## Display Layout and Screen Model
-
-### Regions
-
-Text region:
-
-```cpp
-engine::TextRegion<atari::Mode::MODE_2, 24>
-```
-
-Bitmap region:
-
-```cpp
-engine::BitmapRegion<atari::Mode::BITMAP_E, 180>
-```
-
-Compose a screen layout:
-
-```cpp
-using Layout = engine::DisplayLayout<
-    engine::TextRegion<atari::Mode::MODE_2, 1>,
-    engine::BitmapRegion<atari::Mode::BITMAP_E, 180>,
-    engine::TextRegion<atari::Mode::MODE_2, 1>
->;
-```
-
-### Screen Set
-
-```cpp
-struct TitleScreen { using display = engine::DisplayLayout<...>; };
-struct PlayScreen  { using display = engine::DisplayLayout<...>; };
-
-struct GameConfig {
-    using screens = engine::ScreenSet<TitleScreen, PlayScreen>;
-    using initial_screen = TitleScreen; // optional; defaults to first
-    static constexpr engine::u8 max_sprites = 9;
-    static constexpr engine::u8 sound_channels = 2;
-};
-```
-
-## Core Type and Entry Points
+## Core Type
 
 ```cpp
 using Game = engine::Core<Platform, GameConfig>;
 ```
 
-### Initialization
+### Core Initialization
 
 - `Game::init()`
 - `Game::init(charset)`
 
-`init(charset)` loads a charset into engine charset RAM and updates CHBASE.
+`Game::init(charset)` loads the provided charset into engine-managed charset RAM before starting the backend services.
 
 ### Main Loop
 
-- `Game::run(callback)` -> never returns
-- `Game::run_until(callback)` -> returns when callback returns `true`
-- `Game::frame_overrun()` -> `true` when frame budget was exceeded
+- `Game::run(callback)`
+- `Game::run_until(callback)`
+- `Game::frame_overrun()`
 
-Callback signatures:
+Callback forms:
 
 ```cpp
 void callback(const engine::Input& input);
-bool callback(const engine::Input& input); // for run_until
+bool callback(const engine::Input& input);
 ```
+
+Use `run_until` when a screen or state should exit back to the caller.
 
 ### Screen and Region Access
 
 - `Game::set_screen<ScreenType>(transition_callback)`
-- `Game::region<N>()` for single-screen configurations
-- `Game::region<ScreenType, N>()` for multi-screen configurations
+- `Game::region<N>()` for single-screen programs
+- `Game::region<ScreenType, N>()` for multi-screen programs
 
-Convenience text functions target region 0:
+Convenience text helpers on `Game` target region 0 of the active single-screen layout:
 
 - `Game::print(col, row, const char*)`
 - `Game::put_char(col, row, tile)`
 - `Game::print_num(col, row, value, digits)`
 
-### Subsystem Objects on Core
+### Core Subsystems
+
+These are available as static sub-objects on `Game`:
 
 - `Game::sound`
 - `Game::scroll`
 - `Game::tiles`
 - `Game::interrupts`
 - `Game::sprites`
-- `Game::multiplex` (alias of sprite manager)
+- `Game::multiplex`
 - `Game::hooks`
+
+`Game::multiplex` is an alias of the sprite manager exposed under a more intention-revealing name for multiplex queries.
 
 ### Compile-Time Queries
 
@@ -159,45 +117,89 @@ Convenience text functions target region 0:
 - `Game::user_zp_base`
 - `Game::zp_remaining`
 
-## Input API
+These let you reason about memory budgets without runtime instrumentation.
 
-Type: `engine::Input` (alias of `engine::InputState<2>`).
+## Configuration Types
 
-Directional level state:
+### GameConfig
 
-- `up(port=0)`, `down(port=0)`, `left(port=0)`, `right(port=0)`
+At minimum, `GameConfig` provides:
 
-Fire level/edges:
+- `using screens = engine::ScreenSet<...>;`
+- `static constexpr engine::u8 max_sprites = ...;`
+- `static constexpr engine::u8 sound_channels = ...;`
 
-- `fire(port=0)`
-- `fire_pressed(port=0)`
-- `fire_released(port=0)`
+Optional fields implemented today include:
 
-Console keys:
+- `using initial_screen = SomeScreen;`
+- `static constexpr engine::u8 max_dlis = ...;`
+- `static constexpr engine::u8 max_vbi_hooks = ...;`
+- `static constexpr engine::u8 user_zp_bytes = ...;`
 
-- `start()`, `select()`, `option()`
+### Platform
 
-Keyboard:
+`Platform` is a backend type selected at compile time. The engine model only requires that it expose:
 
-- `key()` (current scancode or 0)
-- `key_pressed()` (edge)
+- `Platform::capabilities`
+- `Platform::hal`
 
-Out-of-range port queries return `false`.
+The current concrete platform implementation is Atari and is described later in this document and in [Atari Platform Guide](./PLATFORM_ATARI.md).
 
-## Text Region API
+## Display and Screen API
 
-`TextRegionView` methods:
+### Region Descriptors
+
+The engine exposes two display-region kinds:
+
+- `engine::TextRegion<Mode, Height>`
+- `engine::BitmapRegion<Mode, Height>`
+
+These are composed into a screen layout:
+
+```cpp
+using Layout = engine::DisplayLayout<
+    engine::TextRegion<ModeA, 1>,
+    engine::BitmapRegion<ModeB, 180>,
+    engine::TextRegion<ModeA, 1>
+>;
+```
+
+Important contract:
+
+- text and bitmap regions are distinct types
+- each region exposes only operations valid for that region kind
+- region memory layout is compile-time derived
+
+Today, the `Mode` type comes from the Atari backend.
+
+### ScreenSet
+
+```cpp
+struct TitleScreen { using display = engine::DisplayLayout<...>; };
+struct PlayScreen  { using display = engine::DisplayLayout<...>; };
+
+struct GameConfig {
+    using screens = engine::ScreenSet<TitleScreen, PlayScreen>;
+    using initial_screen = TitleScreen;
+};
+```
+
+All declared screens share one screen buffer sized to the largest screen.
+
+### TextRegionView API
+
+Methods:
 
 - `put_char(col, row, tile)`
 - `get_char(col, row)`
-- `print(col, row, const char*)` (ASCII converted to ANTIC screen code)
+- `print(col, row, const char*)`
 - `print_num(col, row, value, digits)`
 
-No bounds checks are performed.
+There are no bounds checks.
 
-## Bitmap Region API
+### BitmapRegionView API
 
-`BitmapRegionView` methods:
+Methods:
 
 - `plot(x, y, color)`
 - `point(x, y)`
@@ -205,15 +207,57 @@ No bounds checks are performed.
 - `hline(x1, x2, y, color)`
 - `blit(x, y, src, w, h)`
 
-Pixel packing is mode-dependent and handled internally.
+Pixel packing and row addressing are handled by the view.
 
-## Sprite and Missile API
+## Input API
+
+Primary type:
+
+- `engine::Input`
+
+It is an alias for `engine::InputState<2>`.
+
+Directional level state:
+
+- `up(port=0)`
+- `down(port=0)`
+- `left(port=0)`
+- `right(port=0)`
+
+Fire level and edge state:
+
+- `fire(port=0)`
+- `fire_pressed(port=0)`
+- `fire_released(port=0)`
+
+Console-style buttons:
+
+- `start()`
+- `select()`
+- `option()`
+
+Keyboard state:
+
+- `key()`
+- `key_pressed()`
+
+Out-of-range port queries return `false`.
+
+General contract:
+
+- input is captured once per frame
+- the game reads a stable snapshot
+- edge detection is handled by the engine
+
+## Sprite API
 
 ### Asset Builder
 
 ```cpp
 constexpr auto shape = engine::make_sprite<8, 8>({ ... });
 ```
+
+The returned type carries compile-time width and height metadata.
 
 ### Runtime Methods
 
@@ -223,22 +267,34 @@ constexpr auto shape = engine::make_sprite<8, 8>({ ... });
 - `Game::sprite_hide_all()`
 - `Game::sprite_color(slot, color)`
 
+General contract:
+
+- `sprite` updates logical buffered sprite state
+- the backend commit happens later, not immediately at the call site
+- hidden sprites are excluded from rendering and multiplex assignment
+
 ### Collision Snapshot
 
-- `Game::pm_collisions().player_to_playfield(p)`
-- `Game::pm_collisions().player_to_player(p)`
-- `Game::pm_collisions().missile_to_playfield(m)`
-- `Game::pm_collisions().missile_to_player(m)`
+Use the frame-latched snapshot returned by:
 
-These are latched once per frame in VBI.
+- `Game::pm_collisions()`
+
+Queries:
+
+- `player_to_playfield(p)`
+- `player_to_player(p)`
+- `missile_to_playfield(m)`
+- `missile_to_player(m)`
 
 ### Multiplex Queries
 
 - `Game::multiplex.zone_count()`
 - `Game::multiplex.active_count()`
-- `Game::multiplex.sprites_on_player(hw_player)` -> bitmask
-- `Game::multiplex.player_for_sprite(logical_index)` -> player or `0xFF`
-- `Game::multiplex.zone_for_sprite(logical_index)` -> zone or `0xFF`
+- `Game::multiplex.sprites_on_player(hw_player)`
+- `Game::multiplex.player_for_sprite(logical_index)`
+- `Game::multiplex.zone_for_sprite(logical_index)`
+
+These are especially useful when more logical sprites exist than the hardware can show simultaneously.
 
 ## Sound API
 
@@ -246,44 +302,54 @@ These are latched once per frame in VBI.
 
 ```cpp
 constexpr auto sfx = engine::make_sound({
-    {engine::pokey::PURE, 80, 10, 12},
-    {engine::pokey::NOISE, 40, 12, 8},
+    {waveform, frequency, volume, duration_frames},
 });
 ```
 
-Waveform constants:
+An internal terminal frame is appended automatically.
 
-- `engine::pokey::PURE`
-- `engine::pokey::NOISE`
-- `engine::pokey::BUZZ`
-- `engine::pokey::SILENT` (terminal marker)
+### Runtime Methods
 
-### Runtime Methods (`Game::sound`)
+On `Game::sound`:
 
 - `play(effect, channel)`
 - `stop(channel)`
 - `active(channel)`
 - `release_channel(channel)`
 - `reclaim_channel(channel)`
-- `tick()` (normally called by engine VBI)
+- `tick()`
 
-Calling `play` interrupts any currently playing effect on that channel.
+General contract:
+
+- playback is channel-based
+- `play` interrupts the current effect on that channel
+- `tick` advances playback one frame and is normally engine-managed
+- released channels are skipped by engine playback so custom low-level code can own them
+
+The currently implemented waveform constants are Atari/POKEY-specific and are covered in the backend section.
 
 ## Scroll API
 
-Methods on `Game::scroll`:
+On `Game::scroll`:
 
 - `set(x, y)`
 - `move(dx, dy)`
-- `x()`, `y()`
+- `x()`
+- `y()`
 - `suspend()`
 - `resume()`
 
-Internal/engine-managed methods (advanced use):
+Advanced, engine-facing methods:
 
 - `activate(bytes_per_line, scanlines_per_line, fine_scroll_range)`
 - `deactivate()`
 - `apply(display_list, lms_pos, screen_base, map_width_bytes)`
+
+General contract:
+
+- scroll position is stored as logical viewport state
+- fine and coarse scrolling are split internally
+- suspended scroll stops hardware writes without discarding the tracked position
 
 ## Tiles API
 
@@ -294,21 +360,30 @@ constexpr auto charset = engine::make_charset(data_array);
 constexpr auto map = engine::make_map<Width, Height>(tile_indices);
 ```
 
-### TileMap Methods
+### TileMap API
 
 - `tile_at(col, row)`
 - `set_tile(col, row, tile)`
 
-### Tile Manager (`Game::tiles`)
+### Tile Manager API
+
+On `Game::tiles`:
 
 - `init_charset(charset, dest)`
 - `set_chbase(page)`
 - `set_viewport(x, y)`
-- `viewport_x()`, `viewport_y()`
+- `viewport_x()`
+- `viewport_y()`
+
+General contract:
+
+- charset and tilemap assets are plain compile-time data objects
+- the tile manager coordinates charset load and viewport state
+- map ownership remains with the game or asset data, not the manager
 
 ## Interrupt API
 
-Methods on `Game::interrupts`:
+On `Game::interrupts`:
 
 - `add_dli(scanline, handler)`
 - `add_raw_dli(scanline, handler)`
@@ -327,28 +402,45 @@ VBI hooks:
 - `remove_vbi_hook(handler)`
 - `run_vbi_hooks()`
 
-DLI handlers are plain `void (*)()` function pointers (non-capturing only).
+General contract:
 
-DLI context helper for C++ handlers:
+- handlers must be plain non-capturing `void (*)()` functions
+- static and dynamic DLI chains are merged and sorted each frame
+- persistent handlers survive screen transitions
+
+### DLIContext
+
+For C++ DLI handlers:
 
 ```cpp
 engine::DLIContext<Platform>{}.write_colpf2(0xC4);
 ```
 
-Other write helpers: `write_colpf0/1/3`, `write_colbk`, `write_chbase`, `write_hscrol`, `write_vscrol`.
+Available write helpers:
+
+- `write_colpf0`
+- `write_colpf1`
+- `write_colpf2`
+- `write_colpf3`
+- `write_colbk`
+- `write_chbase`
+- `write_hscrol`
+- `write_vscrol`
 
 ## Hooks API
 
-`Game::hooks` contains optional frame hooks:
+On `Game::hooks`:
 
-- `pre_sprite_commit` (runs in VBI before sprite commit)
-- `post_render` (runs after frame callback in loop)
+- `pre_sprite_commit`
+- `post_render`
 
 Both are nullable `void (*)()` function pointers.
 
+Use them when you need a small, engine-defined seam in the frame lifecycle without taking over a full interrupt path.
+
 ## Pool API
 
-### SlotPool (stable indices)
+### SlotPool
 
 ```cpp
 engine::SlotPool<Enemy, 8> pool;
@@ -362,15 +454,23 @@ Methods:
 - `release(index)`
 - `release(pointer)`
 - `active(index)`
-- `count()`, `available()`, `full()`, `empty()`, `capacity()`
+- `count()`
+- `available()`
+- `full()`
+- `empty()`
+- `capacity()`
 - `operator[](index)`
 - `for_each(fn)`
 - `for_each_indexed(fn)`
-- range-for iteration over active elements
+- range-for over active elements
 
-Important: acquired memory is not zero-initialized.
+Contract:
 
-### PackedPool (dense iteration, unstable indices)
+- indices are stable
+- acquired storage is not zero-initialized
+- best choice when external systems refer to slots by index
+
+### PackedPool
 
 ```cpp
 engine::PackedPool<Particle, 16> pool;
@@ -382,21 +482,29 @@ Methods:
 - `acquire()`
 - `release(index)`
 - `release(pointer)`
-- `count()`, `available()`, `full()`, `empty()`, `capacity()`
+- `count()`
+- `available()`
+- `full()`
+- `empty()`
+- `capacity()`
 - `operator[](index)`
 - `for_each(fn)`
-- range-for iteration over `[0, count)`
+- range-for over dense active storage
 
-`release(index)` swaps in the last active element.
+Contract:
+
+- indices are unstable
+- releasing an element swaps in the previous last element
+- best choice for iteration-heavy collections with no stable external references
 
 ## Math API
 
-Direction vectors:
+Direction lookup tables:
 
 - `engine::dir_x[4]`
 - `engine::dir_y[4]`
 
-Trig LUTs:
+Trig lookup tables:
 
 - `engine::sin8[256]`
 - `engine::cos8[256]`
@@ -406,22 +514,40 @@ Fixed-point:
 - `engine::Fixed<I, F>`
 - `engine::fixed88`
 
-Factories and operators:
+Factories and queries:
 
 - `Fixed::from_int(v)`
 - `Fixed::from_raw(v)`
-- `raw()`, `integer()`, `fraction()`
-- `+`, `-`, `*`, `==`, `!=`
+- `raw()`
+- `integer()`
+- `fraction()`
 
-Random generator:
+Operators:
 
-- `engine::random()` -> 8-bit LFSR value (non-zero cycle)
+- `+`
+- `-`
+- `*`
+- `==`
+- `!=`
 
-## Practical Notes
+Random number helper:
 
-1. Call `Game::init()` before any rendering, sound, or loop usage.
-2. Use `engine::SlotPool` for entities with stable external IDs (sprite/collision mapping).
-3. Use `engine::PackedPool` for dense iteration-only collections.
-4. Keep DLI handlers minimal and non-capturing.
-5. Treat `run` callback as frame logic only; hardware commits happen in VBI.
-6. `engine/gfx.h` and `engine/net.h` are placeholders and not yet usable APIs.
+- `engine::random()`
+
+## Current Backend-Specific Details
+
+The following public pieces are currently tied to the Atari implementation:
+
+- the concrete platform type comes from `atari::Platform<...>`
+- display mode names come from `atari::Mode`
+- sound waveform constants use `engine::pokey::*`
+- sprite, collision, and interrupt behavior map to Atari hardware concepts such as P/M, DLI, and VBI
+
+For the full backend-specific guide, see [Atari Platform Guide](./PLATFORM_ATARI.md).
+
+## Current Limits
+
+1. Call `Game::init()` before using rendering, sound, or loop services.
+2. Treat the frame callback as logical frame work, not direct hardware commit time.
+3. Prefer engine subsystems first and reach for low-level hooks only when needed.
+4. `engine/gfx.h` and `engine/net.h` are placeholders and are not yet usable as public subsystems.

@@ -1,17 +1,49 @@
-# Edge Engine Application API Docs
+# EDGE Engine Documentation
 
-This folder contains programmer-facing API documentation for building a game/application with the Edge engine.
+EDGE is a C++ engine for building games and interactive applications on constrained 6502-class systems.
 
-## Documents
+Its design goal is not to hide the machine behind a heavy runtime. The goal is to give the author a small, predictable, compile-time configured API for screens, input, sprites, sound, tiles, interrupts, and fixed-size storage, while keeping hardware details behind a platform backend.
 
-- [Quick Start](./QUICK_START.md)
-- [API Reference](./API_REFERENCE.md)
+The first concrete backend is the Atari 8-bit family. That means some types visible today, especially display mode names, come from the Atari implementation. The overall authoring model, however, is intentionally broader than a single machine.
 
-## Scope
+## Goals
 
-These docs describe the currently implemented API in `engine/` and align with usage in `demo/hw_test.cpp` and the unit tests in `tests/`.
+- Give game code a stable engine-facing API instead of direct register programming.
+- Keep memory and timing explicit and deterministic.
+- Make platform selection a compile-time choice through capabilities and templates.
+- Avoid heap allocation, exceptions, RTTI, and virtual dispatch.
+- Leave clean seams for low-level hooks and platform-specific escape hatches when needed.
 
-Planned subsystems that are not implemented yet:
+## How to Read These Docs
+
+Start with the general engine model, then move to the current backend details.
+
+- [Quick Start](./QUICK_START.md): what an EDGE program looks like and how the main pieces fit together.
+- [API Reference](./API_REFERENCE.md): portable engine-facing API, organized by subsystem.
+- [Atari Platform Guide](./PLATFORM_ATARI.md): the current concrete backend, including Atari-specific types, modes, and hardware behavior.
+
+## What Is Portable vs Backend-Specific Today
+
+Mostly engine-level and intended to remain portable:
+
+- `engine::Core<Platform, GameConfig>`
+- `engine::SlotPool` and `engine::PackedPool`
+- input snapshot model
+- sound, sprite, tile, scroll, interrupt, and hook subsystems
+- fixed-point math and lookup tables
+- compile-time capability queries
+
+Currently backend-specific in the public surface because Atari is the first implementation:
+
+- `atari::Platform<...>` and Atari platform aliases
+- `atari::Mode` display mode vocabulary
+- Atari display-list, DLI, VBI, P/M, and POKEY terminology in some examples
+
+## Scope of the Current Docs
+
+These documents describe the API that is currently implemented in `engine/`, cross-checked against the demo in `demo/` and the unit tests in `tests/`, and informed by the design documents in `docs/`.
+
+Subsystems present only as placeholders today:
 
 - `engine/gfx.h`
 - `engine/net.h`

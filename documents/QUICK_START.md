@@ -1,33 +1,72 @@
-# Quick Start: Build Your First Edge Application
+# Quick Start
 
-This guide shows the smallest practical flow for writing an app/game with the Edge engine.
+This guide introduces EDGE from the engine author's point of view first, then shows the current concrete setup using the Atari backend.
 
-## 1. Define Target Platform
+## The Core Mental Model
 
-Choose hardware axes at compile time.
+An EDGE program is built from three pieces:
+
+1. A `Platform` type that selects the hardware backend and capabilities.
+2. A `GameConfig` type that declares screens and compile-time budgets.
+3. A `Game` alias built as `engine::Core<Platform, GameConfig>`.
+
+Most author-written code then talks to `Game` and the engine subsystems hanging off it.
+
+The important architectural idea is that your game logic is frame-based and mostly engine-facing. You write game state updates, screen writes, sprite placement, sound requests, and object management. The backend-specific hardware work is committed by the engine at the right time.
+
+## What Usually Stays Portable
+
+In normal gameplay code, these are the main concepts you work with regardless of backend:
+
+- `engine::Core<Platform, GameConfig>`
+- `engine::Input`
+- `engine::SlotPool` and `engine::PackedPool`
+- `engine::make_sprite`, `engine::make_sound`, `engine::make_charset`, `engine::make_map`
+- `Game::run`, `Game::run_until`, `Game::set_screen`
+- `Game::sound`, `Game::scroll`, `Game::tiles`, `Game::interrupts`
+
+Today, the platform type and display mode names are still provided by the Atari backend because that is the first implemented target.
+
+## Program Shape
+
+At a high level, an EDGE application looks like this:
+
+```cpp
+// 1. Select a concrete backend platform type.
+using Platform = /* backend-specific platform type */;
+
+// 2. Declare one or more screens.
+struct MainScreen {
+    using display = engine::DisplayLayout</* backend-specific mode types */>;
+};
+
+// 3. Declare compile-time budgets and screen set.
+struct GameConfig {
+    using screens = engine::ScreenSet<MainScreen>;
+    static constexpr engine::u8 max_sprites = ...;
+    static constexpr engine::u8 sound_channels = ...;
+};
+
+// 4. Build the engine facade used by game code.
+using Game = engine::Core<Platform, GameConfig>;
+
+// 5. Define constexpr assets and static game state.
+// 6. Write a per-frame callback.
+// 7. Call Game::init() and Game::run(...).
+```
+
+## Current Concrete Example: Atari
+
+The following example is intentionally small but real. It uses the current Atari backend while keeping the game-facing code on the general engine surface.
 
 ```cpp
 #include <engine/engine.h>
 #include <engine/platform/atari/platform.h>
 
-using Platform = atari::Platform<
-    atari::Machine::XL,
-    atari::RAM::Baseline,
-    atari::Graphics::Baseline,
-    atari::Sound::Mono,
-    atari::TV::NTSC
->;
-```
-
-You can also use aliases such as `atari::StockXL_NTSC` and `atari::StockXL_PAL`.
-
-## 2. Define Screen + Game Config
-
-At minimum, define one screen with a display layout and core capacities.
-
-```cpp
 namespace M = atari;
 using engine::u8;
+
+using Platform = atari::StockXL_NTSC;
 
 struct MainScreen {
     using display = engine::DisplayLayout<
@@ -42,13 +81,7 @@ struct GameConfig {
 };
 
 using Game = engine::Core<Platform, GameConfig>;
-```
 
-## 3. Define Assets
-
-Assets are normally `constexpr` and live in ROM.
-
-```cpp
 constexpr auto ship = engine::make_sprite<8, 8>({
     0b00011000,
     0b00111100,
@@ -63,15 +96,9 @@ constexpr auto ship = engine::make_sprite<8, 8>({
 constexpr auto beep = engine::make_sound({
     {engine::pokey::PURE, 80, 10, 8},
 });
-```
 
-## 4. Write Per-Frame Callback
-
-`Game::run` calls your callback once per frame with an immutable input snapshot.
-
-```cpp
-static engine::u8 x = 100;
-static engine::u8 y = 80;
+static u8 x = 100;
+static u8 y = 80;
 
 static void frame_step(const engine::Input& in) {
     if (in.left()  && x > 40)  x -= 2;
@@ -86,32 +113,64 @@ static void frame_step(const engine::Input& in) {
     Game::sprite(0, ship, x, y);
     Game::print(0, 0, "EDGE DEMO");
 }
-```
 
-## 5. Initialize and Run
-
-```cpp
 int main() {
     Game::init();
-
     Game::sprite_color(0, 0x46);
-    Game::print(0, 1, "READY");
-
     Game::run(frame_step);
 }
 ```
 
-## Runtime Model (Important)
+### Which Parts of That Example Are General EDGE API?
 
-- Your game callback writes logical state for this frame.
-- Engine VBI service commits buffered sprite/sound/hardware state on vertical blank.
-- Collision data (`Game::pm_collisions()`) is latched once per frame.
+These lines reflect the general engine authoring model:
 
-## Common First Steps After This
+- `engine::Core<Platform, GameConfig>`
+- `engine::DisplayLayout`, `engine::TextRegion`, `engine::ScreenSet`
+- `engine::make_sprite`, `engine::make_sound`
+- `engine::Input`
+- `Game::init`, `Game::run`
+- `Game::sound.play`, `Game::sprite`, `Game::print`, `Game::sprite_color`
 
-1. Add a second screen and use `Game::set_screen<ScreenType>(callback)`.
-2. Switch from simple text to mixed text+bitmap using multiple display regions.
-3. Add object pools (`engine::SlotPool` / `engine::PackedPool`) for entities.
-4. Register DLI or VBI hooks with `Game::interrupts` as needed.
+### Which Parts Are Current Atari Details?
 
-For full API details, continue with [API Reference](./API_REFERENCE.md).
+These are backend-specific today:
+
+- `atari::StockXL_NTSC`
+- `M::Mode::MODE_2`
+- `engine::pokey::*` waveform constants
+- the meaning of the sprite color byte
+
+## The Frame Model
+
+EDGE is built around one callback per frame.
+
+What your callback does:
+
+- reads the frame input snapshot
+- updates game state
+- requests sounds
+- writes text or bitmap content
+- places logical sprites and missiles
+
+What the engine does around that callback:
+
+- captures input once per frame
+- advances sound playback
+- commits buffered sprite state during VBI
+- latches collision information once per frame
+- rebuilds dynamic DLI work such as sprite multiplexing
+
+That means you generally treat the engine as a double-buffered frame system, not as a register-poking loop.
+
+## Recommended First Steps
+
+After the minimal example works, the usual next steps are:
+
+1. Add object pools for entities with `engine::SlotPool` or `engine::PackedPool`.
+2. Split the program into screens and transition with `Game::set_screen<ScreenType>(callback)`.
+3. Add tile and charset assets with `engine::make_charset` and `engine::make_map`.
+4. Use `Game::pm_collisions()` and multiplex queries if your game uses many sprites.
+5. Add DLI or VBI hooks only after the basic game loop is stable.
+
+From here, read [API Reference](./API_REFERENCE.md) for the portable subsystem contracts, then [Atari Platform Guide](./PLATFORM_ATARI.md) for the backend-specific details currently exposed by the first implementation.
