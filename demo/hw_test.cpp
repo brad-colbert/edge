@@ -10,30 +10,20 @@
 //   Row 1 : joystick / fire / collision / sound status (input capture)
 //   Sprite 0 (arrow)   : moves with the joystick     (P/M graphics + input)
 //   Sprite 1 (diamond) : stationary at screen centre (P/M shape at a Y offset)
-//   Row-12 DLI         : COLBK $94 -> $C4 colour split (DLI fires mid-frame)
+//   Row-12 DLI         : COLPF2 $94 -> $C4 colour split (DLI fires mid-frame)
 //   Fire press         : a pure POKEY tone           (sound subsystem)
 //   Sprite overlap     : a POKEY noise burst         (GTIA P0PL collision)
 //
-// ── Why this demo touches some hardware directly ─────────────────────────
+// ── Pure engine API ──────────────────────────────────────────────────────
 //
-// The engine is mid-build: its portable subsystems (display list, sprites,
-// sound, input, collisions, text) are complete and used here through the public
-// API, but two live-hardware seams are still stubs that this demo fills in:
-//
-//   * DLI chain delivery. engine::InterruptManager builds the handler tables,
-//     but nothing yet sets the DL DLI bit, points VDSLST, or arms NMIEN bit 7.
-//     The single colour-split DLI is therefore installed directly here (a tiny
-//     raw handler), rather than via Game::interrupts.add_dli().
-//
-//   * OS shadow registers + P/M DMA bits. The atari OS deferred VBI copies its
-//     shadow registers (SDLSTL, SDMCTL, COLOR*, PCOLR*) to the hardware every
-//     frame *before* our handler runs, and the engine does not yet set the
-//     DMACTL player/missile-DMA bits. So the demo writes the OS shadows (and,
-//     as the task asks, the hardware colour registers too) to keep the engine's
-//     display list, P/M DMA, and colours alive frame to frame.
-//
-// Everything else — frame loop, sprite buffering/commit, sound playback, input
-// snapshot, collision latching, text output — goes through engine::Core.
+// Every hardware interaction goes through engine::Core / Platform::hal — there
+// are no poke()s, no inline assembly, and no magic addresses. The engine now
+// owns the display list and P/M DMA (init programs the OS shadows), the OS colour
+// shadows (Platform::hal::set_color_pf / set_color_pm), DLI delivery (the split
+// is a C++ Game::interrupts.add_dli handler dispatched through the engine), and
+// attract-mode suppression (vbi_service). POKEY base config (SKCTL=3, AUDCTL=0)
+// is left at the values the Atari OS installs at boot. This file is meant to read
+// as example game code.
 
 #include <stdint.h>
 
@@ -98,55 +88,29 @@ constexpr auto sfx_noise = engine::make_sound({
     {engine::pokey::NOISE, 40, 12, 10},
 });
 
-// ── Colour-split DLI (raw handler) ───────────────────────────────────────
+// ── Colour-split DLI (C++ handler) ───────────────────────────────────────
 //
-// Fires near row 12; rewrites COLBK to dark green ($C4). The OS colour-shadow
-// copy restores COLBK to $94 at the top of every frame, so the change is a
-// clean per-frame split. Pure assembly (only A touched), so it neither needs
-// the C++ dispatcher nor disturbs the main thread's zero-page registers.
-extern "C" void hw_dli();
-asm(R"(
-    .globl hw_dli
-hw_dli:
-    pha
-    lda #$c4
-    sta $d018          ; COLPF2 not $d01a COLBK
-    pla
-    rti
-)");
-
-// ── Small helpers ────────────────────────────────────────────────────────
-
-static inline void poke(u16 a, u8 v) {
-    *reinterpret_cast<volatile u8*>(static_cast<uintptr_t>(a)) = v;
+// A non-capturing C++ DLI handler, registered with Game::interrupts.add_dli and
+// entered through the engine's DLI dispatcher. It rewrites COLPF2 (the Mode-2
+// text background) to dark green ($C4) via the DLIContext facade — no register
+// addresses. The OS colour-shadow copy restores COLPF2 to $94 at the top of every
+// frame, so the change is a clean per-frame split.
+static void color_split() {
+    engine::DLIContext<Platform>{}.write_colpf2(0xC4);
 }
+
+// Scanline of the colour split, in the engine's display-list-relative space that
+// InterruptManager::prepare_chain expects: the list opens with 3 dl_blank(8)
+// instructions (24 scanlines), then Mode-2 rows of 8 scanlines each, so the 13th
+// mode line (row 12) begins at 24 + 12*8 = 120. The engine maps this to that
+// mode line and sets its DLI bit; a 4K-crossing LMS adds no mode line, so the
+// mapping is unaffected.
+static constexpr u8 kSplitScanline = 120;
+
+// ── Small helper ─────────────────────────────────────────────────────────
 
 // ASCII -> ANTIC internal screen code, for single-character HUD writes.
 static inline u8 g(char c) { return M::ascii_to_internal(c); }
-
-// Set the DLI bit on the 13th mode line (row 12) of the engine-built display
-// list and arm the DLI: point VDSLST at hw_dli and enable NMIEN bit 7. Walking
-// the list (rather than assuming a fixed offset) tolerates the 4K-crossing LMS
-// the screen builder may insert, since that does not add a mode line.
-static void install_color_split_dli() {
-    u8* dl = const_cast<u8*>(Game::screen.active_dl());
-    u16 i = 0;
-    u8  mode_line = 0;
-    for (;;) {
-        const u8 b  = dl[i];
-        const u8 op = b & 0x0F;
-        if (op == 0x01) break;                 // JMP / JVB terminator
-        if (op == 0x00) { ++i; continue; }     // blank-line instruction
-        if (++mode_line == 13) { dl[i] = b | 0x80; break; }  // row 12: set DLI
-        i += (b & 0x40) ? 3 : 1;               // skip the 2-byte LMS operand
-    }
-
-    const uint16_t h = static_cast<uint16_t>(reinterpret_cast<uintptr_t>(&hw_dli));
-    poke(0x0200, static_cast<u8>(h & 0xFF));    // VDSLST low
-    poke(0x0201, static_cast<u8>(h >> 8));      // VDSLST high
-    // NMIEN is write-only; install_vbi() left it at $40 (VBI). Set VBI + DLI.
-    *atari::reg::NMIEN = 0xC0;
-}
 
 // ── Game state (static; no heap) ─────────────────────────────────────────
 
@@ -191,45 +155,29 @@ static void frame_step(const engine::Input& in) {
     Game::put_char(20, 1, col        ? g('Y') : g('N'));
     Game::put_char(26, 1, (Game::sound.active(0) || Game::sound.active(1))
                               ? g('Y') : g('N'));
-
-    // Suppress the OS attract-mode colour cycling so the display stays bright.
-    poke(0x004D, 0);   // ATRACT
+    // (Attract-mode suppression is handled by the engine's vbi_service.)
 }
 
 // ── Entry point ──────────────────────────────────────────────────────────
 
 int main() {
-    // Builds the display list, sets up P/M, and installs the (now hardware-
-    // correct) deferred-VBI service. No charset argument -> CHBASE keeps its
-    // power-on value pointing at the Atari ROM character set at $E000.
+    // Builds the display list, programs the OS shadows (display list, SDMCTL with
+    // P/M DMA), arms the DLI dispatcher, sets up P/M, and installs the deferred-VBI
+    // service. No charset argument -> CHBASE keeps its power-on value pointing at
+    // the Atari ROM character set at $E000.
     Game::init();
 
-    // P/M object sizes: single-width players, single-width missiles.
-    *atari::reg::SIZEP0 = 0;
-    *atari::reg::SIZEP1 = 0;
-    *atari::reg::SIZEM  = 0;
+    // Single-width player objects (the arrow and the diamond).
+    Platform::hal::set_player_size(0, M::sizep::NORMAL);
+    Platform::hal::set_player_size(1, M::sizep::NORMAL);
 
-    // POKEY base config so AUDC writes are audible (these are the OS defaults;
-    // set explicitly to be self-contained). AUDCTL = 0, SKCTL = normal.
-    *atari::reg::AUDCTL = 0x00;
-    poke(0xD20F, 0x03);                 // SKCTL
-
-    // Colours. Per the task, write the hardware registers directly; also write
-    // the matching OS shadow registers, because the OS deferred VBI copies the
-    // shadows over the hardware every frame and would otherwise wipe these.
-    *atari::reg::COLBK  = 0x94;  poke(0x02C8, 0x94);   // background / border
-    *atari::reg::COLPF2 = 0x94;  poke(0x02C6, 0x94);   // text background
-    *atari::reg::COLPF1 = 0x0E;  poke(0x02C5, 0x0E);   // text luminance
-    *atari::reg::COLPM0 = 0x46;  poke(0x02C0, 0x46);   // player 0 (arrow), red
-    *atari::reg::COLPM1 = 0xB6;  poke(0x02C1, 0xB6);   // player 1 (diamond), green
-
-    // Keep the engine's display list and P/M DMA alive through the OS VBI's
-    // shadow copy: SDLSTL/H -> our list, SDMCTL -> DL + normal playfield +
-    // player DMA + missile DMA + one-line P/M resolution ($3E).
-    const u16 dl = static_cast<u16>(reinterpret_cast<uintptr_t>(Game::screen.active_dl()));
-    poke(0x0230, static_cast<u8>(dl & 0xFF));   // SDLSTL
-    poke(0x0231, static_cast<u8>(dl >> 8));     // SDLSTH
-    poke(0x022F, 0x3E);                         // SDMCTL
+    // Colours, via the OS colour shadows — the OS deferred VBI copies these to the
+    // hardware registers every frame. COLOR field map: 0-3 = COLPF0-3, 4 = COLBK.
+    Platform::hal::set_color_pf(4, 0x94);   // COLBK    : background / border
+    Platform::hal::set_color_pf(2, 0x94);   // COLPF2   : text background
+    Platform::hal::set_color_pf(1, 0x0E);   // COLPF1   : text luminance
+    Platform::hal::set_color_pm(0, 0x46);   // player 0 : arrow, red
+    Platform::hal::set_color_pm(1, 0xB6);   // player 1 : diamond, green
 
     // Static HUD labels (written once).
     Game::print(0, 0, "EDGE ENGINE V0.1");
@@ -239,8 +187,9 @@ int main() {
     Game::print(16, 1, "COL:");
     Game::print(22, 1, "SND:");
 
-    // Arm the colour-split DLI after the display list exists.
-    install_color_split_dli();
+    // Register the colour-split DLI. The engine sets the row-12 DLI bit on the
+    // display list, points VDSLST at the dispatcher, and arms NMIEN each frame.
+    Game::interrupts.add_dli(kSplitScanline, &color_split);
 
     // One callback per frame, forever.
     Game::run(frame_step);

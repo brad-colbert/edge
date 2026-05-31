@@ -13,6 +13,7 @@
 
 #include <engine/display.h>
 #include <engine/screen.h>
+#include <engine/platform/atari/registers.h>   // atari::dmactl bit constants
 
 using engine::u8;
 using engine::u16;
@@ -33,14 +34,17 @@ namespace M = atari;
 // checked without a real ANTIC.
 struct MockHal {
     static const u8* last_dl;
-    static u8        dma_state;   // 0 = disabled, non-zero = enabled value
+    static u8        sdmctl;      // SDMCTL shadow, RMW'd as the real HAL does
 
-    static void antic_dma_disable()           { dma_state = 0; }
-    static void antic_dma_enable(u8 v = 0x22)  { dma_state = v; }
+    static void antic_dma_disable() { sdmctl &= M::dmactl::PM_DMA_MASK; }
+    static void antic_dma_enable(u8 mode_bits = M::dmactl::PLAYFIELD_NORMAL) {
+        sdmctl = static_cast<u8>((sdmctl & M::dmactl::PM_DMA_MASK) |
+                                 M::dmactl::DL_ENABLE | mode_bits);
+    }
     static void set_display_list(const u8* dl) { last_dl = dl; }
 };
-const u8* MockHal::last_dl   = nullptr;
-u8        MockHal::dma_state = 0;
+const u8* MockHal::last_dl = nullptr;
+u8        MockHal::sdmctl  = 0;
 
 struct MockPlatform {
     using hal = MockHal;
@@ -205,8 +209,9 @@ static void test_set_screen() {
     const u16 buf  = addr_of(g_sm.buffer());
 
     // HAL was driven: DMA re-enabled, display list installed at the built list.
+    // No P/M here, so SDMCTL is just DL-enable | normal playfield (0x22).
     CHECK(MockHal::last_dl == dl);
-    CHECK(MockHal::dma_state == 0x22);
+    CHECK(MockHal::sdmctl == (M::dmactl::DL_ENABLE | M::dmactl::PLAYFIELD_NORMAL));
 
     // Region 0's first LMS sits at a fixed position (after 3 blank lines) and
     // reloads buffer+0; region 1's first LMS follows it and reloads buffer+40.

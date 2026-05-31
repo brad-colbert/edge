@@ -133,6 +133,48 @@ EDGE_ATARI_REG(PBCTL, 0xD303);    // port B control
 #undef EDGE_ATARI_REG
 
 } // namespace reg
+
+// ── Register bit constants ────────────────────────────────────────────
+//
+// Named bits for the control registers above (and their OS shadows), so the HAL
+// composes values like `dmactl::DL_ENABLE | dmactl::PLAYFIELD_NORMAL` instead of
+// magic hex. Grouped by register in a namespace named for it.
+
+namespace dmactl {   // DMACTL / SDMCTL
+inline constexpr uint8_t PLAYFIELD_NARROW = 0x01;
+inline constexpr uint8_t PLAYFIELD_NORMAL = 0x02;
+inline constexpr uint8_t PLAYFIELD_WIDE   = 0x03;
+inline constexpr uint8_t MISSILE_DMA      = 0x04;
+inline constexpr uint8_t PLAYER_DMA       = 0x08;
+inline constexpr uint8_t PM_SINGLE_LINE   = 0x10;
+inline constexpr uint8_t DL_ENABLE        = 0x20;
+// RMW masks: the playfield-width field, and the P/M-owned bits the screen
+// manager must preserve when it rewrites the DL/playfield portion (hal.h).
+inline constexpr uint8_t PLAYFIELD_MASK   = PLAYFIELD_WIDE;                  // 0x03
+inline constexpr uint8_t PM_DMA_MASK = MISSILE_DMA | PLAYER_DMA | PM_SINGLE_LINE; // 0x1C
+} // namespace dmactl
+
+namespace nmien {    // NMIEN
+inline constexpr uint8_t VBI = 0x40;
+inline constexpr uint8_t DLI = 0x80;
+} // namespace nmien
+
+namespace gractl {   // GRACTL
+inline constexpr uint8_t MISSILE_LATCH = 0x01;
+inline constexpr uint8_t PLAYER_LATCH  = 0x02;
+} // namespace gractl
+
+namespace skctl {    // SKCTL
+inline constexpr uint8_t KEYBOARD_DEBOUNCE = 0x02;
+inline constexpr uint8_t TWO_TONE_RESET    = 0x03;
+} // namespace skctl
+
+namespace sizep {    // SIZEP0-3
+inline constexpr uint8_t NORMAL = 0x00;
+inline constexpr uint8_t DOUBLE = 0x01;
+inline constexpr uint8_t QUAD   = 0x03;
+} // namespace sizep
+
 } // namespace atari
 
 #endif // ENGINE_PLATFORM_ATARI_REGISTERS_H

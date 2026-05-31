@@ -309,7 +309,9 @@ public:
     }
 
     // ── Test / debug accessors ──
-    const u8* active_dl() const      { return active_dl_; }
+    // active_dl() is mutable: the interrupt manager sets DLI bits on the live
+    // list during prepare_chain (engine/interrupt.h).
+    u8*       active_dl()            { return active_dl_; }
     u16       active_dl_size() const { return active_dl_size_; }
     u8*       buffer()               { return screen_buffer_; }
 
@@ -321,7 +323,7 @@ private:
     u8 screen_buffer_[buffer_size] = {};
     typename detail::screen_views_of<screens>::type views_;
 
-    const u8* active_dl_      = nullptr;   // last built list (points into a static)
+    u8*       active_dl_      = nullptr;   // last built list (points into a static)
     u16       active_dl_size_ = 0;
 };
 

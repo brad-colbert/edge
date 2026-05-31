@@ -14,6 +14,7 @@
 
 #include <engine/core.h>
 #include <engine/display.h>
+#include <engine/platform/atari/registers.h>   // atari::dmactl / gractl bit constants
 
 using engine::u8;
 using engine::u16;
@@ -33,13 +34,15 @@ namespace M = atari;
 struct MockHal {
     // Display / DMA.
     static const u8* last_dl;
-    static u8        dma_state;
+    static u8        sdmctl;       // SDMCTL shadow, RMW'd as the real HAL does
     static u8        chbase;
     static unsigned  chbase_writes;
     // P/M.
     static u8        pm_base_page;
     static bool      pm_base_set;
     static u8        gractl;
+    // System.
+    static unsigned  attract_suppressions;
     // VBI install.
     static void    (*vbi_handler)();
     // Injected input.
@@ -51,9 +54,13 @@ struct MockHal {
 
     static constexpr uint16_t pm_area_bytes = 2048;
 
-    // Display list / DMA.
-    static void antic_dma_disable()            { dma_state = 0; }
-    static void antic_dma_enable(u8 v = 0x22)  { dma_state = v; }
+    // Display list / DMA — SDMCTL accumulates DL/playfield (here) and P/M bits
+    // (pm_dma_enable), each side preserving the other's bits.
+    static void antic_dma_disable() { sdmctl &= M::dmactl::PM_DMA_MASK; }
+    static void antic_dma_enable(u8 mode_bits = M::dmactl::PLAYFIELD_NORMAL) {
+        sdmctl = static_cast<u8>((sdmctl & M::dmactl::PM_DMA_MASK) |
+                                 M::dmactl::DL_ENABLE | mode_bits);
+    }
     static void set_display_list(const u8* dl) { last_dl = dl; }
 
     // Char set.
@@ -71,9 +78,14 @@ struct MockHal {
     }
     static uint16_t pm_strip_size(u8) { return 256; }
 
-    // DLI dispatcher addresses (prepare_chain reads these).
+    // DLI dispatcher addresses + delivery (prepare_chain drives these).
     static uint16_t dli_dispatch_addr() { return 0xD15A; }
     static uint16_t dli_terminal_addr() { return 0xD160; }
+    static void program_dli_lines(u8*, u16, const u8*, u8) {}
+    static void write_vdslst(u16) {}
+    static void enable_dli()  {}
+    static void disable_dli() {}
+    static void install_dli_dispatch(u16, u16, u16, u16, u16) {}
 
     // Input capture (injected).
     static u8 read_joystick(u8 port) { return joy_state[port]; }
@@ -86,17 +98,31 @@ struct MockHal {
     static u8 coll_missile_player(u8 m)    { return in_m_pl[m]; }
     static void clear_collisions()         { ++clear_calls; }
 
-    // P/M DMA setup.
+    // P/M DMA setup — GRACTL latch (chip) + the P/M bits OR'd into SDMCTL.
     static void set_pm_base(u8 page) { pm_base_page = page; pm_base_set = true; }
-    static void pm_dma_enable()      { gractl = 0x03; }
-    static void pm_dma_disable()     { gractl = 0x00; }
+    static void pm_dma_enable(bool single_line) {
+        gractl = M::gractl::PLAYER_LATCH | M::gractl::MISSILE_LATCH;
+        u8 bits = M::dmactl::PLAYER_DMA | M::dmactl::MISSILE_DMA;
+        if (single_line) bits |= M::dmactl::PM_SINGLE_LINE;
+        sdmctl = static_cast<u8>(sdmctl | bits);
+    }
+    static void pm_dma_disable() {
+        gractl = 0x00;
+        sdmctl &= static_cast<u8>(~M::dmactl::PM_DMA_MASK);
+    }
+
+    // OS shadow colours + attract suppression.
+    static void set_color_pm(u8, u8) {}
+    static void set_color_pf(u8, u8) {}
+    static void suppress_attract() { ++attract_suppressions; }
 
     // VBI install.
     static void install_vbi(void (*h)()) { vbi_handler = h; }
 
     static void reset() {
-        last_dl = nullptr; dma_state = 0; chbase = 0; chbase_writes = 0;
+        last_dl = nullptr; sdmctl = 0; chbase = 0; chbase_writes = 0;
         pm_base_page = 0; pm_base_set = false; gractl = 0;
+        attract_suppressions = 0;
         vbi_handler = nullptr; key_state = 0; clear_calls = 0;
         for (u8 i = 0; i < 2; ++i) joy_state[i] = 0;
         for (u8 i = 0; i < 4; ++i)
@@ -104,12 +130,13 @@ struct MockHal {
     }
 };
 const u8* MockHal::last_dl       = nullptr;
-u8        MockHal::dma_state     = 0;
+u8        MockHal::sdmctl        = 0;
 u8        MockHal::chbase        = 0;
 unsigned  MockHal::chbase_writes = 0;
 u8        MockHal::pm_base_page  = 0;
 bool      MockHal::pm_base_set   = false;
 u8        MockHal::gractl        = 0;
+unsigned  MockHal::attract_suppressions = 0;
 void    (*MockHal::vbi_handler)() = nullptr;
 u8        MockHal::joy_state[2]  = {};
 u8        MockHal::key_state     = 0;
@@ -165,10 +192,24 @@ static void test_init() {
     Game::init();
 
     CHECK(MockHal::last_dl != nullptr);      // display list installed
-    CHECK(MockHal::dma_state != 0);          // ANTIC DMA re-enabled
+    CHECK(MockHal::sdmctl != 0);             // ANTIC DMA re-enabled
     CHECK(MockHal::pm_base_set);             // PMBASE programmed
     CHECK(MockHal::gractl == 0x03);          // P/M DMA latched
     CHECK(MockHal::vbi_handler == &Game::vbi_service);
+}
+
+// After init() the SDMCTL shadow must carry BOTH subsystems' bits: the screen
+// manager's DL-enable + normal playfield AND the sprite system's P/M DMA +
+// single-line resolution (the default PMRes). This proves the RMW accumulation
+// in the HAL — neither write clobbers the other's bits.
+static void test_sdmctl_composition() {
+    MockHal::reset();
+    Game::init();
+
+    const u8 expected = M::dmactl::DL_ENABLE | M::dmactl::PLAYFIELD_NORMAL |
+                        M::dmactl::PLAYER_DMA | M::dmactl::MISSILE_DMA |
+                        M::dmactl::PM_SINGLE_LINE;   // 0x3E
+    CHECK(MockHal::sdmctl == expected);
 }
 
 // init(charset) additionally loads the char set and points CHBASE at it.
@@ -237,6 +278,7 @@ static void test_vbi_service() {
     CHECK(Game::pm_collisions().player_to_player(0) == 0x04);
     CHECK(Game::pm_collisions().missile_to_playfield(1) == 0x02);
     CHECK(MockHal::clear_calls == 1);
+    CHECK(MockHal::attract_suppressions == 1);   // ATRACT zeroed this frame
 
     CHECK(Game::frame_ready_);             // loop frame released
 }
@@ -251,6 +293,7 @@ static void compile_only_loop_check() {
 
 int main() {
     test_init();
+    test_sdmctl_composition();
     test_init_charset();
     test_subsystem_access();
     test_sprite_delegation();

@@ -15,20 +15,16 @@
 
 #include "antic.h"
 #include "registers.h"
+#include "os.h"
 #include "dli_dispatch.h"
 
 namespace atari {
 
-// VVBLKD — the OS deferred vertical-blank vector ($0224/$0225). Like VDSLST in
-// dli_dispatch.h this is a RAM vector, not a chip register, so it lives here.
-// The OS dispatches the deferred VBI through it; a deferred handler exits via
-// XITVBV ($E462).
-inline constexpr uint16_t VVBLKD_ADDR = 0x0224;
-
-// XITVBV — the OS deferred-VBI exit routine ($E462). A deferred handler reached
-// via JMP (VVBLKD) must leave through here (it pulls the A/X/Y the OS VBI
-// prologue saved and RTIs); returning with RTS would corrupt the stack.
-inline constexpr uint16_t XITVBV_ADDR = 0xE462;
+// The OS deferred-VBI vector (os::VVBLKD, $0224/$0225) and the deferred-VBI exit
+// routine (os::XITVBV, $E462) live in os.h. install_vbi points VVBLKD at the
+// trampoline below; a deferred handler reached via JMP (VVBLKD) must leave
+// through XITVBV (it pulls the A/X/Y the OS VBI prologue saved and RTIs);
+// returning with RTS would corrupt the stack.
 
 // ── Deferred-VBI trampoline (the live ANTIC path) ─────────────────────
 //
@@ -101,24 +97,94 @@ struct Hal {
             reinterpret_cast<uintptr_t>(&edge_dli_terminal));
     }
 
+    // Patch the C++ DLI dispatcher's operands with the InterruptManager's table
+    // and current_ addresses. Called once from engine::Core::init via
+    // InterruptManager::arm_dispatch (the single manager instance never moves).
+    static void install_dli_dispatch(uint16_t cur,
+                                     uint16_t handler_lo, uint16_t handler_hi,
+                                     uint16_t next_lo, uint16_t next_hi) {
+        install_dispatch(cur, handler_lo, handler_hi, next_lo, next_hi);
+    }
+
     // ── Display list / ANTIC DMA ──
     //
     // The screen manager (engine/screen.h) reaches ANTIC only through these
-    // (Dependency Rule 2). Disabling DMA blanks the screen for a safe display-
-    // list swap; set_display_list points ANTIC at the active list; enabling DMA
-    // restores it. DMACTL standard value: $20 (display-list DMA fetch) | $02
-    // (normal-width playfield).
-    static constexpr uint8_t DMACTL_NORMAL = 0x22;
-
-    static void antic_dma_disable() { *reg::DMACTL = 0x00; }
-    static void antic_dma_enable(uint8_t dmactl = DMACTL_NORMAL) {
-        *reg::DMACTL = dmactl;
+    // (Dependency Rule 2). All writes go to the OS shadows (os.h), not the chip
+    // registers: the OS deferred VBI copies the shadows to hardware each frame
+    // before the engine's service runs, so a direct register write would be
+    // overwritten.
+    //
+    // SDMCTL carries bits owned by two subsystems — the screen manager (DL-enable
+    // + playfield width) and the sprite system (P/M DMA + line resolution). Since
+    // SDMCTL is readable RAM, each side read-modify-writes only its own bits:
+    // antic_dma_enable rewrites the DL/playfield portion while preserving the P/M
+    // bits, and pm_dma_enable (below) ORs in the P/M bits. antic_dma_disable
+    // clears just DL+playfield (keeping P/M) so P/M DMA survives the
+    // disable→set_display_list→enable swap a screen change performs.
+    static void antic_dma_disable() { *os::SDMCTL &= dmactl::PM_DMA_MASK; }
+    static void antic_dma_enable(uint8_t mode_bits = dmactl::PLAYFIELD_NORMAL) {
+        *os::SDMCTL = static_cast<uint8_t>((*os::SDMCTL & dmactl::PM_DMA_MASK) |
+                                           dmactl::DL_ENABLE | mode_bits);
     }
     static void set_display_list(const uint8_t* dl) {
         const uint16_t a = static_cast<uint16_t>(reinterpret_cast<uintptr_t>(dl));
-        *reg::DLISTL = static_cast<uint8_t>(a & 0xFF);
-        *reg::DLISTH = static_cast<uint8_t>(a >> 8);
+        *os::SDLSTL = static_cast<uint8_t>(a & 0xFF);
+        *os::SDLSTH = static_cast<uint8_t>(a >> 8);
     }
+
+    // ── DLI delivery (display-list bits + VDSLST + NMIEN) ──
+    //
+    // The portable InterruptManager (engine/interrupt.h) builds the chain tables
+    // but cannot touch the display list (it must not include ANTIC headers), so it
+    // hands the raw list down here. program_dli_lines walks the list and sets the
+    // DLI ($80) bit on the mode line that displays each requested scanline,
+    // clearing every other DLI bit so a stale chain doesn't fire. Scanlines are
+    // display-list-relative (line 0 = first instruction; the leading blank lines
+    // count). The walk handles blank-line instructions (low nibble 0, variable
+    // count), mode lines with/without an LMS prefix (1 vs 3 bytes), and stops at
+    // the jump/JVB terminator (low nibble 1).
+    static void program_dli_lines(uint8_t* dl, uint16_t dl_size,
+                                  const uint8_t* scanlines, uint8_t count) {
+        uint16_t scan = 0;
+        uint16_t p    = 0;
+        while (p < dl_size) {
+            const uint8_t low = static_cast<uint8_t>(dl[p] & 0x0F);
+            if (low == 0x01) break;                         // JMP / JVB terminator
+            if (low == 0x00) {                              // blank-line instruction
+                dl[p] = static_cast<uint8_t>(dl[p] & ~DL_DLI);
+                scan = static_cast<uint16_t>(scan + ((dl[p] >> 4) & 0x07) + 1);
+                ++p;
+                continue;
+            }
+            // Mode line: clear any stale DLI, then set it if a requested scanline
+            // falls within this line's [scan, scan+height) span.
+            uint8_t instr = static_cast<uint8_t>(dl[p] & ~DL_DLI);
+            const uint8_t h =
+                scanlines_per_line(static_cast<Mode>(low));
+            for (uint8_t k = 0; k < count; ++k) {
+                if (scanlines[k] >= scan && scanlines[k] < scan + h) {
+                    instr |= DL_DLI;
+                    break;
+                }
+            }
+            dl[p] = instr;
+            p = static_cast<uint16_t>(p + ((instr & DL_LMS) ? 3 : 1));
+            scan = static_cast<uint16_t>(scan + h);
+        }
+    }
+
+    // Point the OS DLI vector (os::VDSLST, $0200/1) at the chain head the VBI
+    // computed; the dispatcher rewrites it mid-frame as it walks the chain.
+    static void write_vdslst(uint16_t a) {
+        os::VDSLST[0] = static_cast<uint8_t>(a & 0xFF);
+        os::VDSLST[1] = static_cast<uint8_t>(a >> 8);
+    }
+
+    // Arm/disarm the DLI NMI. NMIEN is write-only (reads return NMIST) so it can't
+    // be RMW'd; the engine's VBI NMI is always armed once install_vbi ran, so the
+    // correct absolute value is VBI|DLI to enable and VBI alone to disable.
+    static void enable_dli()  { *reg::NMIEN = nmien::VBI | nmien::DLI; }
+    static void disable_dli() { *reg::NMIEN = nmien::VBI; }
 
     // ── Player/Missile graphics ──
     //
@@ -128,6 +194,10 @@ struct Hal {
     // the VBI commit and per-zone positions from raw DLIs through these.
     static void write_hposp(uint8_t player,  uint8_t x) { reg::HPOSP0[player]  = x; }
     static void write_hposm(uint8_t missile, uint8_t x) { reg::HPOSM0[missile] = x; }
+
+    // Player object width (SIZEP0-3 are contiguous, like HPOSP0). `size` is one
+    // of atari::sizep:: (NORMAL/DOUBLE/QUAD).
+    static void set_player_size(uint8_t player, uint8_t size) { reg::SIZEP0[player] = size; }
 
     // P/M memory layout for the sprite-commit phase. `res` is the resolution as
     // a plain byte (0 = single-line, 1 = double-line), matching the underlying
@@ -202,8 +272,33 @@ struct Hal {
     // display path.
     static constexpr uint16_t pm_area_bytes = 2048;
     static void set_pm_base(uint8_t page) { *reg::PMBASE = page; }
-    static void pm_dma_enable()  { *reg::GRACTL = 0x03; }   // players + missiles
-    static void pm_dma_disable() { *reg::GRACTL = 0x00; }
+    // Latch the GTIA P/M DMA (GRACTL, a chip register the OS does not shadow) and
+    // OR the P/M DMA bits into SDMCTL alongside whatever DL/playfield bits the
+    // screen manager already placed there. `single_line` selects single-scanline
+    // P/M resolution (PM_SINGLE_LINE); double-line leaves it clear.
+    static void pm_dma_enable(bool single_line) {
+        *reg::GRACTL = gractl::PLAYER_LATCH | gractl::MISSILE_LATCH;
+        uint8_t bits = dmactl::PLAYER_DMA | dmactl::MISSILE_DMA;
+        if (single_line) bits |= dmactl::PM_SINGLE_LINE;
+        *os::SDMCTL = static_cast<uint8_t>(*os::SDMCTL | bits);
+    }
+    static void pm_dma_disable() {
+        *reg::GRACTL = 0x00;
+        *os::SDMCTL &= static_cast<uint8_t>(~dmactl::PM_DMA_MASK);
+    }
+
+    // ── OS shadow colours + system ──
+    //
+    // Persistent (non-DLI) colours are written to the OS shadows so they survive
+    // the OS VBI copy; the per-scanline DLI register stores above hit the chip
+    // registers directly (they run after the copy). PCOLR0[player] shadows
+    // COLPM0-3; COLOR0[field] shadows COLPF0-3 then COLBK at field 4.
+    static void set_color_pm(uint8_t player, uint8_t color) { os::PCOLR0[player] = color; }
+    static void set_color_pf(uint8_t field,  uint8_t color) { os::COLOR0[field]  = color; }
+
+    // Zero the attract-mode timer each frame (from the VBI service) to stop the
+    // OS dimming/cycling colours after a few minutes of no input.
+    static void suppress_attract() { *os::ATRACT = 0; }
 
     // ── Deferred VBI install ──
     //
@@ -223,17 +318,15 @@ struct Hal {
 
         const uint16_t t =
             static_cast<uint16_t>(reinterpret_cast<uintptr_t>(&edge_vbi_trampoline));
-        volatile uint8_t* v =
-            reinterpret_cast<volatile uint8_t*>(static_cast<uintptr_t>(VVBLKD_ADDR));
 
         // NMIEN is write-only (reads return NMIST), so it can't be RMW'd: blank
-        // all NMIs while the two-byte vector is swapped to avoid a VBI firing on
-        // a half-written vector, then re-enable the VBI NMI (bit 6). The DLI NMI
-        // (bit 7) is armed separately by code that installs a DLI.
+        // all NMIs while the two-byte os::VVBLKD vector is swapped to avoid a VBI
+        // firing on a half-written vector, then re-enable the VBI NMI. The DLI
+        // NMI (nmien::DLI) is armed separately by code that installs a DLI.
         *reg::NMIEN = 0x00;
-        v[0] = static_cast<uint8_t>(t & 0xFF);
-        v[1] = static_cast<uint8_t>(t >> 8);
-        *reg::NMIEN = 0x40;
+        os::VVBLKD[0] = static_cast<uint8_t>(t & 0xFF);
+        os::VVBLKD[1] = static_cast<uint8_t>(t >> 8);
+        *reg::NMIEN = nmien::VBI;
     }
 };
 

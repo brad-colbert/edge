@@ -147,11 +147,13 @@ public:
         set_screen<InitialScreen>([] {});
         tiles.init_charset(cs, charset_buffer_);
         tiles.set_chbase(page_of(charset_buffer_));
+        interrupts.arm_dispatch();
         Platform::hal::install_vbi(&vbi_service);
     }
     static void init() {
         setup_pm();
         set_screen<InitialScreen>([] {});
+        interrupts.arm_dispatch();
         Platform::hal::install_vbi(&vbi_service);
     }
 
@@ -203,6 +205,10 @@ public:
     // "Data Flow Per Frame" order. Non-capturing so its address is a plain
     // void(*)() for install_vbi().
     static void vbi_service() {
+        // 0. Suppress attract mode (the OS would otherwise dim/cycle colours
+        //    after a few minutes of no console/keyboard input).
+        Platform::hal::suppress_attract();
+
         // 1. Input capture.
         u8 joy[kPorts];
         for (u8 p = 0; p < kPorts; ++p) joy[p] = Platform::hal::read_joystick(p);
@@ -227,9 +233,11 @@ public:
         // 5. Recompute multiplex zones for the next commit.
         sprites.update_zones();
 
-        // 6. Rebuild the DLI chain (build_dli_handlers calls begin_dynamic()).
+        // 6. Rebuild the DLI chain (build_dli_handlers calls begin_dynamic()),
+        //    then complete delivery: prepare_chain sets the DLI bits on the
+        //    active display list and re-arms VDSLST/NMIEN for the frame.
         sprites.build_dli_handlers(interrupts);
-        interrupts.prepare_chain();
+        interrupts.prepare_chain(screen.active_dl(), screen.active_dl_size());
 
         // 7. User VBI hooks.
         interrupts.run_vbi_hooks();
@@ -260,7 +268,9 @@ public:
 private:
     static void setup_pm() {
         Platform::hal::set_pm_base(page_of(pm_buffer_));
-        Platform::hal::pm_dma_enable();
+        // Pass the sprite manager's P/M resolution so the HAL sets PM_SINGLE_LINE
+        // in SDMCTL to match the layout sprites.commit() writes into pm_buffer_.
+        Platform::hal::pm_dma_enable(sprites.resolution() == PMRes::SingleLine);
     }
     static u8 page_of(const void* p) {
         return static_cast<u8>(

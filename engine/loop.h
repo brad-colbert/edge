@@ -23,6 +23,18 @@
 
 namespace engine {
 
+// Compiler memory barrier. The VBI service (engine/core.h) is an asynchronous
+// interrupt the optimiser cannot see being called — its address is only handed
+// to install_vbi — so under whole-program optimisation it assumes the state the
+// VBI writes (Core::input, Core::collisions_, …) is never modified between the
+// loop's reads and would constant-fold those reads to the initial (zero) value.
+// `frame_ready_` is volatile so the spin itself is honoured, but a volatile load
+// is not a general barrier. This clobber forces the compiler to reload every
+// VBI-updated object after the frame is released, before the callback reads it.
+[[gnu::always_inline]] inline void sync_after_vbi() {
+    __asm__ volatile("" ::: "memory");
+}
+
 // Run `cb` once per frame forever. Each iteration waits for the VBI to set the
 // frame-ready flag, clears it, runs the callback with the input snapshot, then
 // runs the post-render hook if installed.
@@ -31,6 +43,7 @@ template <typename Core, typename Cb>
     for (;;) {
         while (!Core::frame_ready_) { }
         Core::frame_ready_ = false;
+        sync_after_vbi();
         cb(Core::input);
         if (Core::hooks.post_render) Core::hooks.post_render();
     }
@@ -42,6 +55,7 @@ void run_until(Cb cb) {
     for (;;) {
         while (!Core::frame_ready_) { }
         Core::frame_ready_ = false;
+        sync_after_vbi();
         const bool done = cb(Core::input);
         if (Core::hooks.post_render) Core::hooks.post_render();
         if (done) return;

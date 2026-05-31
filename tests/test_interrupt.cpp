@@ -30,6 +30,24 @@ struct MockHal {
     static u16 dli_dispatch_addr() { return DISPATCH; }
     static u16 dli_terminal_addr() { return TERMINAL; }
 
+    // DLI delivery — recorded so prepare_chain's hardware arming is observable.
+    // program_dli_lines is a no-op here; the real Atari walker is tested directly
+    // (test_dli_program) against atari::Hal::program_dli_lines.
+    static u16  vdslst;
+    static bool dli_enabled;
+    static void program_dli_lines(u8*, u16, const u8*, u8) {}
+    static void write_vdslst(u16 a) { vdslst = a; }
+    static void enable_dli()  { dli_enabled = true; }
+    static void disable_dli() { dli_enabled = false; }
+
+    // Dispatcher install — record the args so arm_dispatch's wiring is observable.
+    static bool dispatch_armed;
+    static u16  arm_cur, arm_hlo, arm_hhi, arm_nlo, arm_nhi;
+    static void install_dli_dispatch(u16 cur, u16 hlo, u16 hhi, u16 nlo, u16 nhi) {
+        dispatch_armed = true;
+        arm_cur = cur; arm_hlo = hlo; arm_hhi = hhi; arm_nlo = nlo; arm_nhi = nhi;
+    }
+
     // DLIContext stores — stubbed (DLIContext is compiled, not exercised).
     static u8 last_colpf0;
     static void write_colpf0(u8 v) { last_colpf0 = v; }
@@ -41,7 +59,12 @@ struct MockHal {
     static void write_hscrol(u8) {}
     static void write_vscrol(u8) {}
 };
-u8 MockHal::last_colpf0 = 0;
+u8   MockHal::last_colpf0    = 0;
+u16  MockHal::vdslst         = 0;
+bool MockHal::dli_enabled    = false;
+bool MockHal::dispatch_armed = false;
+u16  MockHal::arm_cur = 0, MockHal::arm_hlo = 0, MockHal::arm_hhi = 0,
+     MockHal::arm_nlo = 0, MockHal::arm_nhi = 0;
 
 struct MockPlatform {
     using hal = MockHal;
@@ -181,6 +204,72 @@ static void test_dynamic_lifecycle() {
     CHECK(im.static_dli_count() == 1);
 }
 
+// ── Display-list DLI-bit programming (real Atari walker) ───────────────
+
+static void test_dli_program() {
+    namespace A = atari;
+    // 3 blank-8 lines (24 scanlines), then 3 Mode-2 lines (8 each): the first
+    // carries an LMS prefix (+2 address bytes), the third starts with a stale DLI
+    // bit. A JVB terminates. Scanline spans: [24,32) [32,40) [40,48).
+    u8 dl[] = {
+        A::dl_blank(8), A::dl_blank(8), A::dl_blank(8),
+        static_cast<u8>(A::dl_mode_byte(A::Mode::MODE_2) | A::DL_LMS), 0x00, 0x40,
+        A::dl_mode_byte(A::Mode::MODE_2),
+        static_cast<u8>(A::dl_mode_byte(A::Mode::MODE_2) | A::DL_DLI),
+        A::DL_JVB, 0x00, 0x40,
+    };
+    const u8 lines[] = {24, 35};   // -> line @ idx3 [24,32) and line @ idx6 [32,40)
+    A::Hal::program_dli_lines(dl, sizeof(dl), lines, 2);
+
+    CHECK(dl[3] == (A::dl_mode_byte(A::Mode::MODE_2) | A::DL_LMS | A::DL_DLI)); // 0xC2
+    CHECK(dl[4] == 0x00);                                   // LMS address untouched
+    CHECK(dl[5] == 0x40);
+    CHECK(dl[6] == (A::dl_mode_byte(A::Mode::MODE_2) | A::DL_DLI));             // 0x82
+    CHECK(dl[7] == A::dl_mode_byte(A::Mode::MODE_2));       // stale DLI cleared (0x02)
+    CHECK(dl[8] == A::DL_JVB);                              // terminator untouched
+
+    // Empty chain clears every DLI bit.
+    A::Hal::program_dli_lines(dl, sizeof(dl), nullptr, 0);
+    CHECK(dl[3] == (A::dl_mode_byte(A::Mode::MODE_2) | A::DL_LMS));   // 0x42
+    CHECK(dl[6] == A::dl_mode_byte(A::Mode::MODE_2));                 // 0x02
+    CHECK(dl[7] == A::dl_mode_byte(A::Mode::MODE_2));                 // 0x02
+}
+
+// ── prepare_chain arms VDSLST + NMIEN (via MockHal) ────────────────────
+
+static void test_prepare_chain_arms() {
+    u8 dummy_dl[] = { atari::DL_JVB, 0x00, 0x40 };   // content irrelevant (mock no-op)
+
+    IM im;
+    im.add_dli(40, h_a);
+    im.add_dli(80, h_b);
+    im.prepare_chain(dummy_dl, sizeof(dummy_dl));
+    CHECK(MockHal::vdslst == im.first_handler_addr());
+    CHECK(MockHal::vdslst == MockHal::DISPATCH);     // slot 0 is a C++ handler
+    CHECK(MockHal::dli_enabled == true);
+
+    // Empty chain: VDSLST points at the terminal and the DLI NMI is disabled.
+    IM im2;
+    im2.prepare_chain(dummy_dl, sizeof(dummy_dl));
+    CHECK(MockHal::vdslst == MockHal::TERMINAL);
+    CHECK(MockHal::dli_enabled == false);
+}
+
+// ── arm_dispatch forwards the table/current_ addresses to the HAL ──────
+
+static void test_arm_dispatch() {
+    MockHal::dispatch_armed = false;
+    IM im;
+    im.arm_dispatch();
+    CHECK(MockHal::dispatch_armed);
+    // The handler/next table bases and current_ are distinct, real addresses.
+    CHECK(MockHal::arm_cur != 0);
+    CHECK(MockHal::arm_hlo != 0);
+    CHECK(MockHal::arm_hlo != MockHal::arm_hhi);   // handler_lo_ vs handler_hi_
+    CHECK(MockHal::arm_nlo != MockHal::arm_nhi);   // next_lo_   vs next_hi_
+    CHECK(MockHal::arm_hlo != MockHal::arm_nlo);   // handler vs next tables
+}
+
 // ── VBI hooks: add 2, remove 1 ─────────────────────────────────────────
 
 static void test_vbi_hooks() {
@@ -199,6 +288,9 @@ int main() {
     test_priority_ordering();
     test_clear_transient();
     test_dynamic_lifecycle();
+    test_dli_program();
+    test_prepare_chain_arms();
+    test_arm_dispatch();
     test_vbi_hooks();
 
     if (g_failures == 0) {

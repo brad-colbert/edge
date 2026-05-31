@@ -176,12 +176,13 @@ public:
     //
     // Sort all live slots (static + dynamic) by scanline then priority, then
     // build the indexed handler and next-pointer tables the dispatcher walks.
-    void prepare_chain() {
+    void prepare_chain(u8* display_list = nullptr, u16 dl_size = 0) {
         sort_slots();
 
         const u16 dispatcher = Platform::hal::dli_dispatch_addr();
         const u16 terminal   = Platform::hal::dli_terminal_addr();
 
+        u8 lines[MaxDLIs];
         for (u8 i = 0; i < total_count_; ++i) {
             const u16 ha = handler_addr(chain_[i]);
             handler_lo_[i] = lo(ha);
@@ -192,12 +193,34 @@ public:
                                                    : terminal;
             next_lo_[i] = lo(nxt);
             next_hi_[i] = hi(nxt);
+
+            lines[i] = chain_[i].scanline;
         }
 
         // VDSLST is pointed here by the VBI; current_ starts the chain at 0.
         first_entry_ = (total_count_ > 0) ? entry(chain_[0], dispatcher)
                                           : terminal;
         current_ = 0;
+
+        // Complete the hardware delivery: set the DLI bit on each chained mode
+        // line (the platform owns the ANTIC display-list walk — Dependency Rule
+        // 2), re-point VDSLST at the chain head, and arm/disarm the DLI NMI.
+        if (display_list)
+            Platform::hal::program_dli_lines(display_list, dl_size, lines,
+                                             total_count_);
+        Platform::hal::write_vdslst(first_entry_);
+        if (total_count_ > 0) Platform::hal::enable_dli();
+        else                  Platform::hal::disable_dli();
+    }
+
+    // One-time setup: patch the Atari C++ DLI dispatcher's operands with this
+    // manager's table and current_ addresses (the single instance never moves, so
+    // the addresses are stable). engine::Core::init calls this. Portable: the
+    // ANTIC-specific patching lives behind Platform::hal (Dependency Rule 2).
+    void arm_dispatch() {
+        Platform::hal::install_dli_dispatch(
+            addr(&current_), addr(handler_lo_), addr(handler_hi_),
+            addr(next_lo_), addr(next_hi_));
     }
 
     // Address the VBI writes into VDSLST to arm the first DLI of the frame.
@@ -238,6 +261,9 @@ private:
     }
     static u8   lo(u16 a) { return static_cast<u8>(a & 0xFF); }
     static u8   hi(u16 a) { return static_cast<u8>(a >> 8); }
+    static u16  addr(const void* p) {
+        return static_cast<u16>(reinterpret_cast<uintptr_t>(p));
+    }
     static u16  handler_addr(const DLISlot& s) {
         return static_cast<u16>(reinterpret_cast<uintptr_t>(s.handler));
     }
