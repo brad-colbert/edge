@@ -167,6 +167,7 @@ public:
     }
     static void sprite_hide(u8 slot) { sprites.sprite_hide(slot); }
     static void sprite_hide_all()    { sprites.sprite_hide_all(); }
+    static void sprite_color(u8 slot, u8 color) { sprites.sprite_color(slot, color); }
 
     // P/M collision state latched at the last VBI.
     static const PMCollisions& pm_collisions() { return collisions_; }

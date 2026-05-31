@@ -195,6 +195,13 @@ struct Hal {
     static void write_hposp(uint8_t player,  uint8_t x) { reg::HPOSP0[player]  = x; }
     static void write_hposm(uint8_t missile, uint8_t x) { reg::HPOSM0[missile] = x; }
 
+    // Player colour straight to the GTIA hardware register (COLPM0-3 contiguous).
+    // Unlike set_color_pm (which writes the os::PCOLR0 shadow for OS-managed
+    // colours), the sprite multiplexer drives COLPM directly: zone-0 colours from
+    // the VBI commit, later zones from the boundary DLI, so a sprite keeps its
+    // colour on whatever player slot it lands in.
+    static void write_colpm(uint8_t player, uint8_t color) { reg::COLPM0[player] = color; }
+
     // Player object width (SIZEP0-3 are contiguous, like HPOSP0). `size` is one
     // of atari::sizep:: (NORMAL/DOUBLE/QUAD).
     static void set_player_size(uint8_t player, uint8_t size) { reg::SIZEP0[player] = size; }

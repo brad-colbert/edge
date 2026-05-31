@@ -73,6 +73,7 @@ struct MockHal {
     // P/M positions + layout.
     static void     write_hposp(u8, u8) {}
     static void     write_hposm(u8, u8) {}
+    static void     write_colpm(u8, u8) {}
     static uint16_t pm_player_offset(u8, u8 player) {
         return static_cast<uint16_t>(player * 256);
     }
@@ -236,12 +237,14 @@ static void test_subsystem_access() {
 static void test_sprite_delegation() {
     auto shp = make_sprite<8, 2>({0xFF, 0x0F});
     Game::sprite_hide_all();
+    Game::sprite_color(0, 0x3A);
     Game::sprite(0, shp, 10, 20);
 
     const auto& ls = Game::sprites.logical(0);
     CHECK(ls.x == 10);
     CHECK(ls.y == 20);
     CHECK(ls.height == 2);
+    CHECK(ls.color == 0x3A);             // sprite_color set it; sprite() kept it
     CHECK((ls.flags & engine::LogicalSprite::FLAG_ACTIVE) != 0);
     CHECK((ls.flags & engine::LogicalSprite::FLAG_VISIBLE) != 0);
 }

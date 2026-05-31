@@ -61,32 +61,39 @@ enum class PMRes : u8 { SingleLine, DoubleLine };
 
 // ── LogicalSprite ─────────────────────────────────────────────────────
 //
-// One logical sprite's buffered state. 6 bytes on the 6502 (pointer = 2 bytes).
+// One logical sprite's buffered state. 7 bytes on the 6502 (pointer = 2 bytes).
+// `color` is the sprite's COLPM value; the multiplexer drives it onto whichever
+// hardware player slot the sprite lands in, so colour follows the sprite even
+// when two sprites cross in Y (set via sprite_color(), persists across the
+// per-frame sprite() position updates).
 struct LogicalSprite {
     u8        x, y, height;
+    u8        color;
     const u8* shape;
     u8        flags;
 
     static constexpr u8 FLAG_ACTIVE  = 0x01;
     static constexpr u8 FLAG_VISIBLE = 0x02;
 };
-static_assert(sizeof(LogicalSprite) == 6, "LogicalSprite must be 6 bytes");
+static_assert(sizeof(LogicalSprite) == 7, "LogicalSprite must be 7 bytes");
 
 // ── ZoneInfo ──────────────────────────────────────────────────────────
 //
 // One multiplex zone: the scanline at which it becomes active and, per hardware
-// player, which logical sprite it shows (0xFF = unused) and at what horizontal
-// position. 9 active bytes; 8 reserved for future missile multiplexing (ADR-025
-// — keep the struct/DLI shaped for it without implementing it yet).
+// player, which logical sprite it shows (0xFF = unused), at what horizontal
+// position, and in what colour. 13 active bytes; 8 reserved for future missile
+// multiplexing (ADR-025 — keep the struct/DLI shaped for it without implementing
+// it yet). hpos/colour are snapshotted here (not read live in the DLI).
 struct ZoneInfo {
     u8 boundary_scanline;
     u8 player_assignment[4];
     u8 hpos[4];
+    u8 color[4];
     u8 missile_reserved[8];
 
     static constexpr u8 UNUSED = 0xFF;
 };
-static_assert(sizeof(ZoneInfo) == 17, "ZoneInfo must be 9 + 8 reserved bytes");
+static_assert(sizeof(ZoneInfo) == 21, "ZoneInfo must be 13 + 8 reserved bytes");
 
 // ── SpriteManager ─────────────────────────────────────────────────────
 //
@@ -104,11 +111,20 @@ public:
     // ── Logical sprite state (buffered; committed during VBI) ──
     template <typename Shape>
     void sprite(u8 slot, const Shape& shape, u8 x, u8 y) {
-        sprites_[slot] = LogicalSprite{
-            x, y, Shape::height, shape.data,
-            static_cast<u8>(LogicalSprite::FLAG_ACTIVE |
-                            LogicalSprite::FLAG_VISIBLE)};
+        // Assign fields individually so the slot's `color` (set via sprite_color)
+        // survives the per-frame position update.
+        LogicalSprite& s = sprites_[slot];
+        s.x      = x;
+        s.y      = y;
+        s.height = Shape::height;
+        s.shape  = shape.data;
+        s.flags  = static_cast<u8>(LogicalSprite::FLAG_ACTIVE |
+                                   LogicalSprite::FLAG_VISIBLE);
     }
+
+    // Set a sprite's colour (its COLPM value). The multiplexer applies it to the
+    // hardware player slot the sprite occupies each frame; sticky across sprite().
+    void sprite_color(u8 slot, u8 color) { sprites_[slot].color = color; }
 
     // Missiles are not multiplexed (ADR-025) — the 4 hardware missiles are used
     // directly. Position is buffered and pushed to HPOSM during commit.
@@ -167,9 +183,11 @@ public:
                 if (si < placed) {
                     zi.player_assignment[p] = order_[si];
                     zi.hpos[p]              = sprites_[order_[si]].x;
+                    zi.color[p]             = sprites_[order_[si]].color;
                 } else {
                     zi.player_assignment[p] = ZoneInfo::UNUSED;
                     zi.hpos[p]              = 0;
+                    zi.color[p]             = 0;
                 }
             }
             // Boundary: zone 0 from the top; later zones at the midpoint of the
@@ -231,11 +249,14 @@ public:
             }
         }
 
-        // 4. Write zone-0 player positions (the VBI sets the first zone; later
-        //    zones are armed by the boundary DLIs).
+        // 4. Write zone-0 player positions + colours (the VBI sets the first
+        //    zone; later zones are armed by the boundary DLIs). COLPM is the
+        //    hardware register, written after the OS shadow→hardware copy so it
+        //    holds for the frame and gives this zone's sprites their colours.
         if (zone_count_ > 0) {
             for (u8 p = 0; p < kPlayers; ++p) {
                 Platform::hal::write_hposp(p, zones_[0].hpos[p]);
+                Platform::hal::write_colpm(p, zones_[0].color[p]);
             }
         }
         // Missiles are direct, not multiplexed (ADR-025).
@@ -321,13 +342,15 @@ private:
                (LogicalSprite::FLAG_ACTIVE | LogicalSprite::FLAG_VISIBLE);
     }
 
-    // Raw boundary DLI: advance to the next zone and write its player positions.
+    // Raw boundary DLI: advance to the next zone and write its player positions
+    // and colours (so each zone's sprites show their own colour, not the slot's).
     static void zone_dli() {
         SpriteManager* m = s_active_;
         const u8 z = static_cast<u8>(++s_dli_zone_);
         const ZoneInfo& zi = m->zones_[z];
         for (u8 p = 0; p < kPlayers; ++p) {
             Platform::hal::write_hposp(p, zi.hpos[p]);
+            Platform::hal::write_colpm(p, zi.color[p]);
         }
     }
 

@@ -18,10 +18,11 @@
 //
 // Every hardware interaction goes through engine::Core / Platform::hal — there
 // are no poke()s, no inline assembly, and no magic addresses. The engine now
-// owns the display list and P/M DMA (init programs the OS shadows), the OS colour
-// shadows (Platform::hal::set_color_pf / set_color_pm), DLI delivery (the split
-// is a C++ Game::interrupts.add_dli handler dispatched through the engine), and
-// attract-mode suppression (vbi_service). POKEY base config (SKCTL=3, AUDCTL=0)
+// owns the display list and P/M DMA (init programs the OS shadows), playfield
+// colours (Platform::hal::set_color_pf), per-sprite colours (Game::sprite_color,
+// driven onto COLPM by the multiplexer), DLI delivery (the split is a C++
+// Game::interrupts.add_dli handler dispatched through the engine), and attract-
+// mode suppression (vbi_service). POKEY base config (SKCTL=3, AUDCTL=0)
 // is left at the values the Atari OS installs at boot. This file is meant to read
 // as example game code.
 
@@ -171,13 +172,18 @@ int main() {
     Platform::hal::set_player_size(0, M::sizep::NORMAL);
     Platform::hal::set_player_size(1, M::sizep::NORMAL);
 
-    // Colours, via the OS colour shadows — the OS deferred VBI copies these to the
-    // hardware registers every frame. COLOR field map: 0-3 = COLPF0-3, 4 = COLBK.
-    Platform::hal::set_color_pf(4, 0x94);   // COLBK    : background / border
-    Platform::hal::set_color_pf(2, 0x94);   // COLPF2   : text background
-    Platform::hal::set_color_pf(1, 0x0E);   // COLPF1   : text luminance
-    Platform::hal::set_color_pm(0, 0x46);   // player 0 : arrow, red
-    Platform::hal::set_color_pm(1, 0xB6);   // player 1 : diamond, green
+    // Playfield colours, via the OS colour shadows — the OS deferred VBI copies
+    // these to the hardware registers every frame. Field map: 0-3 = COLPF0-3,
+    // 4 = COLBK.
+    Platform::hal::set_color_pf(4, 0x94);   // COLBK  : background / border
+    Platform::hal::set_color_pf(2, 0x94);   // COLPF2 : text background
+    Platform::hal::set_color_pf(1, 0x0E);   // COLPF1 : text luminance
+
+    // Sprite colours belong to the sprite, not the player slot: the multiplexer
+    // drives COLPM to follow each sprite, so they don't swap when the arrow
+    // crosses below the diamond.
+    Game::sprite_color(0, 0x46);            // arrow,   red
+    Game::sprite_color(1, 0xB6);            // diamond, green
 
     // Static HUD labels (written once).
     Game::print(0, 0, "EDGE ENGINE V0.1");

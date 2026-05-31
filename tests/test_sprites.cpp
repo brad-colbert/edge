@@ -29,9 +29,11 @@ using engine::ZoneInfo;
 struct MockHal {
     static u8 hposp[4];
     static u8 hposm[4];
+    static u8 colpm[4];
 
     static void write_hposp(u8 player,  u8 x) { hposp[player]  = x; }
     static void write_hposm(u8 missile, u8 x) { hposm[missile] = x; }
+    static void write_colpm(u8 player,  u8 c) { colpm[player]  = c; }
 
     static u16 pm_player_offset(u8 res, u8 player) {
         const bool single = (res == 0);
@@ -43,6 +45,7 @@ struct MockHal {
 };
 u8 MockHal::hposp[4] = {};
 u8 MockHal::hposm[4] = {};
+u8 MockHal::colpm[4] = {};
 
 struct MockPlatform {
     using hal = MockHal;
@@ -213,6 +216,38 @@ static void test_sprite_hide() {
     for (u8 p = 0; p < 4; ++p) CHECK(z0.player_assignment[p] != 2);
 }
 
+// ── Per-sprite colour follows the sprite across a Y crossing ───────────
+
+static void test_sprite_color_follows_sprite() {
+    static SM mgr;
+    static u8 buf[2048] = {};
+
+    mgr.sprite_color(0, 0xAA);            // sprite 0's colour
+    mgr.sprite_color(1, 0xBB);            // sprite 1's colour
+
+    // Sprite 0 above sprite 1: sorted player 0 = sprite0, player 1 = sprite1.
+    mgr.sprite(0, g_shape, 100, 50);
+    mgr.sprite(1, g_shape, 110, 60);
+    mgr.update_zones();
+    mgr.commit(buf);
+    CHECK(MockHal::colpm[0] == 0xAA);     // slot 0 shows sprite 0's colour
+    CHECK(MockHal::colpm[1] == 0xBB);
+
+    // Move sprite 0 below sprite 1: the slots swap (player 0 = sprite1,
+    // player 1 = sprite0) but each sprite keeps its colour — COLPM follows.
+    mgr.sprite(0, g_shape, 100, 70);
+    mgr.update_zones();
+    mgr.commit(buf);
+    CHECK(mgr.player_for_sprite(0) == 1);  // sprite 0 now on slot 1
+    CHECK(mgr.player_for_sprite(1) == 0);
+    CHECK(MockHal::colpm[0] == 0xBB);      // slot 0 now shows sprite 1's colour
+    CHECK(MockHal::colpm[1] == 0xAA);      // slot 1 shows sprite 0's colour (no swap)
+
+    // sprite() preserves the colour set earlier (sticky across position updates).
+    CHECK(mgr.logical(0).color == 0xAA);
+    CHECK(mgr.logical(1).color == 0xBB);
+}
+
 // ── build_dli_handlers registers one boundary DLI per extra zone ───────
 
 static void test_dli_registration() {
@@ -232,6 +267,7 @@ int main() {
     test_nine_sprites_mapping();
     test_commit_dirty_tracking();
     test_sprite_hide();
+    test_sprite_color_follows_sprite();
     test_dli_registration();
 
     if (g_failures == 0) {
