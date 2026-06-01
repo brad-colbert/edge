@@ -1,5 +1,7 @@
 # EDGE API Reference
 
+> **Applies to EDGE v0.1.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
+
 This reference is organized in two layers:
 
 1. the general engine-facing API a programmer writes against
@@ -44,7 +46,7 @@ The frame model is:
 - input is captured once per frame
 - your callback runs with an immutable input snapshot
 - you update game state and write logical render/audio requests
-- the backend commits hardware-facing state at the proper time, typically during VBI
+- the backend commits hardware-facing state at the proper time, typically during the frame service
 
 ## Basic Engine Types
 
@@ -132,8 +134,8 @@ At minimum, `GameConfig` provides:
 Optional fields implemented today include:
 
 - `using initial_screen = SomeScreen;`
-- `static constexpr engine::u8 max_dlis = ...;`
-- `static constexpr engine::u8 max_vbi_hooks = ...;`
+- `static constexpr engine::u8 max_raster_hooks = ...;`
+- `static constexpr engine::u8 max_frame_hooks = ...;`
 - `static constexpr engine::u8 user_zp_bytes = ...;`
 
 ### Platform
@@ -170,7 +172,8 @@ Important contract:
 - each region exposes only operations valid for that region kind
 - region memory layout is compile-time derived
 
-Today, the `Mode` type comes from the Atari backend.
+Today, the `Mode` type comes from the Atari backend (`atari::Mode`); the region templates take it as a
+backend mode token and derive geometry through `engine::display::traits<ModeT>`.
 
 ### ScreenSet
 
@@ -230,11 +233,11 @@ Fire level and edge state:
 - `fire_pressed(port=0)`
 - `fire_released(port=0)`
 
-Console-style buttons:
+System console buttons:
 
-- `start()`
-- `select()`
-- `option()`
+- `system_primary()`
+- `system_secondary()`
+- `system_option()`
 
 Keyboard state:
 
@@ -277,14 +280,14 @@ General contract:
 
 Use the frame-latched snapshot returned by:
 
-- `Game::pm_collisions()`
+- `Game::sprite_collisions()`
 
 Queries:
 
-- `player_to_playfield(p)`
-- `player_to_player(p)`
-- `missile_to_playfield(m)`
-- `missile_to_player(m)`
+- `sprite_to_background(s)`
+- `sprite_to_sprite(s)`
+- `projectile_to_background(p)`
+- `projectile_to_sprite(p)`
 
 ### Multiplex Queries
 
@@ -302,11 +305,12 @@ These are especially useful when more logical sprites exist than the hardware ca
 
 ```cpp
 constexpr auto sfx = engine::make_sound({
-    {waveform, frequency, volume, duration_frames},
+    {engine::audio::Waveform::Tone, frequency, volume, duration_frames},
 });
 ```
 
-An internal terminal frame is appended automatically.
+The waveform field is an `engine::audio::Waveform` (`Tone`, `Noise`, `Buzz`, `Silent`). An internal
+`Silent` terminal frame is appended automatically.
 
 ### Runtime Methods
 
@@ -326,7 +330,8 @@ General contract:
 - `tick` advances playback one frame and is normally engine-managed
 - released channels are skipped by engine playback so custom low-level code can own them
 
-The currently implemented waveform constants are Atari/POKEY-specific and are covered in the backend section.
+Timbre is described portably with `engine::audio::Waveform`; the backend maps each value to its sound
+hardware (the Atari mapping to POKEY distortion is covered in the backend guide).
 
 ## Scroll API
 
@@ -343,7 +348,7 @@ Advanced, engine-facing methods:
 
 - `activate(bytes_per_line, scanlines_per_line, fine_scroll_range)`
 - `deactivate()`
-- `apply(display_list, lms_pos, screen_base, map_width_bytes)`
+- `apply(display_program, load_pos, screen_base, map_width_bytes)`
 
 General contract:
 
@@ -370,7 +375,7 @@ constexpr auto map = engine::make_map<Width, Height>(tile_indices);
 On `Game::tiles`:
 
 - `init_charset(charset, dest)`
-- `set_chbase(page)`
+- `bind_charset_page(page)`
 - `set_viewport(x, y)`
 - `viewport_x()`
 - `viewport_y()`
@@ -385,47 +390,44 @@ General contract:
 
 On `Game::interrupts`:
 
-- `add_dli(scanline, handler)`
-- `add_raw_dli(scanline, handler)`
-- `add_persistent_dli(scanline, handler)`
-- `add_persistent_raw_dli(scanline, handler)`
-- `remove_dli(scanline)`
+- `add_raster_hook(scanline, handler)`
+- `add_raw_raster_hook(scanline, handler)`
+- `add_persistent_raster_hook(scanline, handler)`
+- `add_persistent_raw_raster_hook(scanline, handler)`
+- `remove_raster_hook(scanline)`
 - `clear_transient()`
 - `begin_dynamic()`
-- `add_dynamic_dli(scanline, handler)`
-- `prepare_chain(display_list, dl_size)`
+- `add_dynamic_raster_hook(scanline, handler)`
+- `prepare_chain(display_program, dl_size)`
 - `arm_dispatch()`
 
-VBI hooks:
+Frame hooks:
 
-- `add_vbi_hook(handler)`
-- `remove_vbi_hook(handler)`
-- `run_vbi_hooks()`
+- `add_frame_hook(handler)`
+- `remove_frame_hook(handler)`
+- `run_frame_hooks()`
 
 General contract:
 
 - handlers must be plain non-capturing `void (*)()` functions
-- static and dynamic DLI chains are merged and sorted each frame
+- static and dynamic raster-hook chains are merged and sorted each frame
 - persistent handlers survive screen transitions
 
-### DLIContext
+### RasterContext
 
-For C++ DLI handlers:
+For C++ raster-hook handlers:
 
 ```cpp
-engine::DLIContext<Platform>{}.write_colpf2(0xC4);
+engine::RasterContext<Platform>{}.set_playfield_color<2>(0xC4);
 ```
 
 Available write helpers:
 
-- `write_colpf0`
-- `write_colpf1`
-- `write_colpf2`
-- `write_colpf3`
-- `write_colbk`
-- `write_chbase`
-- `write_hscrol`
-- `write_vscrol`
+- `set_playfield_color<N>(v)` (field `N` is 0..3, a template argument)
+- `set_background_color(v)`
+- `set_charset_base(v)`
+- `set_fine_scroll_x(v)`
+- `set_fine_scroll_y(v)`
 
 ## Hooks API
 
@@ -540,8 +542,8 @@ The following public pieces are currently tied to the Atari implementation:
 
 - the concrete platform type comes from `atari::Platform<...>`
 - display mode names come from `atari::Mode`
-- sound waveform constants use `engine::pokey::*`
-- sprite, collision, and interrupt behavior map to Atari hardware concepts such as P/M, DLI, and VBI
+- the engine concepts map onto Atari hardware: `engine::audio::Waveform` → POKEY distortion, sprites/
+  projectiles → P/M graphics, raster hooks → DLI, frame hooks/service → VBI
 
 For the full backend-specific guide, see [Atari Platform Guide](./PLATFORM_ATARI.md).
 

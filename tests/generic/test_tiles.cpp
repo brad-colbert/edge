@@ -4,9 +4,9 @@
 // return value becomes the process exit code (0 = pass) for CTest.
 //
 // Everything here is platform-independent: the TileMap/CharsetData assets are
-// pure data, and the one hardware touch (set_chbase) is driven through a MOCK
-// HAL that records the CHBASE write, so no real ANTIC is needed. The live CHBASE
-// register write in the Atari HAL is verified separately on Altirra/Fujisan.
+// pure data, and the one hardware touch (bind_charset_page) is driven through a MOCK
+// HAL that records the charset-base write, so no real backend is needed. The live
+// charset-base write in the Atari HAL is verified separately on Altirra/Fujisan.
 
 #include <stdint.h>
 #include <stdio.h>
@@ -17,21 +17,21 @@ using engine::u8;
 using engine::u16;
 
 using engine::CharsetData;
-using engine::Charset2;
-using engine::Charset6;
+using engine::Charset1K;
+using engine::Charset512;
 using engine::TileManager;
 using engine::make_charset;
 using engine::make_map;
 
 // ── Mock platform ─────────────────────────────────────────────────────
 //
-// Records the last CHBASE page written and how many writes occurred, so
-// set_chbase can be asserted exactly without ANTIC hardware.
+// Records the last charset-base page written and how many writes occurred, so
+// bind_charset_page can be asserted exactly without backend hardware.
 struct MockHal {
     static u8       chbase;
     static unsigned chbase_writes;
 
-    static void write_chbase(u8 page) { chbase = page; ++chbase_writes; }
+    static void set_charset_base(u8 page) { chbase = page; ++chbase_writes; }
 
     static void reset() { chbase = 0; chbase_writes = 0; }
 };
@@ -117,12 +117,12 @@ static void test_make_charset() {
 
 // ── CharsetData sizes are fixed at compile time ────────────────────────
 
-static_assert(sizeof(CharsetData<1024>) == 1024, "mode 2/4 charset is 1024 bytes");
-static_assert(sizeof(CharsetData<512>) == 512,   "mode 6/7 charset is 512 bytes");
-static_assert(Charset2::size == 1024, "Charset2 is mode 2/4 (1024 bytes)");
-static_assert(Charset6::size == 512,  "Charset6 is mode 6/7 (512 bytes)");
+static_assert(sizeof(CharsetData<1024>) == 1024, "1K charset is 1024 bytes");
+static_assert(sizeof(CharsetData<512>) == 512,   "512-byte charset is 512 bytes");
+static_assert(Charset1K::size == 1024, "Charset1K is 1024 bytes");
+static_assert(Charset512::size == 512,  "Charset512 is 512 bytes");
 
-// ── TileManager: init_charset copies, set_chbase writes, viewport stores ─
+// ── TileManager: init_charset copies, bind_charset_page writes, viewport stores ─
 
 static void test_tile_manager() {
     MockHal::reset();
@@ -146,8 +146,8 @@ static void test_tile_manager() {
         if (dest[i] != static_cast<u8>(i ^ 0x5A)) copied = false;
     CHECK(copied);
 
-    // set_chbase forwards the page to the HAL.
-    tiles.set_chbase(0x9C);
+    // bind_charset_page forwards the page to the HAL.
+    tiles.bind_charset_page(0x9C);
     CHECK(MockHal::chbase == 0x9C);
     CHECK(MockHal::chbase_writes == 1);
 

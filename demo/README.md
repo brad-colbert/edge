@@ -1,4 +1,6 @@
-# Hardware validation demo (`hw_test.xex`)
+# Hardware validation demo (`atari_hw_test.xex`)
+
+> **Applies to EDGE v0.1.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
 
 A minimal Atari 8-bit program that drives every engine subsystem at once, so
 the engine's live ANTIC path can be confirmed on real hardware / emulators
@@ -10,7 +12,7 @@ From the existing (mos-sim) build directory — the demo is a separate target an
 is **not** part of the default build or the test suite:
 
 ```sh
-cmake --build build --target hw_test     # -> build/hw_test.xex
+cmake --build build --target atari_hw_test     # -> build/atari_hw_test.xex
 ```
 
 Or with a dedicated Atari toolchain configure:
@@ -18,7 +20,7 @@ Or with a dedicated Atari toolchain configure:
 ```sh
 cmake -B build-atari -DCMAKE_TOOLCHAIN_FILE=cmake/atari-toolchain.cmake \
       -DEDGE_BUILD_DEMO=ON
-cmake --build build-atari --target hw_test
+cmake --build build-atari --target atari_hw_test
 ```
 
 Or manually:
@@ -28,7 +30,7 @@ cmake -DINPUT=$PWD/demo/TEST.FNT \
   -DOUTPUT=$PWD/demo/user_charset.h \
     -P cmake/generate_charset_header.cmake &&
 mos-atari8-dos-clang++ -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra \
-    -I. demo/hw_test.cpp -o hw_test.xex
+    -I. demo/atari_hw_test.cpp -o atari_hw_test.xex
 ```
 
 To try a different 1K font file, replace `demo/TEST.FNT` in the command above,
@@ -46,16 +48,16 @@ or pass `-DEDGE_DEMO_CHARSET_BIN=/path/to/your.fnt` to the CMake build.
 | Pure tone on fire press | POKEY sound subsystem |
 | Noise burst + `COL:Y` when the arrow overlaps the diamond | GTIA collision registers |
 
-## Notes on engine gaps this demo fills in
+## Notes
 
-The engine's portable subsystems are used through the public API. Two
-live-hardware seams were still stubs; see the header comment in
-[`hw_test.cpp`](hw_test.cpp) for details:
+This demo is written entirely against the public engine API (`engine::Core` /
+`Platform::hal`) — no `poke()`s, no inline assembly, no magic addresses. The
+engine owns the display program, sprite DMA, raster-hook delivery, and the
+per-frame service; see the header comment in
+[`atari_hw_test.cpp`](atari_hw_test.cpp) for the full breakdown.
 
-- **`Hal::install_vbi`** was fixed (in `engine/platform/atari/hal.h`) to install
-  a deferred-VBI trampoline that preserves the llvm-mos zero-page registers and
-  exits via `JMP XITVBV` — without this, `Game::run()` crashes on hardware.
-- **DLI chain delivery** and **P/M DMA / OS shadow-register upkeep** are not yet
-  implemented in the engine, so the demo installs the single colour-split DLI
-  directly and writes the OS shadow registers (`SDLSTL`, `SDMCTL`, `COLOR*`,
-  `PCOLR*`) itself.
+The one backend seam worth calling out is the deferred-frame ISR install:
+**`Hal::install_frame_isr`** (in `engine/platform/atari/hal.h`) installs a
+trampoline that preserves the llvm-mos zero-page registers and exits via
+`JMP XITVBV` — without it, `Game::run()` would crash on real hardware (it is never
+exercised under `mos-sim`, which has no NMI).

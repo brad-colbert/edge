@@ -27,8 +27,8 @@ struct MockHal {
     static unsigned hscrol_writes;
     static unsigned vscrol_writes;
 
-    static void write_hscrol(u8 v) { hscrol = v; ++hscrol_writes; }
-    static void write_vscrol(u8 v) { vscrol = v; ++vscrol_writes; }
+    static void set_fine_scroll_x(u8 v) { hscrol = v; ++hscrol_writes; }
+    static void set_fine_scroll_y(u8 v) { vscrol = v; ++vscrol_writes; }
 
     static void reset() {
         hscrol = vscrol = 0;

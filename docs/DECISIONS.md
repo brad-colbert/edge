@@ -1,5 +1,7 @@
 # Architecture Decision Records
 
+> **Applies to EDGE v0.1.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
+
 Decisions made during design, with rationale. These explain the
 "why" behind architectural choices and document tradeoffs.
 
@@ -229,15 +231,15 @@ over the same hardware resources?
    breakage, timing overruns. Disasters.
 
 3. **Defined seams with cooperative resource release** (chosen):
-   Assembly integrates through specific APIs (DLI registration,
-   VBI hooks, ZP reservation, resource release). The engine
+   Assembly integrates through specific APIs (raster-hook registration,
+   frame hooks, ZP reservation, resource release). The engine
    documents the contract at each seam.
 
 **Decision:**
 Six integration points:
 
-- DLI handler registration (C++ or raw assembly)
-- VBI hook registration
+- Raster-hook registration (C++ or raw assembly)
+- Frame-hook registration
 - Zero page reservation (compile-time declaration)
 - Render phase hooks (pre-commit, post-render)
 - Resource release/reclamation (channels, players, scroll)
@@ -343,7 +345,7 @@ embedded systems. Asset pipelines are a future concern.
 
 **Context:**
 When should sprite positions be written to P/M RAM? During the
-visible frame (risky) or during VBI (safe)?
+visible frame (risky) or during the frame service (safe)?
 
 **Options Considered:**
 
@@ -353,13 +355,13 @@ visible frame (risky) or during VBI (safe)?
    glitches (sprite corruption mid-frame).
 
 2. **Write during VBI** (chosen): Game updates sprite positions
-   into a buffer during the visible frame. VBI commits all
+   into a buffer during the visible frame. The frame service commits all
    buffered positions to hardware at once. Safe: atomic update,
    no tearing. One-frame latency.
 
 **Decision:**
 Sprite positions are buffered during the game frame and
-committed to hardware during VBI.
+committed to hardware during the frame service.
 
 **Rationale:**
 Atomic commits avoid tearing. The one-frame latency is expected
@@ -567,9 +569,9 @@ perfect knowledge of all possible screens, enabling:
   rebuild and memory clear. Not suitable for per-frame
   switching. This is acceptable — screen transitions are
   infrequent events.
-- DLIs registered with `add_dli` are cleared on screen change.
-  Persistent DLIs require `add_persistent_dli`. This prevents
-  stale DLI handlers from firing on a screen they weren't
+- Raster hooks registered with `add_raster_hook` are cleared on screen change.
+  Persistent raster hooks require `add_persistent_raster_hook`. This prevents
+  stale raster hooks from firing on a screen they weren't
   designed for.
 
 ---
@@ -842,16 +844,16 @@ switch to raw handlers.
 
 ---
 
-## ADR-020: Non-Capturing Lambdas Only for C++ DLI Handlers
+## ADR-020: Non-Capturing Lambdas Only for C++ Raster-Hook Handlers
 
 **Status:** Accepted
 
 **Context:**
-The C++ DLI handler API accepts a lambda:
+The C++ raster-hook handler API accepts a lambda:
 
 ```cpp
-Game::interrupts.add_dli(scanline, [](DLIContext& ctx) {
-    ctx.write_colpf0(0x2A);
+Game::interrupts.add_raster_hook(scanline, [](RasterContext& ctx) {
+    ctx.set_playfield_color<0>(0x2A);
 });
 ```
 
@@ -859,7 +861,7 @@ Should capturing lambdas be supported?
 
 **Options Considered:**
 
-1. **Allow capturing lambdas**: The DLI slot must store the
+1. **Allow capturing lambdas**: The raster-hook slot must store the
    capture data alongside the function pointer. For a lambda
    capturing one `u8`, that's 1 extra byte per slot. For
    arbitrary captures, storage is unbounded. The dispatcher
@@ -867,18 +869,18 @@ Should capturing lambdas be supported?
    and cycles.
 
 2. **Non-capturing only** (chosen): The lambda converts to a
-   plain function pointer (`void (*)()`). DLI slot remains
+   plain function pointer (`void (*)()`). The raster-hook slot remains
    4 bytes. No capture storage, no capture passing overhead.
    Any data the handler needs must be in static variables.
 
 **Decision:**
-C++ DLI handlers must be non-capturing lambdas (or plain
-function pointers). The DLIContext object provides typed
+C++ raster-hook handlers must be non-capturing lambdas (or plain
+function pointers). The RasterContext object provides typed
 register write methods. Any runtime data (colors, scroll
 values) should be in static variables the handler references.
 
 **Rationale:**
-DLI handlers run in interrupt context with brutal cycle
+Raster-hook handlers run in interrupt context with brutal cycle
 budgets. Every byte of capture storage and every cycle of
 capture-passing overhead matters. Non-capturing lambdas are
 zero-cost — the compiler converts them to plain function
@@ -887,13 +889,13 @@ pointers. Static variables for handler data is the standard
 
 **Tradeoff:**
 Slightly less ergonomic — the user can't write
-`[color](auto& ctx) { ctx.write_colpf0(color); }`. They
+`[color](auto& ctx) { ctx.set_playfield_color<0>(color); }`. They
 must use a static variable:
 
 ```cpp
 static u8 dli_color = 0x2A;
-Game::interrupts.add_dli(scanline, [](DLIContext& ctx) {
-    ctx.write_colpf0(dli_color);
+Game::interrupts.add_raster_hook(scanline, [](RasterContext& ctx) {
+    ctx.set_playfield_color<0>(dli_color);
 });
 ```
 
@@ -1012,11 +1014,11 @@ per-screen?
    block is sized to the largest anyway.
 
 **Decision:**
-P/M resolution is a per-screen setting:
+Sprite vertical resolution (player/missile resolution on Atari) is a per-screen setting:
 
 ```cpp
 struct GameplayScreen {
-    static constexpr auto pm_resolution = PMRes::SingleLine;
+    static constexpr auto pm_resolution = SpriteVerticalResolution::SingleLine;
     // ...
 };
 ```

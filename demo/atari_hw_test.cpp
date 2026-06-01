@@ -1,4 +1,4 @@
-// demo/hw_test.cpp — Edge engine hardware validation demo.
+// demo/atari_hw_test.cpp — Edge engine Atari hardware validation demo.
 //
 // A minimal Atari program that exercises every engine subsystem and produces a
 // loadable .xex (build with the mos-atari8-dos target; see CMakeLists.txt). It
@@ -18,18 +18,19 @@
 //
 // Every hardware interaction goes through engine::Core / Platform::hal — there
 // are no poke()s, no inline assembly, and no magic addresses. The engine now
-// owns the display list and P/M DMA (init programs the OS shadows), playfield
+// owns the display program and sprite DMA (init programs the OS shadows), playfield
 // colours (Platform::hal::set_color_pf), per-sprite colours (Game::sprite_color,
-// driven onto COLPM by the multiplexer), DLI delivery (the split is a C++
-// Game::interrupts.add_dli handler dispatched through the engine), and attract-
-// mode suppression (vbi_service). POKEY base config (SKCTL=3, AUDCTL=0)
-// is left at the values the Atari OS installs at boot. This file is meant to read
-// as example game code.
+// driven onto the colour registers by the multiplexer), raster-hook delivery (the
+// split is a C++ Game::interrupts.add_raster_hook handler dispatched through the
+// engine), and idle-dim suppression (frame_service). POKEY base config (SKCTL=3,
+// AUDCTL=0) is left at the values the Atari OS installs at boot. This file is meant
+// to read as example game code.
 
 #include <stdint.h>
 
 #include "user_charset.h"
 
+#include <engine/version.h>
 #include <engine/platform/atari/platform.h>
 #include <engine/core.h>
 
@@ -85,23 +86,23 @@ constexpr auto diamond = engine::make_sprite<8, 8>({
     0b00011000,
 });
 
-// {waveform, frequency, volume, duration_frames} — make_sound appends SILENT.
+// {waveform, frequency, volume, duration_frames} — make_sound appends Silent.
 constexpr auto sfx_tone  = engine::make_sound({
-    {engine::pokey::PURE, 80, 10, 12},
+    {engine::audio::Waveform::Tone, 80, 10, 12},
 });
 constexpr auto sfx_noise = engine::make_sound({
-    {engine::pokey::NOISE, 40, 12, 10},
+    {engine::audio::Waveform::Noise, 40, 12, 10},
 });
 
-// ── Colour-split DLI (C++ handler) ───────────────────────────────────────
+// ── Colour-split raster hook (C++ handler) ───────────────────────────────
 //
-// A non-capturing C++ DLI handler, registered with Game::interrupts.add_dli and
-// entered through the engine's DLI dispatcher. It rewrites COLPF2 (the Mode-2
-// text background) to dark green ($C4) via the DLIContext facade — no register
-// addresses. The OS colour-shadow copy restores COLPF2 to $94 at the top of every
-// frame, so the change is a clean per-frame split.
+// A non-capturing C++ raster hook, registered with Game::interrupts.add_raster_hook
+// and entered through the engine's raster dispatcher. It rewrites playfield colour
+// 2 (the Mode-2 text background) to dark green ($C4) via the RasterContext facade —
+// no register addresses. The OS colour-shadow copy restores it to $94 at the top of
+// every frame, so the change is a clean per-frame split.
 static void color_split() {
-    engine::DLIContext<Platform>{}.write_colpf2(0xC4);
+    engine::RasterContext<Platform>{}.set_playfield_color<2>(0xC4);
 }
 
 // Scanline of the colour split, in the engine's display-list-relative space that
@@ -141,8 +142,8 @@ static void frame_step(const engine::Input& in) {
     // Pure tone on the frame fire is pressed (edge).
     if (in.fire_pressed()) Game::sound.play(sfx_tone, 0);
 
-    // Player 0 (arrow) vs player 1 (diamond) collision; noise on the rising edge.
-    const u8 col = Game::pm_collisions().player_to_player(0);
+    // Sprite 0 (arrow) vs sprite 1 (diamond) collision; noise on the rising edge.
+    const u8 col = Game::sprite_collisions().sprite_to_sprite(0);
     if (col && !g_prev_col) Game::sound.play(sfx_noise, 1);
     g_prev_col = col;
 
@@ -190,16 +191,17 @@ int main() {
     Game::sprite_color(1, 0xB6);            // diamond, green
 
     // Static HUD labels (written once).
-    Game::print(0, 0, "EDGE ENGINE V0.1");
+    Game::print(0, 0, "EDGE ENGINE V" EDGE_VERSION_STRING);
     Game::print(20, 0, "FRAME:");
     Game::print(0, 1, "JOY:");
     Game::print(9, 1, "FIRE:");
     Game::print(16, 1, "COL:");
     Game::print(22, 1, "SND:");
 
-    // Register the colour-split DLI. The engine sets the row-12 DLI bit on the
-    // display list, points VDSLST at the dispatcher, and arms NMIEN each frame.
-    Game::interrupts.add_dli(kSplitScanline, &color_split);
+    // Register the colour-split raster hook. The engine arms the row-12 raster
+    // delivery on the display program and points the raster vector at the
+    // dispatcher each frame.
+    Game::interrupts.add_raster_hook(kSplitScanline, &color_split);
 
     // One callback per frame, forever.
     Game::run(frame_step);

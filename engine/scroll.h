@@ -4,20 +4,20 @@
 // scroll.h — the portable scroll subsystem.
 //
 // `ScrollManager<Platform>` tracks a pixel-space viewport position into a
-// tilemap and pushes it to ANTIC in two parts (docs/API_DESIGN.md "Scroll",
+// tilemap and pushes it to the display in two parts (docs/API_DESIGN.md "Scroll",
 // docs/ARCHITECTURE.md "Scroll"):
 //
-//   * fine scroll — the sub-cell remainder, written to the HSCROL/VSCROL
-//     registers through Platform::hal::write_hscrol / write_vscrol.
-//   * coarse scroll — whole-cell movement, applied by patching the LMS address
-//     in the display list so ANTIC fetches from a shifted point in the map
-//     (the standard ANTIC technique; see screen.h DisplayListTemplate).
+//   * fine scroll — the sub-cell remainder, applied through the HAL's
+//     Platform::hal::set_fine_scroll_x / set_fine_scroll_y.
+//   * coarse scroll — whole-cell movement, applied by patching the display
+//     program's load address so the display fetches from a shifted point in the
+//     map (see the backend display-program builder).
 //
 // Mode-dependent geometry (cell width in fine units, cell height in scanlines,
 // line width in bytes) is not known to this layer. The screen manager owns the
 // active layout/mode and supplies the geometry through activate() when a
 // scroll-active screen is selected; deactivate() clears it. This keeps the
-// subsystem off antic.h, reaching hardware only through Platform::hal
+// subsystem off any platform header, reaching hardware only through Platform::hal
 // (Dependency Rule 2).
 //
 // Depends on types.h only.
@@ -51,10 +51,10 @@ public:
 
     // ── Activation (driven by the screen manager, not the user) ────────
     // Called at set_screen time for a scroll-active screen. The geometry comes
-    // from the active mode (antic.h helpers the screen manager owns):
+    // from the active mode (the display traits the screen manager owns):
     //   bytes_per_line     — display width of one mode line, in bytes.
     //   scanlines_per_line — height of one mode line, in scanlines.
-    //   fine_scroll_range  — fine units per cell column (HSCROL wrap point).
+    //   fine_scroll_range  — fine units per cell column (fine-scroll wrap point).
     void activate(u8 bytes_per_line, u8 scanlines_per_line, u8 fine_scroll_range) {
         bpl_    = bytes_per_line;
         splpl_  = scanlines_per_line;
@@ -68,20 +68,20 @@ public:
     }
 
     // ── Apply to hardware ─────────────────────────────────────────────
-    // Push the current position to ANTIC: write the fine-scroll registers and
-    // patch the display list's LMS address for the coarse offset. Called during
-    // the VBI (or at set_screen). `lms_pos` is the low-byte index of the LMS
-    // address to patch (DisplayListTemplate::region_lms_pos[0]). `screen_base`
-    // is the tilemap origin; `map_width_bytes` is its full row stride.
+    // Push the current position to the display: write the fine-scroll registers
+    // and patch the display program's load address for the coarse offset. Called
+    // during the frame service (or at set_screen). `load_pos` is the low-byte index
+    // of the load address to patch (the backend builder's region_lms_pos[0]).
+    // `screen_base` is the tilemap origin; `map_width_bytes` is its full row stride.
     //
     // No-op while suspended or inactive (geometry is then unset).
-    void apply(u8* display_list, u16 lms_pos, u8* screen_base, u16 map_width_bytes) {
+    void apply(u8* display_list, u16 load_pos, u8* screen_base, u16 map_width_bytes) {
         if (suspended_ || !active_) return;
 
         const u8 fine_x = static_cast<u8>(scroll_x_ % fsr_);
         const u8 fine_y = static_cast<u8>(scroll_y_ % splpl_);
-        Platform::hal::write_hscrol(fine_x);
-        Platform::hal::write_vscrol(fine_y);
+        Platform::hal::set_fine_scroll_x(fine_x);
+        Platform::hal::set_fine_scroll_y(fine_y);
 
         u16 coarse_col = static_cast<u16>(scroll_x_ / fsr_);
         const u16 coarse_row = static_cast<u16>(scroll_y_ / splpl_);
@@ -94,10 +94,10 @@ public:
             coarse_col = 0;
         }
 
-        const u16 lms = static_cast<u16>(addr(screen_base)
+        const u16 load_addr = static_cast<u16>(addr(screen_base)
                         + coarse_row * map_width_bytes + coarse_col);
-        display_list[lms_pos]     = lo(lms);
-        display_list[lms_pos + 1] = hi(lms);
+        display_list[load_pos]     = lo(load_addr);
+        display_list[load_pos + 1] = hi(load_addr);
     }
 
 private:

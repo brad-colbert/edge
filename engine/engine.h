@@ -7,6 +7,7 @@
 // (see docs/ARCHITECTURE.md "Dependency Rules"). This header pulls in the
 // public engine API. Subsystems are added here as they are implemented.
 
+#include "version.h"
 #include "types.h"
 #include "math.h"
 #include "pool.h"

@@ -1,6 +1,9 @@
 <img width="1448" height="1086" alt="EDGE_primary_logo_mark" src="https://github.com/user-attachments/assets/d7be6d69-4959-41d1-8d3b-53bbd34b9be3" />
 
 # EDGE (Eight-bit Damned! Game Engine)
+
+> **Applies to EDGE v0.1.0** — see [CHANGELOG](./CHANGELOG.md) for version history.
+
 EDGE is a C++20 game engine for constrained 6502-class systems, built around a small, deterministic, compile-time configured API instead of a heavy runtime.
 The project is Atari-first today, but its architecture is intended to support additional 6502-family platforms over time. Game code is written against portable engine subsystems while hardware details live behind a platform HAL and compile-time capability profiles.
 
@@ -38,7 +41,7 @@ Implemented today:
 - sound effect playback
 - tile and charset helpers
 - scrolling support
-- DLI/VBI interrupt management
+- raster-hook and frame-hook interrupt management
 - fixed-size slot and packed pools
 - fixed-point math and lookup helpers
 
@@ -78,7 +81,7 @@ For a fuller walkthrough, start with [`/documents/QUICK_START.md`](./documents/Q
 
 - [`/engine`](./engine) — public engine headers and the Atari backend
 - [`/tests`](./tests) — `mos-sim` unit tests for engine subsystems
-- [`/demo`](./demo) — hardware validation demo that builds as `hw_test.xex`
+- [`/demo`](./demo) — hardware validation demo that builds as `atari_hw_test.xex`
 - [`/documents`](./documents) — end-user documentation
 - [`/docs`](./docs) — architecture notes, design constraints, and ADRs
 - [`/cmake`](./cmake) — toolchain files for simulator and Atari builds
@@ -102,17 +105,35 @@ ctest --test-dir build --output-on-failure
 From the simulator build directory:
 
 ```sh
-cmake --build build --target hw_test
+cmake --build build --target atari_hw_test
 ```
 
 Or with a dedicated Atari configure:
 
 ```sh
 cmake -B build-atari -DCMAKE_TOOLCHAIN_FILE=cmake/atari-toolchain.cmake -DEDGE_BUILD_DEMO=ON
-cmake --build build-atari --target hw_test
+cmake --build build-atari --target atari_hw_test
 ```
 
 See [`/demo/README.md`](./demo/README.md) for what the demo exercises on real hardware or emulators.
+
+## Versioning and releases
+
+EDGE follows [Semantic Versioning](https://semver.org/). The version number has a
+single source of truth in [`engine/version.h`](./engine/version.h) (the
+`EDGE_VERSION_*` macros); `CMakeLists.txt` parses that header so `PROJECT_VERSION`
+never drifts, and game code can read `EDGE_VERSION_STRING` directly. Every document
+carries an "Applies to EDGE vX.Y.Z" stamp under its title, and all notable changes are
+recorded in [`CHANGELOG.md`](./CHANGELOG.md).
+
+To cut a release:
+
+```sh
+scripts/bump-version.sh X.Y.Z   # updates engine/version.h + every doc stamp
+# then edit CHANGELOG.md: move [Unreleased] notes into a new [X.Y.Z] section
+git commit -am "Release X.Y.Z"
+git tag vX.Y.Z
+```
 
 ## Documentation guide
 

@@ -17,6 +17,8 @@
 
 #include "../../config/capabilities.h"
 #include "../../types.h"
+#include "display_list.h"
+#include "display_traits.h"
 #include "hal.h"
 
 namespace atari {
@@ -145,6 +147,12 @@ struct Platform {
 
     using capabilities = AtariCaps<M, R, G, S, Tv, Net>;
     using hal          = Hal;
+
+    // The backend display-program builder for a portable layout. engine::Screen-
+    // Manager builds each screen's display list as Platform::display_program<Layout>,
+    // so the generic screen manager names nothing ANTIC-specific.
+    template <typename Layout>
+    using display_program = atari::DisplayProgram<Layout>;
 };
 
 // ── Common configurations ────────────────────────────────────────────

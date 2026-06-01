@@ -12,7 +12,7 @@
 
 using engine::u8;
 namespace joy = engine::joy;
-namespace console = engine::console;
+namespace syskey = engine::syskey;
 
 static unsigned g_failures = 0;
 
@@ -112,12 +112,12 @@ static void test_multi_port() {
 
 static void test_console_keys() {
     engine::Input in;
-    u8 j[2] = { static_cast<u8>(console::START | console::OPTION), 0 };
+    u8 j[2] = { static_cast<u8>(syskey::PRIMARY | syskey::OPTION), 0 };
     in.update(j, 0);
 
-    CHECK(in.start());
-    CHECK(in.option());
-    CHECK(!in.select());
+    CHECK(in.system_primary());
+    CHECK(in.system_option());
+    CHECK(!in.system_secondary());
 }
 
 // ── Keyboard edge detection (single byte) ────────────────────────────

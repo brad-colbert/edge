@@ -1,5 +1,7 @@
 # Quick Start
 
+> **Applies to EDGE v0.1.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
+
 This guide introduces EDGE from the engine author's point of view first, then shows the current concrete setup using the Atari backend.
 
 ## The Core Mental Model
@@ -22,6 +24,7 @@ In normal gameplay code, these are the main concepts you work with regardless of
 - `engine::Input`
 - `engine::SlotPool` and `engine::PackedPool`
 - `engine::make_sprite`, `engine::make_sound`, `engine::make_charset`, `engine::make_map`
+- `engine::audio::Waveform` (note timbre portably; the backend maps it to its sound hardware)
 - `Game::run`, `Game::run_until`, `Game::set_screen`
 - `Game::sound`, `Game::scroll`, `Game::tiles`, `Game::interrupts`
 
@@ -94,7 +97,7 @@ constexpr auto ship = engine::make_sprite<8, 8>({
 });
 
 constexpr auto beep = engine::make_sound({
-    {engine::pokey::PURE, 80, 10, 8},
+    {engine::audio::Waveform::Tone, 80, 10, 8},
 });
 
 static u8 x = 100;
@@ -138,8 +141,7 @@ These are backend-specific today:
 
 - `atari::StockXL_NTSC`
 - `M::Mode::MODE_2`
-- `engine::pokey::*` waveform constants
-- the meaning of the sprite color byte
+- the meaning of the sprite color byte (and the concrete POKEY encoding the backend gives each `Waveform`)
 
 ## The Frame Model
 
@@ -157,9 +159,9 @@ What the engine does around that callback:
 
 - captures input once per frame
 - advances sound playback
-- commits buffered sprite state during VBI
+- commits buffered sprite state during the frame service
 - latches collision information once per frame
-- rebuilds dynamic DLI work such as sprite multiplexing
+- rebuilds dynamic raster-hook work such as sprite multiplexing
 
 That means you generally treat the engine as a double-buffered frame system, not as a register-poking loop.
 
@@ -170,7 +172,7 @@ After the minimal example works, the usual next steps are:
 1. Add object pools for entities with `engine::SlotPool` or `engine::PackedPool`.
 2. Split the program into screens and transition with `Game::set_screen<ScreenType>(callback)`.
 3. Add tile and charset assets with `engine::make_charset` and `engine::make_map`.
-4. Use `Game::pm_collisions()` and multiplex queries if your game uses many sprites.
-5. Add DLI or VBI hooks only after the basic game loop is stable.
+4. Use `Game::sprite_collisions()` and multiplex queries if your game uses many sprites.
+5. Add raster or frame hooks only after the basic game loop is stable.
 
 From here, read [API Reference](./API_REFERENCE.md) for the portable subsystem contracts, then [Atari Platform Guide](./PLATFORM_ATARI.md) for the backend-specific details currently exposed by the first implementation.

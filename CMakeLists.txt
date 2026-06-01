@@ -1,6 +1,17 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(edge CXX)
+# Single source of truth for the version is engine/version.h (see CHANGELOG.md).
+# Parse the macros here so PROJECT_VERSION never drifts from the header.
+file(STRINGS engine/version.h _edge_ver_major REGEX "EDGE_VERSION_MAJOR")
+file(STRINGS engine/version.h _edge_ver_minor REGEX "EDGE_VERSION_MINOR")
+file(STRINGS engine/version.h _edge_ver_patch REGEX "EDGE_VERSION_PATCH")
+string(REGEX MATCH "[0-9]+" _edge_ver_major "${_edge_ver_major}")
+string(REGEX MATCH "[0-9]+" _edge_ver_minor "${_edge_ver_minor}")
+string(REGEX MATCH "[0-9]+" _edge_ver_patch "${_edge_ver_patch}")
+
+project(edge
+        VERSION ${_edge_ver_major}.${_edge_ver_minor}.${_edge_ver_patch}
+        LANGUAGES CXX)
 
 # The engine is header-only (DECISIONS.md ADR-012); it is consumed as an
 # include directory. Game code and tests include <engine/...>.
@@ -21,7 +32,7 @@ option(EDGE_BUILD_DEMO
 set(EDGE_DEMO_CHARSET_BIN
     ${CMAKE_SOURCE_DIR}/demo/TEST.FNT
     CACHE FILEPATH
-    "Binary 1K charset used by the hw_test demo")
+    "Binary 1K charset used by the atari_hw_test demo")
 set(USER_CHARSET_HEADER ${CMAKE_SOURCE_DIR}/demo/user_charset.h)
 set(GENERATE_CHARSET_HEADER_SCRIPT
     ${CMAKE_SOURCE_DIR}/cmake/generate_charset_header.cmake)
@@ -43,11 +54,11 @@ if(EDGE_BUILD_DEMO)
     # Dedicated Atari build (configured with cmake/atari-toolchain.cmake): the
     # compiler already targets atari8-dos, so a normal executable links to a
     # loadable .xex. The test suite is not built in this configure.
-    add_executable(hw_test demo/hw_test.cpp ${USER_CHARSET_HEADER})
-    target_compile_options(hw_test PRIVATE
+    add_executable(atari_hw_test demo/atari_hw_test.cpp ${USER_CHARSET_HEADER})
+    target_compile_options(atari_hw_test PRIVATE
         -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra)
-    target_include_directories(hw_test PRIVATE ${CMAKE_SOURCE_DIR})
-    set_target_properties(hw_test PROPERTIES OUTPUT_NAME "hw_test.xex")
+    target_include_directories(atari_hw_test PRIVATE ${CMAKE_SOURCE_DIR})
+    set_target_properties(atari_hw_test PROPERTIES OUTPUT_NAME "atari_hw_test.xex")
     return()
 endif()
 
@@ -63,25 +74,25 @@ add_subdirectory(tests)
 # custom command, so the demo coexists with the test build. It is NOT part of
 # ALL (the mos-sim build never touches it); build it explicitly:
 #
-#   cmake --build build --target hw_test      # -> build/hw_test.xex
+#   cmake --build build --target atari_hw_test   # -> build/atari_hw_test.xex
 #
 # (Alternatively, configure a dedicated build directory with
 #  cmake/atari-toolchain.cmake and the add_executable target it enables.)
 find_program(MOS_ATARI8_CXX mos-atari8-dos-clang++)
 if(MOS_ATARI8_CXX)
-    set(HW_TEST_XEX ${CMAKE_BINARY_DIR}/hw_test.xex)
+    set(HW_TEST_XEX ${CMAKE_BINARY_DIR}/atari_hw_test.xex)
     add_custom_command(
         OUTPUT ${HW_TEST_XEX}
         COMMAND ${MOS_ATARI8_CXX}
                 -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra
                 -I${CMAKE_SOURCE_DIR}
-                ${CMAKE_SOURCE_DIR}/demo/hw_test.cpp
+                ${CMAKE_SOURCE_DIR}/demo/atari_hw_test.cpp
                 -o ${HW_TEST_XEX}
-        DEPENDS ${CMAKE_SOURCE_DIR}/demo/hw_test.cpp
+        DEPENDS ${CMAKE_SOURCE_DIR}/demo/atari_hw_test.cpp
                 ${USER_CHARSET_HEADER}
-        COMMENT "Building Atari XEX demo (hw_test.xex)"
+        COMMENT "Building Atari XEX demo (atari_hw_test.xex)"
         VERBATIM)
-    add_custom_target(hw_test DEPENDS ${HW_TEST_XEX})
+    add_custom_target(atari_hw_test DEPENDS ${HW_TEST_XEX})
 else()
-    message(STATUS "mos-atari8-dos-clang++ not found; 'hw_test' demo target unavailable")
+    message(STATUS "mos-atari8-dos-clang++ not found; 'atari_hw_test' demo target unavailable")
 endif()

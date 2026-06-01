@@ -3,10 +3,10 @@
 // Built for the llvm-mos `mos-sim` platform and run under `mos-sim`; main()'s
 // return value becomes the process exit code (0 = pass) for CTest.
 //
-// The SpriteManager is exercised against a MOCK platform whose HAL records HPOS
-// writes and reports the standard single-line P/M layout, so commit() can be
-// driven into a plain buffer (not real P/M RAM) and the zone/dirty bookkeeping
-// asserted exactly without Atari hardware. The live P/M + zone-DLI path is
+// The SpriteManager is exercised against a MOCK platform whose HAL records sprite
+// position writes and reports a standard single-line strip layout, so commit() can
+// be driven into a plain buffer (not real sprite RAM) and the zone/dirty bookkeeping
+// asserted exactly without backend hardware. The live sprite + boundary-hook path is
 // verified separately on Altirra/Fujisan.
 
 #include <stdint.h>
@@ -19,29 +19,28 @@ using engine::u8;
 using engine::u16;
 
 using engine::SpriteShape;
-using engine::PMRes;
 using engine::ZoneInfo;
 
 // ── Mock platform ─────────────────────────────────────────────────────
 //
-// pm_player_offset returns the standard single-line layout (player N at
-// 1024 + N*256); write_hposp/m record the last value written per index.
+// sprite_strip_offset returns the standard single-line layout (sprite N at
+// 1024 + N*256); set_sprite_x / set_projectile_x record the last value written per index.
 struct MockHal {
     static u8 hposp[4];
     static u8 hposm[4];
     static u8 colpm[4];
 
-    static void write_hposp(u8 player,  u8 x) { hposp[player]  = x; }
-    static void write_hposm(u8 missile, u8 x) { hposm[missile] = x; }
-    static void write_colpm(u8 player,  u8 c) { colpm[player]  = c; }
+    static void set_sprite_x(u8 player,  u8 x) { hposp[player]  = x; }
+    static void set_projectile_x(u8 missile, u8 x) { hposm[missile] = x; }
+    static void set_sprite_color(u8 player,  u8 c) { colpm[player]  = c; }
 
-    static u16 pm_player_offset(u8 res, u8 player) {
+    static u16 sprite_strip_offset(u8 res, u8 player) {
         const bool single = (res == 0);
         const u16 base   = single ? 1024 : 512;
         const u16 stride = single ? 256  : 128;
         return static_cast<u16>(base + player * stride);
     }
-    static u16 pm_strip_size(u8 res) { return (res == 0) ? 256 : 128; }
+    static u16 sprite_strip_size(u8 res) { return (res == 0) ? 256 : 128; }
 };
 u8 MockHal::hposp[4] = {};
 u8 MockHal::hposm[4] = {};
@@ -234,7 +233,7 @@ static void test_sprite_color_follows_sprite() {
     CHECK(MockHal::colpm[1] == 0xBB);
 
     // Move sprite 0 below sprite 1: the slots swap (player 0 = sprite1,
-    // player 1 = sprite0) but each sprite keeps its colour — COLPM follows.
+    // player 1 = sprite0) but each sprite keeps its colour — the colour follows it.
     mgr.sprite(0, g_shape, 100, 70);
     mgr.update_zones();
     mgr.commit(buf);
@@ -248,16 +247,16 @@ static void test_sprite_color_follows_sprite() {
     CHECK(mgr.logical(1).color == 0xBB);
 }
 
-// ── build_dli_handlers registers one boundary DLI per extra zone ───────
+// ── build_raster_hooks registers one boundary hook per extra zone ───────
 
-static void test_dli_registration() {
+static void test_raster_hook_registration() {
     static SM mgr;
     static IM im;
     for (u8 i = 0; i < 5; ++i) mgr.sprite(i, g_shape, 100, (u8)((i + 1) * 10));
     mgr.update_zones();                    // 2 zones
-    mgr.build_dli_handlers(im);
-    // Zone 0 is armed by the VBI commit; only zone 1's boundary needs a DLI.
-    CHECK(im.dli_count() == 1);
+    mgr.build_raster_hooks(im);
+    // Zone 0 is armed by the frame-service commit; only zone 1's boundary needs a hook.
+    CHECK(im.raster_hook_count() == 1);
     CHECK(im.slot(0).scanline == mgr.zone(1).boundary_scanline);
 }
 
@@ -268,7 +267,7 @@ int main() {
     test_commit_dirty_tracking();
     test_sprite_hide();
     test_sprite_color_follows_sprite();
-    test_dli_registration();
+    test_raster_hook_registration();
 
     if (g_failures == 0) {
         printf("ALL TESTS PASSED\n");
