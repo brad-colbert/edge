@@ -83,7 +83,6 @@ For a fuller walkthrough, start with [`/documents/QUICK_START.md`](./documents/Q
 - [`/tests`](./tests) — `mos-sim` unit tests for engine subsystems
 - [`/demo`](./demo) — hardware validation demo that builds as `atari_hw_test.xex`
 - [`/documents`](./documents) — end-user documentation
-- [`/docs`](./docs) — architecture notes, design constraints, and ADRs
 - [`/cmake`](./cmake) — toolchain files for simulator and Atari builds
 
 ## Build and test
