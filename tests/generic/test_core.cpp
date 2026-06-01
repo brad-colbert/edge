@@ -106,6 +106,11 @@ struct MockHal {
     static void set_color_pf(u8, u8) {}
     static void suppress_idle_dim() { ++idle_dim_suppressions; }
 
+    // Fine-scroll registers (frame_service instantiates apply_scroll; it is a
+    // runtime no-op here since no scroll map is bound).
+    static void set_fine_scroll_x(u8) {}
+    static void set_fine_scroll_y(u8) {}
+
     // Frame-service install.
     static void install_frame_isr(void (*h)()) { frame_handler = h; }
 

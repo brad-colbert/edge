@@ -54,10 +54,12 @@ enum class Mode : u8 {
 // A display list is a byte program ANTIC's DMA executes: blank-line counts,
 // mode-line bytes (optionally with an LMS load-address prefix and/or a DLI
 // trigger), and a terminating jump. See DECISIONS.md ADR-026.
-inline constexpr u8 DL_LMS = 0x40;   // mode byte | DL_LMS => 2 address bytes follow
-inline constexpr u8 DL_DLI = 0x80;   // mode byte | DL_DLI => fire a DLI on this line
-inline constexpr u8 DL_JMP = 0x01;   // jump (2 address bytes follow)
-inline constexpr u8 DL_JVB = 0x41;   // jump + wait for vertical blank (loops the DL)
+inline constexpr u8 DL_LMS     = 0x40;   // mode byte | DL_LMS => 2 address bytes follow
+inline constexpr u8 DL_DLI     = 0x80;   // mode byte | DL_DLI => fire a DLI on this line
+inline constexpr u8 DL_HSCROLL = 0x10;   // mode byte | DL_HSCROLL => horizontal fine scroll on this line
+inline constexpr u8 DL_VSCROLL = 0x20;   // mode byte | DL_VSCROLL => vertical fine scroll on this line
+inline constexpr u8 DL_JMP     = 0x01;   // jump (2 address bytes follow)
+inline constexpr u8 DL_JVB     = 0x41;   // jump + wait for vertical blank (loops the DL)
 
 // Blank-line instruction for `n` blank scanlines (1..8). Encoded as (n-1)<<4.
 constexpr u8 dl_blank(u8 n) { return static_cast<u8>((n - 1) << 4); }
@@ -126,6 +128,47 @@ constexpr u8 scanlines_per_line(Mode m) {
 
 // The display-list mode-line instruction byte for this mode (no LMS/DLI bits).
 constexpr u8 dl_mode_byte(Mode m) { return static_cast<u8>(m); }
+
+// ── Hardware scrolling geometry ──────────────────────────────────────
+//
+// When a mode line has DL_HSCROLL set, ANTIC fetches the *next wider* playfield
+// so there is off-screen content to slide in: a normal-width 40-column text line
+// fetches 48 bytes instead of 40. `scroll_margin` is those extra bytes; a scroll
+// map's row stride must be at least `scroll_fetch_width` so every fetched byte
+// is real map data.
+constexpr u8 scroll_margin(Mode m) {
+    switch (m) {
+        case Mode::MODE_2: case Mode::MODE_3:
+        case Mode::MODE_4: case Mode::MODE_5:
+            return 8;                        // 40-col text: 40 -> 48
+        case Mode::MODE_6: case Mode::MODE_7:
+            return 4;                        // 20-col text: 20 -> 24
+        default:
+            return 8;
+    }
+}
+
+constexpr u8 scroll_fetch_width(Mode m) {
+    return static_cast<u8>(bytes_per_line(m) + scroll_margin(m));
+}
+
+// Fine-scroll modulus: the number of HSCROL color-clock positions that span one
+// character cell, i.e. how far HSCROL advances before a one-byte coarse step.
+// The normal playfield is 160 color clocks wide, so a 40-column cell is 4 color
+// clocks and a 20-column cell is 8. (Vertical fine scroll uses scanlines_per_line
+// as its modulus instead.) THIS is the value to verify against real hardware if a
+// fine->coarse handoff ever jumps — see demo/atari_scroll_test.cpp.
+constexpr u8 fine_scroll_range(Mode m) {
+    switch (m) {
+        case Mode::MODE_2: case Mode::MODE_3:
+        case Mode::MODE_4: case Mode::MODE_5:
+            return 4;                        // 160 color clocks / 40 cells
+        case Mode::MODE_6: case Mode::MODE_7:
+            return 8;                        // 160 color clocks / 20 cells
+        default:
+            return 4;
+    }
+}
 
 // ── Player/Missile memory layout ──────────────────────────────────────
 //

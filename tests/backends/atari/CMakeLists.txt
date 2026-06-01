@@ -4,5 +4,6 @@
 
 add_engine_test(test_platform)
 add_engine_test(test_atari_display)
+add_engine_test(test_atari_scroll)
 add_engine_test(test_atari_interrupt)
 add_engine_test(test_atari_core)

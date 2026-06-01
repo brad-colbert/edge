@@ -33,12 +33,15 @@ namespace detail {
 
 // Base display-list length for `Layout` assuming one LMS per region (no 4K
 // crossings): 3 blank-line instructions + per region (1 mode/LMS byte + 2 LMS
-// address bytes + height-1 mode bytes) + a 3-byte JVB.
+// address bytes + height-1 mode bytes) + a 3-byte JVB. A scroll region instead
+// emits one LMS (3 bytes) per visible line, so it contributes 3*height.
 template <typename Layout>
 constexpr u16 display_list_base_size() {
     u16 s = 3 + 3;
     for (u8 i = 0; i < Layout::region_count; ++i) {
-        s += static_cast<u16>(Layout::region_height[i]) + 2;
+        s += Layout::region_is_scroll[i]
+                 ? static_cast<u16>(3 * Layout::region_height[i])
+                 : static_cast<u16>(Layout::region_height[i]) + 2;
     }
     return s;
 }
@@ -61,14 +64,28 @@ constexpr u16 display_list_capacity() {
     return s;
 }
 
-// Worst-case total LMS count: one per region plus its potential crossings.
+// Worst-case total LMS count: a scroll region emits one LMS per visible line; a
+// normal region emits one plus its potential 4K crossings.
 template <typename Layout>
 constexpr u16 max_lms_count() {
     u16 n = 0;
     for (u8 i = 0; i < Layout::region_count; ++i) {
-        n += static_cast<u16>(1 + lms_crossings_max(Layout::region_ram[i]));
+        n += Layout::region_is_scroll[i]
+                 ? static_cast<u16>(Layout::region_height[i])
+                 : static_cast<u16>(1 + lms_crossings_max(Layout::region_ram[i]));
     }
     return n;
+}
+
+// Total scroll LMS (one per visible line of every scroll region). Sized at least
+// 1 so DisplayProgram::scroll_lms_pos[] is never a zero-length array.
+template <typename Layout>
+constexpr u16 max_scroll_lms_count() {
+    u16 n = 0;
+    for (u8 i = 0; i < Layout::region_count; ++i) {
+        if (Layout::region_is_scroll[i]) n += Layout::region_height[i];
+    }
+    return n < 1 ? 1 : n;
 }
 
 } // namespace detail
@@ -92,6 +109,7 @@ struct DisplayProgram {
     static constexpr u8  region_count = Layout::region_count;
     static constexpr u16 capacity     = detail::display_list_capacity<Layout>();
     static constexpr u16 max_lms      = detail::max_lms_count<Layout>();
+    static constexpr u16 max_scroll_lms = detail::max_scroll_lms_count<Layout>();
 
     u8  bytes[capacity]              = {};
     u16 size                         = 0;   // bytes actually used by build()
@@ -99,12 +117,18 @@ struct DisplayProgram {
     u16 lms_count                    = 0;
     u16 lms_pos[max_lms]             = {};   // low-byte index of every LMS
     u16 region_lms_pos[region_count] = {};   // low-byte index of each region's first LMS
+    // Low-byte index of every scroll-region LMS, in visible-line (top-to-bottom)
+    // order, so patch_scroll() can repoint each line independently. The generic
+    // ScrollManager never sees these — it only supplies coarse col/row.
+    u16 scroll_lms_pos[max_scroll_lms] = {};
+    u16 scroll_lms_count               = 0;
 
     // Build the display list for screen memory based at `screen_base`, with the
     // list itself residing at `dl_base` (used by the JVB to loop the list).
     constexpr void build(u16 screen_base, u16 dl_base) {
         u16 p   = 0;
         lms_count = 0;
+        scroll_lms_count = 0;
 
         // Three 8-blank-line instructions (24 scanlines) to centre vertically.
         bytes[p++] = dl_blank(8);
@@ -113,6 +137,26 @@ struct DisplayProgram {
 
         for (u8 r = 0; r < region_count; ++r) {
             const u8  mode = Layout::region_mode_byte[r];
+
+            if (Layout::region_is_scroll[r]) {
+                // Scroll region: every visible line gets its own LMS (with the
+                // HSCROLL/VSCROLL bits) striding by the map width, so a map wider
+                // than the fetch width stays row-aligned and 4K crossings are moot
+                // (each line reloads the full address anyway). The addresses here
+                // are placeholders against `screen_base`; scroll_map() repoints
+                // them at the bound map via patch_scroll().
+                const u8  op     = static_cast<u8>(mode | DL_LMS | DL_HSCROLL | DL_VSCROLL);
+                const u16 stride = Layout::region_map_width[r];
+                u16 line_start   = static_cast<u16>(screen_base + Layout::offset(r));
+                for (u8 i = 0; i < Layout::region_height[r]; ++i) {
+                    const u16 pos = emit_load(p, op, line_start);
+                    scroll_lms_pos[scroll_lms_count++] = pos;
+                    if (i == 0) region_lms_pos[r] = pos;
+                    line_start = static_cast<u16>(line_start + stride);
+                }
+                continue;
+            }
+
             const u8  bpl  = Layout::region_bytes_per_line[r];
             u16 line_start = static_cast<u16>(screen_base + Layout::offset(r));
 
@@ -140,16 +184,33 @@ struct DisplayProgram {
         size = p;
     }
 
+    // Repoint every scroll-region LMS at the bound map for a coarse (col, row)
+    // offset: visible line i loads `map_base + (coarse_row + i)*map_width +
+    // coarse_col`. This is the ONLY place the ANTIC LMS bytes are rewritten at run
+    // time; the generic ScrollManager supplies only the coarse offsets (it never
+    // touches the display list). A no-op for layouts with no scroll region.
+    void patch_scroll(u16 map_base, u16 map_width, u16 coarse_col, u16 coarse_row) {
+        for (u16 i = 0; i < scroll_lms_count; ++i) {
+            const u16 a = static_cast<u16>(
+                map_base + static_cast<u16>(coarse_row + i) * map_width + coarse_col);
+            bytes[scroll_lms_pos[i]]     = lo(a);
+            bytes[scroll_lms_pos[i] + 1] = hi(a);
+        }
+    }
+
 private:
-    // Emit `mode | LMS` + the 2-byte address `a`; record and return the low-byte
-    // position. `p` is advanced past the 3 emitted bytes.
-    constexpr u16 emit_lms(u16& p, u8 mode, u16 a) {
-        bytes[p++] = static_cast<u8>(mode | DL_LMS);
+    // Emit display-list opcode `op` + the 2-byte address `a`; record and return
+    // the low-byte position. `p` is advanced past the 3 emitted bytes.
+    constexpr u16 emit_load(u16& p, u8 op, u16 a) {
+        bytes[p++] = op;
         const u16 pos = p;
         bytes[p++] = lo(a);
         bytes[p++] = hi(a);
         lms_pos[lms_count++] = pos;
         return pos;
+    }
+    constexpr u16 emit_lms(u16& p, u8 mode, u16 a) {
+        return emit_load(p, static_cast<u8>(mode | DL_LMS), a);
     }
     static constexpr u8 lo(u16 a) { return static_cast<u8>(a & 0xFF); }
     static constexpr u8 hi(u16 a) { return static_cast<u8>(a >> 8); }

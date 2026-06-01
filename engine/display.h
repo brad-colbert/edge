@@ -162,9 +162,13 @@ struct TextRegion {
     static constexpr mode_type mode           = M;
     static constexpr u8        height         = Height;   // text rows
     static constexpr bool      is_text        = true;
+    static constexpr bool      is_scroll      = false;
     static constexpr u8        bytes_per_line =
         engine::display::traits<mode_type>::bytes_per_line(M);
     static constexpr u16       ram_bytes      = static_cast<u16>(Height) * bytes_per_line;
+    // For a non-scroll region the "map" is exactly the on-screen region.
+    static constexpr u16       map_width      = bytes_per_line;
+    static constexpr u16       map_height     = Height;
 
     using view = TextRegionView<M, Height>;
 };
@@ -175,11 +179,44 @@ struct BitmapRegion {
     static constexpr mode_type mode           = M;
     static constexpr u8        height         = Height;   // scanlines / mode-lines
     static constexpr bool      is_text        = false;
+    static constexpr bool      is_scroll      = false;
     static constexpr u8        bytes_per_line =
         engine::display::traits<mode_type>::bytes_per_line(M);
     static constexpr u16       ram_bytes      = static_cast<u16>(Height) * bytes_per_line;
+    static constexpr u16       map_width      = bytes_per_line;
+    static constexpr u16       map_height     = Height;
 
     using view = BitmapRegionView<M, Height>;
+};
+
+// ── ScrollRegion ──────────────────────────────────────────────────────
+//
+// A mode-agnostic wrapper that turns any TextRegion / BitmapRegion into a
+// hardware-scrolling region over a `MapW`×`MapH` map. The inner region supplies
+// the mode, the visible height, and the view type (so a scroll region draws with
+// the same view as its non-scroll counterpart); the wrapper adds the map geometry
+// and the `is_scroll` flag the backend display-program builder reads to give each
+// visible line its own load address (with the fine-scroll enable) striding by
+// `map_width`.
+//
+// `ram_bytes` is 0: a scroll region's pixels live in the game-held map buffer the
+// engine binds at scroll_map() time, not in the shared screen buffer, so it costs
+// nothing there and contributes nothing to the following regions' offsets. MapW/
+// MapH are in the inner region's native units (text: columns/rows; bitmap:
+// bytes-per-line/scanlines).
+template <typename Inner, u16 MapW, u16 MapH>
+struct ScrollRegion {
+    using mode_type = typename Inner::mode_type;
+    static constexpr mode_type mode           = Inner::mode;
+    static constexpr u8        height         = Inner::height;   // visible rows / lines
+    static constexpr bool      is_text        = Inner::is_text;
+    static constexpr bool      is_scroll      = true;
+    static constexpr u8        bytes_per_line = Inner::bytes_per_line;
+    static constexpr u16       ram_bytes      = 0;               // backed by the map buffer
+    static constexpr u16       map_width      = MapW;
+    static constexpr u16       map_height     = MapH;
+
+    using view = typename Inner::view;
 };
 
 // ── Pack indexing helper ──────────────────────────────────────────────
@@ -223,6 +260,20 @@ struct DisplayLayout {
     static constexpr u8  region_bytes_per_line[region_count] =
         { Regions::bytes_per_line... };
     static constexpr bool region_is_text[region_count]       = { Regions::is_text... };
+    // Scroll metadata (non-scroll regions report is_scroll=false, map == region).
+    static constexpr bool region_is_scroll[region_count]     = { Regions::is_scroll... };
+    static constexpr u16 region_map_width[region_count]      = { Regions::map_width... };
+    static constexpr u16 region_map_height[region_count]     = { Regions::map_height... };
+
+    // True if any region in this layout scrolls.
+    static constexpr bool has_scroll = (Regions::is_scroll || ... || false);
+
+    // Index of the first scrolling region, or region_count if none.
+    static constexpr u8 scroll_region_index() {
+        for (u8 i = 0; i < region_count; ++i)
+            if (region_is_scroll[i]) return i;
+        return region_count;
+    }
 
     // Byte offset of region n into the shared screen buffer.
     static constexpr u16 offset(u8 n) {

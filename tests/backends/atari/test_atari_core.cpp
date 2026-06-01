@@ -81,6 +81,8 @@ struct MockHal {
     static u8   coll_missile_player(u8)   { return 0; }
     static void clear_collisions() {}
     static void suppress_idle_dim() {}
+    static void set_fine_scroll_x(u8) {}
+    static void set_fine_scroll_y(u8) {}
     static void install_frame_isr(void (*)()) {}
 
     static void reset() { sdmctl = 0; gractl = 0; }

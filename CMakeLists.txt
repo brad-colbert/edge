@@ -64,6 +64,15 @@ if(EDGE_BUILD_DEMO)
     # the build stays -Os and no -g/DWARF is added.
     target_link_options(atari_hw_test PRIVATE
         "LINKER:--Map=$<TARGET_FILE_DIR:atari_hw_test>/atari_hw_test.map")
+
+    # Scroll validation demo — separate, independent .xex (no charset header).
+    add_executable(atari_scroll_test demo/atari_scroll_test.cpp)
+    target_compile_options(atari_scroll_test PRIVATE
+        -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra)
+    target_include_directories(atari_scroll_test PRIVATE ${CMAKE_SOURCE_DIR})
+    set_target_properties(atari_scroll_test PROPERTIES OUTPUT_NAME "atari_scroll_test.xex")
+    target_link_options(atari_scroll_test PRIVATE
+        "LINKER:--Map=$<TARGET_FILE_DIR:atari_scroll_test>/atari_scroll_test.map")
     return()
 endif()
 
@@ -104,6 +113,27 @@ if(MOS_ATARI8_CXX)
         COMMENT "Building Atari XEX demo (atari_hw_test.xex)"
         VERBATIM)
     add_custom_target(atari_hw_test DEPENDS ${HW_TEST_XEX})
+
+    # ── Scroll validation demo (atari_scroll_test.xex) ──────────────────
+    # Same mos-atari8-dos toolchain, built explicitly and independently of the
+    # hw_test demo and the mos-sim test suite:
+    #
+    #   cmake --build build --target atari_scroll_test   # -> build/atari_scroll_test.xex
+    set(SCROLL_TEST_XEX ${CMAKE_BINARY_DIR}/atari_scroll_test.xex)
+    set(SCROLL_TEST_MAP ${CMAKE_BINARY_DIR}/atari_scroll_test.map)
+    add_custom_command(
+        OUTPUT ${SCROLL_TEST_XEX}
+        COMMAND ${MOS_ATARI8_CXX}
+                -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra
+                -I${CMAKE_SOURCE_DIR}
+                ${CMAKE_SOURCE_DIR}/demo/atari_scroll_test.cpp
+                -o ${SCROLL_TEST_XEX}
+                -Wl,--Map=${SCROLL_TEST_MAP}
+        DEPENDS ${CMAKE_SOURCE_DIR}/demo/atari_scroll_test.cpp
+        BYPRODUCTS ${SCROLL_TEST_MAP}
+        COMMENT "Building Atari XEX demo (atari_scroll_test.xex)"
+        VERBATIM)
+    add_custom_target(atari_scroll_test DEPENDS ${SCROLL_TEST_XEX})
 else()
-    message(STATUS "mos-atari8-dos-clang++ not found; 'atari_hw_test' demo target unavailable")
+    message(STATUS "mos-atari8-dos-clang++ not found; 'atari_hw_test'/'atari_scroll_test' demo targets unavailable")
 endif()
