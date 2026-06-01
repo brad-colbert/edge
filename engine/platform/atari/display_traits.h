@@ -34,6 +34,9 @@ struct traits<atari::Mode> {
     static constexpr engine::u8 mode_opcode(atari::Mode m) {
         return atari::dl_mode_byte(m);
     }
+    static constexpr engine::u8 fine_scroll_range(atari::Mode m) {
+        return atari::fine_scroll_range(m);
+    }
     static constexpr engine::u8 to_screen_code(char c) {
         return atari::ascii_to_internal(c);
     }

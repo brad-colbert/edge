@@ -137,12 +137,11 @@ public:
     // callback.
     template <typename S, typename Cb>
     void set_screen(Cb cb) {
-        using Layout = typename S::display;
-
         // One display program per screen, in BSS (not on the 256-byte 6502
         // stack). The hardware reads it directly, so it is built at its own
-        // resident address. The builder type comes from the backend.
-        static typename Platform::template display_program<Layout> dl;
+        // resident address. program_for<S>() returns that one persistent instance
+        // so bind_scroll_map()/apply_scroll() patch the same list ANTIC executes.
+        auto& dl = program_for<S>();
         dl.build(addr(screen_buffer_), addr(&dl.bytes[0]));
 
         // Rebind this screen's region views to their buffer slices.
@@ -156,12 +155,62 @@ public:
         active_dl_      = dl.bytes;
         active_dl_size_ = dl.size;
 
+        // A fresh screen is not scroll-bound until bind_scroll_map(); apply_scroll
+        // is a no-op until then (and the caller deactivates the ScrollManager).
+        scroll_bound_ = false;
+
         // TODO (later subsystems): clear screen buffer, rebuild the raster-hook
-        // chain, enable/disable sprites + scroll per screen flags, generate the
+        // chain, enable/disable sprites per screen flags, generate the
         // row-address table when use_row_table. See ARCHITECTURE.md set_screen
         // steps 3-11.
 
         cb();
+    }
+
+    // ── Scroll binding ────────────────────────────────────────────────
+    //
+    // Bind a game-held map buffer to screen S's scroll region: point every
+    // scroll-region LMS at the map (initial coarse 0,0), rebind the region view to
+    // the map, and activate the ScrollManager with the geometry from the layout +
+    // the mode's display traits. Call after set_screen<S>() (init() builds the
+    // initial screen). `map_width` is the map's row stride in the region's native
+    // units; it must match the layout's scroll-region map width.
+    template <typename S, typename ScrollT>
+    void bind_scroll_map(ScrollT& scroll, u8* map_base, u16 map_width) {
+        using Layout = typename S::display;
+        static_assert(Layout::has_scroll, "screen S has no scroll region");
+        constexpr u8 idx = Layout::scroll_region_index();
+
+        auto& dl = program_for<S>();
+        scroll_prog_      = &dl;
+        scroll_patch_     = &patch_thunk<S>;
+        scroll_map_base_  = addr(map_base);
+        scroll_map_width_ = map_width;
+        scroll_bound_     = true;
+
+        // Point the scroll region's view at the map so region-view writes land in
+        // the map buffer, and set the initial (unscrolled) LMS addresses.
+        views_.template for_screen<S>().template get<idx>().ptr = map_base;
+        dl.patch_scroll(scroll_map_base_, scroll_map_width_, 0, 0);
+
+        using Region = typename Layout::template region_at<idx>;
+        using ModeT  = typename Region::mode_type;
+        constexpr ModeT mode = Region::mode;
+        using tr = engine::display::traits<ModeT>;
+        scroll.activate(Layout::region_map_width[idx], Layout::region_map_height[idx],
+                        Layout::region_height[idx], tr::bytes_per_line(mode),
+                        tr::scanlines_per_line(mode), tr::fine_scroll_range(mode));
+    }
+
+    // Per-frame scroll update (called from the frame service). Writes the fine
+    // registers and repoints the scroll LMS for the current coarse offset. No-op
+    // unless a map is bound and the ScrollManager is active and not suspended.
+    template <typename ScrollT>
+    void apply_scroll(ScrollT& scroll) {
+        if (!scroll_bound_ || !scroll.active() || scroll.suspended()) return;
+        scroll.write_fine();
+        scroll_patch_(scroll_prog_, scroll_map_base_, scroll_map_width_,
+                      scroll.coarse_col(), scroll.coarse_row());
     }
 
     // Typed region view for region N of screen S (compile-time type safety:
@@ -192,11 +241,37 @@ private:
         return static_cast<u16>(reinterpret_cast<uintptr_t>(p));
     }
 
+    // The one persistent display program for screen S (a function-local static so
+    // it has a stable resident address ANTIC can read). set_screen, bind_scroll_map,
+    // and patch_thunk all reach the same instance through here.
+    template <typename S>
+    static auto& program_for() {
+        static typename Platform::template display_program<typename S::display> dl;
+        return dl;
+    }
+
+    // Type-erasing trampoline so apply_scroll can call the backend display
+    // program's patch_scroll without the ScreenManager naming the per-screen
+    // program type at the call site.
+    template <typename S>
+    static void patch_thunk(void* p, u16 base, u16 width, u16 col, u16 row) {
+        using DP = typename Platform::template display_program<typename S::display>;
+        static_cast<DP*>(p)->patch_scroll(base, width, col, row);
+    }
+
     u8 screen_buffer_[buffer_size] = {};
     typename detail::screen_views_of<screens>::type views_;
 
     u8*       active_dl_      = nullptr;   // last built list (points into a static)
     u16       active_dl_size_ = 0;
+
+    // Scroll binding (type-erased: the active program type is captured in
+    // scroll_patch_ at bind time so apply_scroll names no per-screen type).
+    void*  scroll_prog_      = nullptr;
+    void (*scroll_patch_)(void*, u16, u16, u16, u16) = nullptr;
+    u16    scroll_map_base_  = 0;
+    u16    scroll_map_width_ = 0;
+    bool   scroll_bound_     = false;
 };
 
 } // namespace engine

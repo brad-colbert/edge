@@ -193,8 +193,31 @@ public:
     static auto& region() { return screen.template region<S, N>(); }
 
     // ── Screen transition ──
+    // Deactivate scroll on every transition; a scroll screen re-arms it via
+    // scroll_map() once the game has bound its map buffer.
     template <typename S, typename Cb>
-    static void set_screen(Cb cb) { screen.template set_screen<S>(cb); }
+    static void set_screen(Cb cb) {
+        scroll.deactivate();
+        screen.template set_screen<S>(cb);
+    }
+
+    // ── Scroll map binding ──
+    //
+    // Bind a game-held map (an engine::TileMap, or any value exposing `tiles[]`
+    // and a `width` constant) as screen S's scroll source and start scrolling.
+    // Call after init(). The map's width/height must match the screen's scroll
+    // region (checked at compile time). The frame service then drives the fine
+    // registers and the per-line LMS from Game::scroll's position every frame.
+    template <typename Map, typename S = InitialScreen>
+    static void scroll_map(Map& m) {
+        using Layout = typename S::display;
+        static constexpr u8 idx = Layout::scroll_region_index();
+        static_assert(Layout::region_map_width[idx] == Map::width,
+                      "scroll map width does not match the screen's scroll region");
+        static_assert(Layout::region_map_height[idx] == Map::height,
+                      "scroll map height does not match the screen's scroll region");
+        screen.template bind_scroll_map<S>(scroll, &m.tiles[0], Map::width);
+    }
 
     // ── Game loop forwarders (loop.h) ──
     template <typename Cb>
@@ -217,6 +240,12 @@ public:
         u8 joy[kPorts];
         for (u8 p = 0; p < kPorts; ++p) joy[p] = Platform::hal::read_joystick(p);
         input.update(joy, Platform::hal::read_keyboard());
+
+        // 1b. Scroll: write the fine registers and repoint the scroll-region LMS
+        //     for the current viewport, and keep the tile viewport coherent. No-op
+        //     unless a scroll map is bound (Dependency: screen owns the LMS bytes).
+        screen.apply_scroll(scroll);
+        tiles.set_viewport(scroll.x(), scroll.y());
 
         // 2. Sound envelopes.
         sound.tick();

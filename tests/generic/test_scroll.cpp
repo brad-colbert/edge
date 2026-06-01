@@ -1,12 +1,14 @@
-// test_scroll.cpp — unit tests for engine/scroll.h.
+// test_scroll.cpp — unit tests for engine/scroll.h (the portable ScrollManager).
 //
 // Built for the llvm-mos `mos-sim` platform and run under `mos-sim`; main()'s
 // return value becomes the process exit code (0 = pass) for CTest.
 //
-// Everything here is platform-independent: the fine/coarse split, the LMS
-// display-list patch, and the suspend/activate gating are driven through a MOCK
-// HAL so no real ANTIC is touched. The live ANTIC scroll registers in the Atari
-// HAL (and the hardware scroll direction) are verified separately on Fujisan.
+// ScrollManager is now purely portable: it owns the position, the fine/coarse
+// split, and the fine-register writes (through a MOCK HAL). It knows NOTHING of
+// the display-list bytes — that patching lives in the backend DisplayProgram and
+// is covered by tests/backends/atari/test_atari_scroll.cpp. So these tests check
+// the split math (coarse_col/coarse_row with edge clamps), the fine-register
+// writes, and the active/suspend flags only.
 
 #include <stdint.h>
 #include <stdio.h>
@@ -19,8 +21,7 @@ using engine::ScrollManager;
 
 // ── Mock platform ─────────────────────────────────────────────────────
 //
-// Records the last fine-scroll values written and how many writes occurred
-// (so suspend/inactive can be checked by write count).
+// Records the last fine-scroll values written and how many writes occurred.
 struct MockHal {
     static u8       hscrol;
     static u8       vscrol;
@@ -56,88 +57,82 @@ static unsigned g_failures = 0;
         }                                                                  \
     } while (0)
 
-static u16 read16(const u8* b, u16 i) {
-    return static_cast<u16>(b[i]) | (static_cast<u16>(b[i + 1]) << 8);
-}
-
-// ── Shared test geometry ───────────────────────────────────────────────
+// ── Shared test geometry (a Mode-2 scroll region over a 64x32 map) ──────
 //
-// A minimal display list holding one LMS instruction (Mode 4 | LMS, then its
-// 2-byte address) initialised to point at the tilemap origin. The low byte of
-// the address sits at index 1, so lms_pos == 1.
-static constexpr u16 SCREEN_BASE = 0x4000;   // tilemap origin (address value)
-static constexpr u16 MAP_WIDTH   = 64;       // full row stride, > bytes_per_line
-static constexpr u16 LMS_POS     = 1;
+//   bytes_per_line = 40, scanlines_per_line = 8, fine_scroll_range = 4.
+//   map 64 wide x 32 tall, 22 visible lines.
+static constexpr u16 MAP_W   = 64;
+static constexpr u16 MAP_H   = 32;
+static constexpr u8  VIS     = 22;
+static constexpr u8  BPL     = 40;
+static constexpr u8  SPLPL   = 8;
+static constexpr u8  FSR     = 4;
 
-// Geometry the screen manager would pass for a Mode-4 scroll region:
-//   bytes_per_line = 40, scanlines_per_line = 8, fine_scroll_range = 16.
-static constexpr u8 BPL   = 40;
-static constexpr u8 SPLPL = 8;
-static constexpr u8 FSR   = 16;
-
-static u8* screen_base() { return reinterpret_cast<u8*>(SCREEN_BASE); }
-
-static void init_dl(u8* dl) {
-    dl[0] = static_cast<u8>(0x04 | 0x40);     // Mode 4 | DL_LMS
-    dl[1] = static_cast<u8>(SCREEN_BASE & 0xFF);
-    dl[2] = static_cast<u8>(SCREEN_BASE >> 8);
+static void activate(ScrollManager<MockPlatform>& sm) {
+    sm.activate(MAP_W, MAP_H, VIS, BPL, SPLPL, FSR);
 }
 
-// ── Zero scroll: registers cleared, LMS unchanged ──────────────────────
+// ── Zero scroll: registers cleared, coarse 0 ───────────────────────────
 
 static void test_zero() {
-    u8 dl[3];
-    init_dl(dl);
     MockHal::reset();
-
     ScrollManager<MockPlatform> sm;
-    sm.activate(BPL, SPLPL, FSR);
+    activate(sm);
     sm.set(0, 0);
-    sm.apply(dl, LMS_POS, screen_base(), MAP_WIDTH);
+    sm.write_fine();
 
     CHECK(MockHal::hscrol == 0);
     CHECK(MockHal::vscrol == 0);
-    CHECK(read16(dl, LMS_POS) == SCREEN_BASE);   // coarse 0 -> base, unchanged
+    CHECK(sm.coarse_col() == 0);
+    CHECK(sm.coarse_row() == 0);
 }
 
 // ── Small scroll: fine only, no coarse step ────────────────────────────
 
 static void test_fine_only() {
-    u8 dl[3];
-    init_dl(dl);
     MockHal::reset();
-
     ScrollManager<MockPlatform> sm;
-    sm.activate(BPL, SPLPL, FSR);
+    activate(sm);
     sm.set(3, 5);
-    sm.apply(dl, LMS_POS, screen_base(), MAP_WIDTH);
+    sm.write_fine();
 
-    CHECK(MockHal::hscrol == 3);                 // 3 % 16
-    CHECK(MockHal::vscrol == 5);                 // 5 % 8
-    CHECK(read16(dl, LMS_POS) == SCREEN_BASE);   // 3/16 == 0, 5/8 == 0
+    CHECK(MockHal::hscrol == 3);        // 3 % 4
+    CHECK(MockHal::vscrol == 5);        // 5 % 8
+    CHECK(sm.coarse_col() == 0);        // 3 / 4
+    CHECK(sm.coarse_row() == 0);        // 5 / 8
 }
 
-// ── Larger scroll: fine + coarse, LMS patched ──────────────────────────
+// ── Larger scroll: fine + coarse ───────────────────────────────────────
 
 static void test_fine_and_coarse() {
-    u8 dl[3];
-    init_dl(dl);
     MockHal::reset();
-
     ScrollManager<MockPlatform> sm;
-    sm.activate(BPL, SPLPL, FSR);
+    activate(sm);
     sm.set(20, 17);
-    sm.apply(dl, LMS_POS, screen_base(), MAP_WIDTH);
+    sm.write_fine();
 
-    CHECK(MockHal::hscrol == 4);                 // 20 % 16
-    CHECK(MockHal::vscrol == 1);                 // 17 % 8
-
-    // coarse_col = 20/16 = 1, coarse_row = 17/8 = 2.
-    const u16 expected = static_cast<u16>(SCREEN_BASE + 2 * MAP_WIDTH + 1);
-    CHECK(read16(dl, LMS_POS) == expected);
+    CHECK(MockHal::hscrol == 0);        // 20 % 4
+    CHECK(MockHal::vscrol == 1);        // 17 % 8
+    CHECK(sm.coarse_col() == 5);        // 20 / 4
+    CHECK(sm.coarse_row() == 2);        // 17 / 8
 }
 
-// ── move(): relative scroll arithmetic ─────────────────────────────────
+// ── Coarse offsets clamp at the map's right / bottom edge ──────────────
+
+static void test_edge_clamp() {
+    ScrollManager<MockPlatform> sm;
+    activate(sm);
+
+    // Horizontal: max coarse col = map_width - bytes_per_line = 64 - 40 = 24.
+    sm.set(4 * 100, 0);                 // would be coarse_col 100
+    CHECK(sm.coarse_col() == 24);
+
+    // Vertical: max coarse row = map_height - visible_lines = 32 - 22 = 10.
+    sm.set(0, 8 * 100);                 // would be coarse_row 100
+    CHECK(sm.coarse_row() == 10);
+}
+
+// ── move(): relative scroll arithmetic, clamped at the origin ──────────
 
 static void test_move() {
     ScrollManager<MockPlatform> sm;
@@ -146,60 +141,37 @@ static void test_move() {
     CHECK(sm.x() == 15);
     CHECK(sm.y() == 7);
 
-    // Negative past the origin clamps at 0 rather than wrapping.
     sm.move(-100, -100);
     CHECK(sm.x() == 0);
     CHECK(sm.y() == 0);
 }
 
-// ── suspend()/resume() gate hardware writes ────────────────────────────
+// ── active()/suspend()/resume() flags ──────────────────────────────────
 
-static void test_suspend() {
-    u8 dl[3];
-    init_dl(dl);
-
+static void test_flags() {
     ScrollManager<MockPlatform> sm;
-    sm.activate(BPL, SPLPL, FSR);
+    CHECK(!sm.active());                // inactive before activate()
+    CHECK(!sm.suspended());
 
-    // Suspended: apply() touches neither the registers nor the LMS.
+    activate(sm);
+    CHECK(sm.active());
+
     sm.suspend();
-    sm.set(20, 17);
-    MockHal::reset();
-    sm.apply(dl, LMS_POS, screen_base(), MAP_WIDTH);
-    CHECK(MockHal::hscrol_writes == 0);
-    CHECK(MockHal::vscrol_writes == 0);
-    CHECK(read16(dl, LMS_POS) == SCREEN_BASE);   // LMS left untouched
-
-    // Resumed: writes occur and the LMS is patched.
+    CHECK(sm.suspended());
     sm.resume();
-    sm.apply(dl, LMS_POS, screen_base(), MAP_WIDTH);
-    CHECK(MockHal::hscrol_writes > 0);
-    CHECK(MockHal::vscrol_writes > 0);
-    CHECK(read16(dl, LMS_POS) == static_cast<u16>(SCREEN_BASE + 2 * MAP_WIDTH + 1));
-}
+    CHECK(!sm.suspended());
 
-// ── apply() before activate() is inert ─────────────────────────────────
-
-static void test_inactive() {
-    u8 dl[3];
-    init_dl(dl);
-    MockHal::reset();
-
-    ScrollManager<MockPlatform> sm;   // never activated
-    sm.set(20, 17);
-    sm.apply(dl, LMS_POS, screen_base(), MAP_WIDTH);
-    CHECK(MockHal::hscrol_writes == 0);
-    CHECK(MockHal::vscrol_writes == 0);
-    CHECK(read16(dl, LMS_POS) == SCREEN_BASE);
+    sm.deactivate();
+    CHECK(!sm.active());
 }
 
 int main() {
     test_zero();
     test_fine_only();
     test_fine_and_coarse();
+    test_edge_clamp();
     test_move();
-    test_suspend();
-    test_inactive();
+    test_flags();
 
     if (g_failures == 0) {
         printf("ALL TESTS PASSED\n");
