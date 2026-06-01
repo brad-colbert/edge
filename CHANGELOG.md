@@ -11,6 +11,27 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
 
 ## [Unreleased]
 
+### Added
+- Hardware scrolling, wired live end-to-end. Declare a scrolling region by wrapping
+  any region in `engine::ScrollRegion<Inner, MapW, MapH>` inside a `DisplayLayout`,
+  bind a game-held `engine::TileMap` as its source with `Game::scroll_map(map)`, and
+  drive it with `Game::scroll.move()` / `Game::scroll.set()`. The frame service splits
+  the position into fine (HSCROL/VSCROL) and coarse (per-line LMS) scroll, clamps at the
+  map edges, and keeps the tile viewport (`Game::tiles`) in sync automatically.
+- Scroll validation demo building to `atari_scroll_test.xex` — a 64×32 tilemap scrolled
+  under a fixed HUD. Builds independently of `atari_hw_test`.
+- Backend ANTIC scroll geometry: `DL_HSCROLL` / `DL_VSCROLL`, `scroll_margin`,
+  `scroll_fetch_width`, and `fine_scroll_range` (`platform/atari/antic.h`), plus a
+  per-line-LMS scroll-aware display-program builder with `patch_scroll`
+  (`platform/atari/display_list.h`).
+
+### Changed
+- `ScrollManager` reworked into a portable fine/coarse split: it owns the position and
+  the fine-register writes (via `Platform::hal`) and exposes `coarse_col()` /
+  `coarse_row()`; the backend display program owns all load-address patching. The
+  per-axis fine-scroll inversion and the fetch width are supplied by the backend through
+  display traits, so the generic scroll layer names no ANTIC specifics (Dependency Rule 2).
+
 ## [0.1.0] - 2026-05-31
 
 ### Added
