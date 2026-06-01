@@ -68,8 +68,10 @@ static constexpr u8  FETCH   = 48;
 static constexpr u8  SPLPL   = 8;
 static constexpr u8  FSR     = 4;
 
+// invert_x = true, invert_y = false mirrors the ANTIC convention the Atari backend
+// supplies (horizontal fine register opposes coarse; vertical matches it).
 static void activate(ScrollManager<MockPlatform>& sm) {
-    sm.activate(MAP_W, MAP_H, VIS, FETCH, SPLPL, FSR);
+    sm.activate(MAP_W, MAP_H, VIS, FETCH, SPLPL, FSR, /*invert_x=*/true, /*invert_y=*/false);
 }
 
 // ── Zero scroll: registers cleared, coarse 0 ───────────────────────────

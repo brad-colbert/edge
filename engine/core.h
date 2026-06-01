@@ -207,7 +207,8 @@ public:
     // and a `width` constant) as screen S's scroll source and start scrolling.
     // Call after init(). The map's width/height must match the screen's scroll
     // region (checked at compile time). The frame service then drives the fine
-    // registers and the per-line LMS from Game::scroll's position every frame.
+    // registers and the scroll-region load addresses from Game::scroll's position
+    // every frame.
     template <typename Map, typename S = InitialScreen>
     static void scroll_map(Map& m) {
         using Layout = typename S::display;
@@ -241,9 +242,10 @@ public:
         for (u8 p = 0; p < kPorts; ++p) joy[p] = Platform::hal::read_joystick(p);
         input.update(joy, Platform::hal::read_keyboard());
 
-        // 1b. Scroll: write the fine registers and repoint the scroll-region LMS
-        //     for the current viewport, and keep the tile viewport coherent. No-op
-        //     unless a scroll map is bound (Dependency: screen owns the LMS bytes).
+        // 1b. Scroll: write the fine registers and repoint the scroll-region load
+        //     addresses for the current viewport, and keep the tile viewport
+        //     coherent. No-op unless a scroll map is bound (the screen owns the
+        //     display-program bytes).
         screen.apply_scroll(scroll);
         tiles.set_viewport(scroll.x(), scroll.y());
 

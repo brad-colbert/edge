@@ -20,8 +20,10 @@
 //   static constexpr u8   mode_opcode(ModeT);        // backend display-program byte
 //   static constexpr u8   to_screen_code(char);      // ASCII -> screen tile code
 //   static constexpr u8   fine_scroll_range(ModeT);  // horizontal fine-scroll modulus
-//   static constexpr u8   scroll_fetch_width(ModeT); // bytes fetched per scrolled line
-//                                                    //   (both only used by scroll-active screens)
+//   static constexpr u8   scroll_fetch_width(ModeT); // cells fetched per scrolled line
+//   static constexpr bool fine_scroll_inverts_x(ModeT); // fine X register opposes coarse
+//   static constexpr bool fine_scroll_inverts_y(ModeT); // fine Y register opposes coarse
+//                                                    //   (these four only used by scroll-active screens)
 //
 // Depends only on types.h.
 

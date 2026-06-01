@@ -195,8 +195,9 @@ struct BitmapRegion {
 // hardware-scrolling region over a `MapW`×`MapH` map. The inner region supplies
 // the mode, the visible height, and the view type (so a scroll region draws with
 // the same view as its non-scroll counterpart); the wrapper adds the map geometry
-// and the `is_scroll` flag the display-list builder reads to emit one LMS per
-// visible line (with the HSCROLL/VSCROLL bits) striding by `map_width`.
+// and the `is_scroll` flag the backend display-program builder reads to give each
+// visible line its own load address (with the fine-scroll enable) striding by
+// `map_width`.
 //
 // `ram_bytes` is 0: a scroll region's pixels live in the game-held map buffer the
 // engine binds at scroll_map() time, not in the shared screen buffer, so it costs

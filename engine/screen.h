@@ -140,7 +140,8 @@ public:
         // One display program per screen, in BSS (not on the 256-byte 6502
         // stack). The hardware reads it directly, so it is built at its own
         // resident address. program_for<S>() returns that one persistent instance
-        // so bind_scroll_map()/apply_scroll() patch the same list ANTIC executes.
+        // so bind_scroll_map()/apply_scroll() patch the same program the display
+        // hardware executes.
         auto& dl = program_for<S>();
         dl.build(addr(screen_buffer_), addr(&dl.bytes[0]));
 
@@ -170,9 +171,9 @@ public:
     // ── Scroll binding ────────────────────────────────────────────────
     //
     // Bind a game-held map buffer to screen S's scroll region: point every
-    // scroll-region LMS at the map (initial coarse 0,0), rebind the region view to
-    // the map, and activate the ScrollManager with the geometry from the layout +
-    // the mode's display traits. Call after set_screen<S>() (init() builds the
+    // scroll-region load address at the map (initial coarse 0,0), rebind the region
+    // view to the map, and activate the ScrollManager with the geometry from the
+    // layout + the mode's display traits. Call after set_screen<S>() (init() builds the
     // initial screen). `map_width` is the map's row stride in the region's native
     // units; it must match the layout's scroll-region map width.
     template <typename S, typename ScrollT>
@@ -189,7 +190,7 @@ public:
         scroll_bound_     = true;
 
         // Point the scroll region's view at the map so region-view writes land in
-        // the map buffer, and set the initial (unscrolled) LMS addresses.
+        // the map buffer, and set the initial (unscrolled) load addresses.
         views_.template for_screen<S>().template get<idx>().ptr = map_base;
         dl.patch_scroll(scroll_map_base_, scroll_map_width_, 0, 0);
 
@@ -199,12 +200,14 @@ public:
         using tr = engine::display::traits<ModeT>;
         scroll.activate(Layout::region_map_width[idx], Layout::region_map_height[idx],
                         Layout::region_height[idx], tr::scroll_fetch_width(mode),
-                        tr::scanlines_per_line(mode), tr::fine_scroll_range(mode));
+                        tr::scanlines_per_line(mode), tr::fine_scroll_range(mode),
+                        tr::fine_scroll_inverts_x(mode), tr::fine_scroll_inverts_y(mode));
     }
 
     // Per-frame scroll update (called from the frame service). Writes the fine
-    // registers and repoints the scroll LMS for the current coarse offset. No-op
-    // unless a map is bound and the ScrollManager is active and not suspended.
+    // registers and repoints the scroll-region load addresses for the current coarse
+    // offset. No-op unless a map is bound and the ScrollManager is active and not
+    // suspended.
     template <typename ScrollT>
     void apply_scroll(ScrollT& scroll) {
         if (!scroll_bound_ || !scroll.active() || scroll.suspended()) return;
@@ -242,7 +245,7 @@ private:
     }
 
     // The one persistent display program for screen S (a function-local static so
-    // it has a stable resident address ANTIC can read). set_screen, bind_scroll_map,
+    // it has a stable resident address the display hardware can read). set_screen, bind_scroll_map,
     // and patch_thunk all reach the same instance through here.
     template <typename S>
     static auto& program_for() {

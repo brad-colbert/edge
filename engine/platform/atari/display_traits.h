@@ -40,6 +40,11 @@ struct traits<atari::Mode> {
     static constexpr engine::u8 scroll_fetch_width(atari::Mode m) {
         return atari::scroll_fetch_width(m);
     }
+    // ANTIC register conventions: raising HSCROL moves the picture opposite to the
+    // LMS (coarse) pointer, so horizontal fine scroll inverts; VSCROL moves it the
+    // same way as the LMS pointer, so vertical does not. (See platform/atari/antic.h.)
+    static constexpr bool fine_scroll_inverts_x(atari::Mode) { return true; }
+    static constexpr bool fine_scroll_inverts_y(atari::Mode) { return false; }
     static constexpr engine::u8 to_screen_code(char c) {
         return atari::ascii_to_internal(c);
     }
