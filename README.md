@@ -1,4 +1,4 @@
-<img width="1448" height="1086" alt="image" src="https://github.com/user-attachments/assets/76377375-b374-4d6e-8524-b17f22ca1953" />
+<img width="1448" height="1086" alt="EDGE_primary_logo_mark" src="https://github.com/user-attachments/assets/d7be6d69-4959-41d1-8d3b-53bbd34b9be3" />
 
 # EDGE (Eight-bit Damned! Game Engine)
 EDGE is a C++20 game engine for constrained 6502-class systems, built around a small, deterministic, compile-time configured API instead of a heavy runtime.
