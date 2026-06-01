@@ -144,13 +144,6 @@ If you are new to the project, read these in order:
 3. [`/documents/API_REFERENCE.md`](./documents/API_REFERENCE.md)
 4. [`/documents/PLATFORM_ATARI.md`](./documents/PLATFORM_ATARI.md)
 
-For deeper design background:
-
-- [`/docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md)
-- [`/docs/API_DESIGN.md`](./docs/API_DESIGN.md)
-- [`/docs/CONSTRAINTS.md`](./docs/CONSTRAINTS.md)
-- [`/docs/DECISIONS.md`](./docs/DECISIONS.md)
-
 ## Key architectural ideas
 
 - **Portable engine API:** game code targets engine subsystems rather than hardware registers.
