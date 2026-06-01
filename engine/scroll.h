@@ -85,16 +85,28 @@ public:
     // Write the sub-cell remainder to the fine-scroll registers. The caller gates
     // this on active()/suspended(); kept register-only so this header stays off
     // the display list entirely.
+    //
+    // Hardware direction (ANTIC): the two fine registers are NOT symmetric.
+    // Raising HSCROL pushes the picture RIGHT — opposite to the way the LMS (coarse)
+    // pointer moves it horizontally — so the raw remainder would make horizontal
+    // fine creep against coarse and snap at each cell boundary; we invert it (and
+    // coarse_col absorbs it with a one-cell step) so fine and coarse advance
+    // together. Raising VSCROL pushes the picture UP, which is the SAME direction
+    // the LMS pointer moves it vertically, so vertical needs no inversion.
     void write_fine() const {
-        Platform::hal::set_fine_scroll_x(static_cast<u8>(scroll_x_ % fsr_));
+        Platform::hal::set_fine_scroll_x(invert(static_cast<u8>(scroll_x_ % fsr_), fsr_));
         Platform::hal::set_fine_scroll_y(static_cast<u8>(scroll_y_ % splpl_));
     }
 
     // ── Coarse scroll (whole cells), clamped to the map edges ─────────
-    // Horizontal stops so the visible window's right edge never passes the map's;
-    // vertical likewise at the bottom.
+    // The horizontal fine remainder is inverted (write_fine), so its cell is
+    // advanced by one to keep the total displacement monotonic; the vertical
+    // remainder is not, so coarse_row is the plain quotient. Horizontal stops so the
+    // visible window's right edge never passes the map's; vertical likewise at the
+    // bottom.
     u16 coarse_col() const {
-        const u16 c = static_cast<u16>(scroll_x_ / fsr_);
+        u16 c = static_cast<u16>(scroll_x_ / fsr_);
+        if (scroll_x_ % fsr_) ++c;
         const u16 max_c = map_width_ > bpl_ ? static_cast<u16>(map_width_ - bpl_) : 0;
         return c > max_c ? max_c : c;
     }
@@ -106,6 +118,11 @@ public:
     }
 
 private:
+    // Invert a sub-cell remainder for a fine register that scrolls opposite to the
+    // coarse pointer: 0 stays 0, otherwise `cell - r` (so the register counts down
+    // as coarse, bumped by one cell, counts up). See write_fine().
+    static u8 invert(u8 r, u8 cell) { return r ? static_cast<u8>(cell - r) : 0; }
+
     static u16 add_clamped(u16 base, i16 delta) {
         if (delta < 0) {
             const u16 mag = static_cast<u16>(-delta);

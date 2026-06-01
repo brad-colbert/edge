@@ -96,9 +96,12 @@ static void test_fine_only() {
     sm.set(3, 5);
     sm.write_fine();
 
-    CHECK(MockHal::hscrol == 3);        // 3 % 4
-    CHECK(MockHal::vscrol == 5);        // 5 % 8
-    CHECK(sm.coarse_col() == 0);        // 3 / 4
+    // Horizontal fine scrolls opposite coarse: the remainder is inverted (cell - r)
+    // and its cell advanced by one. Vertical fine scrolls the same way as coarse,
+    // so its remainder is raw and coarse_row is the plain quotient.
+    CHECK(MockHal::hscrol == 1);        // 4 - (3 % 4)
+    CHECK(MockHal::vscrol == 5);        // 5 % 8 (no inversion)
+    CHECK(sm.coarse_col() == 1);        // 3 / 4 == 0, +1 for the inverted fine
     CHECK(sm.coarse_row() == 0);        // 5 / 8
 }
 
@@ -111,9 +114,9 @@ static void test_fine_and_coarse() {
     sm.set(20, 17);
     sm.write_fine();
 
-    CHECK(MockHal::hscrol == 0);        // 20 % 4
-    CHECK(MockHal::vscrol == 1);        // 17 % 8
-    CHECK(sm.coarse_col() == 5);        // 20 / 4
+    CHECK(MockHal::hscrol == 0);        // 20 % 4 == 0 -> no inversion, no carry
+    CHECK(MockHal::vscrol == 1);        // 17 % 8 (no inversion)
+    CHECK(sm.coarse_col() == 5);        // 20 / 4, exact
     CHECK(sm.coarse_row() == 2);        // 17 / 8
 }
 

@@ -170,7 +170,9 @@ static void test_apply_scroll() {
     CHECK(scroll.active());
     CHECK(first_scroll_addr() == map);             // bound at coarse (0,0)
 
-    // Scroll to (20,17): hscrol 0, vscrol 1, coarse col 5, row 2.
+    // Scroll to (20,17). Horizontal fine is inverted and absorbs into its cell;
+    // vertical fine is raw. hscrol 0 (20%4==0), vscrol 1 (17%8), coarse col 5,
+    // coarse row 2 (17/8).
     scroll.set(20, 17);
     MockHal::fine_writes = 0;
     g_sm.apply_scroll(scroll);
