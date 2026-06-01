@@ -4,10 +4,10 @@
 // input.h — portable input snapshot and edge-detection logic.
 //
 // This is the data structure and the per-frame edge logic ONLY. Actual
-// hardware polling (PIA joystick reads, POKEY/keyboard scan, CONSOL console
-// keys) is the platform HAL's job and comes later. The HAL calls update()
-// once per frame during VBI with already-normalised state; game code reads
-// the snapshot via the query methods (API_DESIGN.md "Input").
+// hardware polling (joystick reads, keyboard scan, system console keys) is the
+// platform HAL's job and comes later. The HAL calls update() once per frame with
+// already-normalised state; game code reads the snapshot via the query methods
+// (API_DESIGN.md "Input").
 //
 // State is captured once per frame and presented immutably to game code, so
 // there are no races and no polling (DECISIONS.md / ARCHITECTURE.md data flow).
@@ -27,14 +27,14 @@ inline constexpr u8 RIGHT = 0x08;
 inline constexpr u8 FIRE  = 0x10;
 } // namespace joy
 
-// Console keys are a single global set (Atari CONSOL). To stay within the
-// "2 bytes per port" budget they are packed into the high bits of port 0's
-// state byte rather than costing extra storage.
-namespace console {
-inline constexpr u8 START  = 0x20;
-inline constexpr u8 SELECT = 0x40;
-inline constexpr u8 OPTION = 0x80;
-} // namespace console
+// System console keys are a single global set (the backend's console buttons).
+// To stay within the "2 bytes per port" budget they are packed into the high
+// bits of port 0's state byte rather than costing extra storage.
+namespace syskey {
+inline constexpr u8 PRIMARY   = 0x20;
+inline constexpr u8 SECONDARY = 0x40;
+inline constexpr u8 OPTION    = 0x80;
+} // namespace syskey
 
 // InputState<NumPorts> — current + previous frame state for NumPorts joystick
 // ports plus a one-byte keyboard field.
@@ -44,7 +44,7 @@ inline constexpr u8 OPTION = 0x80;
 template <u8 NumPorts = 2>
 class InputState {
     static_assert(NumPorts >= 1, "need at least one joystick port");
-    static_assert(NumPorts <= 4, "Atari PIA exposes at most 4 ports");
+    static_assert(NumPorts <= 4, "at most 4 joystick ports are supported");
 
 public:
     static constexpr u8 port_count() { return NumPorts; }
@@ -53,7 +53,7 @@ public:
     //
     // Shifts current -> previous for every port, latches the new joystick
     // bytes, and updates the keyboard field. `joy` points to NumPorts bytes
-    // (each a bitwise OR of joy::* and, for port 0, console::* bits). `key`
+    // (each a bitwise OR of joy::* and, for port 0, syskey::* bits). `key`
     // is the current scancode (0..127), or 0 if no key is down.
     void update(const u8* joy, u8 key) {
         for (u8 p = 0; p < NumPorts; ++p) {
@@ -74,10 +74,10 @@ public:
     bool fire_pressed (u8 port = 0) const { return edge_pressed(port, joy::FIRE); }
     bool fire_released(u8 port = 0) const { return edge_released(port, joy::FIRE); }
 
-    // ── Console keys (level; global, read from port 0) ──
-    bool start () const { return level(0, console::START); }
-    bool select() const { return level(0, console::SELECT); }
-    bool option() const { return level(0, console::OPTION); }
+    // ── System console keys (level; global, read from port 0) ──
+    bool system_primary()   const { return level(0, syskey::PRIMARY); }
+    bool system_secondary() const { return level(0, syskey::SECONDARY); }
+    bool system_option()    const { return level(0, syskey::OPTION); }
 
     // ── Keyboard ──
     // key() returns the current scancode (0 if none). key_pressed() is true

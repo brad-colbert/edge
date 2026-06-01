@@ -12,8 +12,8 @@
 //
 // Like every engine header it reaches hardware ONLY through the `Platform`
 // template parameter (Dependency Rule 2) — never by including a platform
-// header. The single hardware touch, set_chbase(), goes through
-// Platform::hal::write_chbase, mirroring how sound.h reaches POKEY.
+// header. The single hardware touch, bind_charset_page(), goes through
+// Platform::hal::set_charset_base, mirroring how sound.h reaches the audio HAL.
 //
 // The character-set and tilemap assets are constexpr builders that mirror
 // make_sprite (sprites.h) and make_sound (sound.h): the author writes a braced
@@ -30,9 +30,9 @@ namespace engine {
 
 // ── CharsetData ───────────────────────────────────────────────────────
 //
-// A compile-time character set. `Size` is the byte count: 1024 for modes 2/4
-// (128 chars × 8 bytes) or 512 for modes 6/7 (64 chars × 8 bytes). The type
-// carries its size as a constexpr member (like SpriteShape) so init_charset()
+// A compile-time character set. `Size` is the byte count: 1024 for a full
+// 128-char set (128 chars × 8 bytes) or 512 for a half set (64 chars × 8 bytes).
+// The type carries its size as a constexpr member (like SpriteShape) so init_charset()
 // knows how many bytes to copy without a separate length argument. This is the
 // value `Game::make_charset` returns; it lives in ROM and is referenced by
 // pointer/reference.
@@ -43,11 +43,11 @@ struct CharsetData {
 };
 
 // Named aliases for the two documented character-set sizes (API_DESIGN.md
-// "Display RAM Costs").
-using Charset2 = CharsetData<1024>;   // modes 2/4: 128 chars × 8 bytes
-using Charset6 = CharsetData<512>;    // modes 6/7: 64 chars × 8 bytes
-static_assert(Charset2::size == 1024, "mode 2/4 charset is 1024 bytes");
-static_assert(Charset6::size == 512,  "mode 6/7 charset is 512 bytes");
+// "Display RAM Costs"), named by byte size rather than a backend mode number.
+using Charset1K  = CharsetData<1024>;   // 128 chars × 8 bytes
+using Charset512 = CharsetData<512>;    // 64 chars × 8 bytes
+static_assert(Charset1K::size  == 1024, "1K charset is 1024 bytes");
+static_assert(Charset512::size == 512,  "512-byte charset is 512 bytes");
 
 // Build a CharsetData from a braced array of bytes (the eventual
 // Game::make_charset). `N` is deduced from the array, so the returned size
@@ -98,10 +98,10 @@ constexpr TileMap<Width, Height> make_map(const u8 (&in)[Width * Height]) {
 
 // ── TileManager ───────────────────────────────────────────────────────
 //
-// The Tiles coordinator. It loads a character set into RAM, points ANTIC's
-// CHBASE at it, and tracks the viewport position into the active tilemap. It
-// owns no map data — the tilemap lives in ROM (constexpr) or a dedicated RAM
-// buffer the game holds.
+// The Tiles coordinator. It loads a character set into RAM, points the backend's
+// character-set base at it, and tracks the viewport position into the active
+// tilemap. It owns no map data — the tilemap lives in ROM (constexpr) or a
+// dedicated RAM buffer the game holds.
 template <typename Platform>
 class TileManager {
 public:
@@ -114,9 +114,9 @@ public:
         for (u16 i = 0; i < Charset::size; ++i) dest[i] = cs.data[i];
     }
 
-    // Point ANTIC's CHBASE at the character set. `page` is the high byte of the
-    // char-set address (address / 256).
-    void set_chbase(u8 page) { Platform::hal::write_chbase(page); }
+    // Point the backend's character-set base at the character set. `page` is the
+    // high byte of the char-set address (address / 256).
+    void bind_charset_page(u8 page) { Platform::hal::set_charset_base(page); }
 
     // Set the viewport (top-left) position into the tilemap, in the map's own
     // coordinates. Stored internally for tile lookups; the Core layer forwards

@@ -5,20 +5,20 @@
 //
 // This is the Sprites subsystem (ARCHITECTURE.md "Sprites" / "Multiplex"). The
 // game writes logical sprite state during its render phase; the engine commits
-// it to player/missile memory during the VBI (one-frame buffering, ADR-009).
-// When more sprites are active than there are hardware players (4), the
-// multiplexer divides the screen into vertical zones and reprograms the player
-// horizontal positions via a raw DLI at each zone boundary.
+// it to hardware-sprite memory during the frame service (one-frame buffering,
+// ADR-009). When more sprites are active than there are hardware sprites (4), the
+// multiplexer divides the screen into vertical zones and reprograms the hardware
+// sprite horizontal positions via a raw raster hook at each zone boundary.
 //
 // Like every engine header it reaches hardware ONLY through the `Platform`
 // template parameter (Dependency Rule 2) — never by including a platform header.
-// The P/M memory layout (where each player's strip lives, how a scanline maps to
-// a byte offset) is platform knowledge surfaced through Platform::hal
-// (pm_player_offset / write_hposp), mirroring how interrupt.h gets the DLI
+// The sprite memory layout (where each sprite's strip lives, how a scanline maps
+// to a byte offset) is platform knowledge surfaced through Platform::hal
+// (sprite_strip_offset / set_sprite_x), mirroring how interrupt.h gets the raster
 // dispatcher address.
 //
-// Design fixed by ADR-022 (tracked-range P/M clear), ADR-024 (always insertion-
-// sort by Y), ADR-025 (missiles not multiplexed yet; ZoneInfo reserves room).
+// Design fixed by ADR-022 (tracked-range sprite clear), ADR-024 (always insertion-
+// sort by Y), ADR-025 (projectiles not multiplexed yet; ZoneInfo reserves room).
 //
 // Depends on types.h and interrupt.h.
 
@@ -30,7 +30,7 @@ namespace engine {
 // ── SpriteShape ───────────────────────────────────────────────────────
 //
 // A compile-time sprite shape. `Width` is the on-screen pixel width (8 single /
-// 16 double; a P/M player is always one byte wide in memory, so `data` is one
+// 16 double; a hardware sprite is always one byte wide in memory, so `data` is one
 // byte per scanline regardless). `Height` is the scanline count. The type
 // carries its dimensions as constexpr members so `sprite()` deduces a sprite's
 // height from the shape object — there is no separate height argument
@@ -52,17 +52,18 @@ constexpr SpriteShape<Width, Height> make_sprite(const u8 (&rows)[Height]) {
     return s;
 }
 
-// ── P/M resolution ────────────────────────────────────────────────────
+// ── Sprite vertical resolution ────────────────────────────────────────
 //
-// Per-screen P/M resolution (ADR-023). SingleLine: 1-scanline Y precision, 256
-// bytes/player. DoubleLine: 2-scanline steps, 128 bytes/player. The underlying
-// values (0/1) are the `res` byte passed to Platform::hal::pm_player_offset.
-enum class PMRes : u8 { SingleLine, DoubleLine };
+// Per-screen sprite vertical resolution (ADR-023). SingleLine: 1-scanline Y
+// precision, 256 bytes/sprite. DoubleLine: 2-scanline steps, 128 bytes/sprite.
+// The underlying values (0/1) are the `res` byte passed to
+// Platform::hal::sprite_strip_offset.
+enum class SpriteVerticalResolution : u8 { SingleLine, DoubleLine };
 
 // ── LogicalSprite ─────────────────────────────────────────────────────
 //
 // One logical sprite's buffered state. 7 bytes on the 6502 (pointer = 2 bytes).
-// `color` is the sprite's COLPM value; the multiplexer drives it onto whichever
+// `color` is the sprite's hardware colour; the multiplexer drives it onto whichever
 // hardware player slot the sprite lands in, so colour follows the sprite even
 // when two sprites cross in Y (set via sprite_color(), persists across the
 // per-frame sprite() position updates).
@@ -82,8 +83,8 @@ static_assert(sizeof(LogicalSprite) == 7, "LogicalSprite must be 7 bytes");
 // One multiplex zone: the scanline at which it becomes active and, per hardware
 // player, which logical sprite it shows (0xFF = unused), at what horizontal
 // position, and in what colour. 13 active bytes; 8 reserved for future missile
-// multiplexing (ADR-025 — keep the struct/DLI shaped for it without implementing
-// it yet). hpos/colour are snapshotted here (not read live in the DLI).
+// multiplexing (ADR-025 — keep the struct/hook shaped for it without implementing
+// it yet). hpos/colour are snapshotted here (not read live in the hook).
 struct ZoneInfo {
     u8 boundary_scanline;
     u8 player_assignment[4];
@@ -108,7 +109,7 @@ public:
     static constexpr u8 kPlayers  = 4;
     static constexpr u8 kMissiles = 4;
 
-    // ── Logical sprite state (buffered; committed during VBI) ──
+    // ── Logical sprite state (buffered; committed during the frame service) ──
     template <typename Shape>
     void sprite(u8 slot, const Shape& shape, u8 x, u8 y) {
         // Assign fields individually so the slot's `color` (set via sprite_color)
@@ -122,12 +123,13 @@ public:
                                    LogicalSprite::FLAG_VISIBLE);
     }
 
-    // Set a sprite's colour (its COLPM value). The multiplexer applies it to the
+    // Set a sprite's colour (its hardware colour). The multiplexer applies it to the
     // hardware player slot the sprite occupies each frame; sticky across sprite().
     void sprite_color(u8 slot, u8 color) { sprites_[slot].color = color; }
 
-    // Missiles are not multiplexed (ADR-025) — the 4 hardware missiles are used
-    // directly. Position is buffered and pushed to HPOSM during commit.
+    // Missiles are not multiplexed (ADR-025) — the 4 hardware projectiles are used
+    // directly. Position is buffered and pushed to the projectile registers during
+    // commit.
     void missile(u8 index, u8 x, u8 y, u8 height) {
         missile_x_[index]      = x;
         missile_y_[index]      = y;
@@ -139,10 +141,10 @@ public:
         for (u8 i = 0; i < MaxSprites; ++i) sprites_[i].flags = 0;
     }
 
-    // P/M resolution is per-screen (ADR-023); the screen manager sets it on
-    // transition. Default single-line, which most games use.
-    void  set_resolution(PMRes res) { res_ = res; }
-    PMRes resolution() const { return res_; }
+    // Sprite vertical resolution is per-screen (ADR-023); the screen manager sets
+    // it on transition. Default single-line, which most games use.
+    void set_resolution(SpriteVerticalResolution res) { res_ = res; }
+    SpriteVerticalResolution resolution() const { return res_; }
 
     // ── Multiplexer: sort by Y, group into zones ──
     //
@@ -203,23 +205,23 @@ public:
         }
     }
 
-    // ── Commit buffered state into player memory ──
+    // ── Commit buffered state into hardware-sprite memory ──
     //
     // Tracked-range clear (ADR-022): clear only last frame's dirty Y range per
-    // player, then write each active sprite's shape into its player strip at the
-    // sprite's Y offset, write zone-0 horizontal positions, push missile
+    // sprite, then write each active sprite's shape into its strip at the
+    // sprite's Y offset, write zone-0 horizontal positions, push projectile
     // positions, and record this frame's dirty ranges for the next clear.
-    // `pmbase` points at the P/M base (a real address on hardware, a test buffer
+    // `sprite_base` points at the sprite base (a real address on hardware, a test buffer
     // under the simulator).
-    void commit(u8* pmbase) {
+    void commit(u8* sprite_base) {
         const u8 res = static_cast<u8>(res_);
 
         // 1. Clear last frame's dirty range for each player.
         for (u8 p = 0; p < kPlayers; ++p) {
             if (dirty_min_y_[p] <= dirty_max_y_[p]) {
-                const u16 base = Platform::hal::pm_player_offset(res, p);
+                const u16 base = Platform::hal::sprite_strip_offset(res, p);
                 for (u16 y = dirty_min_y_[p]; y <= dirty_max_y_[p]; ++y) {
-                    pmbase[base + y] = 0;
+                    sprite_base[base + y] = 0;
                 }
             }
         }
@@ -236,11 +238,11 @@ public:
                 const u8 li = zi.player_assignment[p];
                 if (li == ZoneInfo::UNUSED) continue;
                 const LogicalSprite& s = sprites_[li];
-                const u16 base = Platform::hal::pm_player_offset(res, p);
-                const u8 yb = (res_ == PMRes::SingleLine)
+                const u16 base = Platform::hal::sprite_strip_offset(res, p);
+                const u8 yb = (res_ == SpriteVerticalResolution::SingleLine)
                                   ? s.y : static_cast<u8>(s.y >> 1);
                 for (u8 r = 0; r < s.height; ++r) {
-                    pmbase[base + yb + r] = s.shape[r];
+                    sprite_base[base + yb + r] = s.shape[r];
                 }
                 const u8 lo_y = yb;
                 const u8 hi_y = static_cast<u8>(yb + s.height - 1);
@@ -249,19 +251,19 @@ public:
             }
         }
 
-        // 4. Write zone-0 player positions + colours (the VBI sets the first
-        //    zone; later zones are armed by the boundary DLIs). COLPM is the
+        // 4. Write zone-0 sprite positions + colours (the frame service sets the first
+        //    zone; later zones are armed by the boundary raster hooks). The colour register is the
         //    hardware register, written after the OS shadow→hardware copy so it
         //    holds for the frame and gives this zone's sprites their colours.
         if (zone_count_ > 0) {
             for (u8 p = 0; p < kPlayers; ++p) {
-                Platform::hal::write_hposp(p, zones_[0].hpos[p]);
-                Platform::hal::write_colpm(p, zones_[0].color[p]);
+                Platform::hal::set_sprite_x(p, zones_[0].hpos[p]);
+                Platform::hal::set_sprite_color(p, zones_[0].color[p]);
             }
         }
         // Missiles are direct, not multiplexed (ADR-025).
         for (u8 m = 0; m < kMissiles; ++m) {
-            Platform::hal::write_hposm(m, missile_x_[m]);
+            Platform::hal::set_projectile_x(m, missile_x_[m]);
         }
 
         // 5. Record this frame's dirty ranges for next frame's clear.
@@ -271,31 +273,31 @@ public:
         }
     }
 
-    // ── DLI handler construction ──
+    // ── Raster-hook construction ──
     //
-    // Register a raw boundary DLI for each zone after the first (zone 0's
-    // positions are set by the VBI commit). The handler walks per-frame static
-    // state: s_dli_zone_ is reset here and advanced by each DLI, which writes
-    // the corresponding zone's player positions through the HAL.
+    // Register a raw boundary raster hook for each zone after the first (zone 0's
+    // positions are set by the frame-service commit). The handler walks per-frame static
+    // state: s_hook_zone_ is reset here and advanced by each hook, which writes
+    // the corresponding zone's sprite positions through the HAL.
     //
-    // This implements the HPOS-write logic and the per-frame registration. The
-    // production raw handler also needs the assembly prologue/epilogue (save A,
-    // chain VDSLST via InterruptManager::next_dli_addr(), RTI); that platform
-    // glue is added with the live ANTIC path — it is never executed under the
-    // simulator (no ANTIC), consistent with dli_dispatch.h.
+    // This implements the position-write logic and the per-frame registration. The
+    // production raw handler also needs the backend prologue/epilogue (chain the
+    // next raster vector via InterruptManager::next_raster_addr()); that platform
+    // glue is added with the live hardware path — it is never executed under the
+    // simulator (no hardware raster), consistent with the backend dispatcher.
     template <typename IM>
-    void build_dli_handlers(IM& im) {
+    void build_raster_hooks(IM& im) {
         s_active_   = this;
-        s_dli_zone_ = 0;
+        s_hook_zone_ = 0;
         im.begin_dynamic();
         for (u8 z = 1; z < zone_count_; ++z) {
-            im.add_dynamic_dli(zones_[z].boundary_scanline, &zone_dli);
+            im.add_dynamic_raster_hook(zones_[z].boundary_scanline, &zone_boundary_hook);
         }
     }
 
     // ── Collision reverse-mapping ──
     //
-    // GTIA collision registers accumulate across the whole frame and don't
+    // Hardware collision registers accumulate across the whole frame and don't
     // distinguish zones (ARCHITECTURE.md "Multiplex"). These map between logical
     // sprites and hardware players so the game can disambiguate.
 
@@ -342,15 +344,15 @@ private:
                (LogicalSprite::FLAG_ACTIVE | LogicalSprite::FLAG_VISIBLE);
     }
 
-    // Raw boundary DLI: advance to the next zone and write its player positions
+    // Raw boundary raster hook: advance to the next zone and write its sprite positions
     // and colours (so each zone's sprites show their own colour, not the slot's).
-    static void zone_dli() {
+    static void zone_boundary_hook() {
         SpriteManager* m = s_active_;
-        const u8 z = static_cast<u8>(++s_dli_zone_);
+        const u8 z = static_cast<u8>(++s_hook_zone_);
         const ZoneInfo& zi = m->zones_[z];
         for (u8 p = 0; p < kPlayers; ++p) {
-            Platform::hal::write_hposp(p, zi.hpos[p]);
-            Platform::hal::write_colpm(p, zi.color[p]);
+            Platform::hal::set_sprite_x(p, zi.hpos[p]);
+            Platform::hal::set_sprite_color(p, zi.color[p]);
         }
     }
 
@@ -372,11 +374,11 @@ private:
     // Sorted active-sprite indices, rebuilt each update_zones().
     u8 order_[MaxSprites] = {};
 
-    PMRes res_ = PMRes::SingleLine;
+    SpriteVerticalResolution res_ = SpriteVerticalResolution::SingleLine;
 
-    // Per-frame DLI walker state (one set per template instantiation).
+    // Per-frame raster-hook walker state (one set per template instantiation).
     static SpriteManager* s_active_;
-    static u8             s_dli_zone_;
+    static u8             s_hook_zone_;
 };
 
 template <typename Platform, u8 MaxSprites, u8 MaxZones>
@@ -384,7 +386,7 @@ SpriteManager<Platform, MaxSprites, MaxZones>*
     SpriteManager<Platform, MaxSprites, MaxZones>::s_active_ = nullptr;
 
 template <typename Platform, u8 MaxSprites, u8 MaxZones>
-u8 SpriteManager<Platform, MaxSprites, MaxZones>::s_dli_zone_ = 0;
+u8 SpriteManager<Platform, MaxSprites, MaxZones>::s_hook_zone_ = 0;
 
 } // namespace engine
 

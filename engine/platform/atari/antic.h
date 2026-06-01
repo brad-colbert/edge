@@ -5,14 +5,12 @@
 // per-mode geometry the display subsystem is built on.
 //
 // This header is the single source of truth for ANTIC mode geometry. The
-// portable display layer (engine/display.h) parameterises its region and view
-// templates on `antic::Mode` and derives bytes-per-line / bits-per-pixel from
-// the constexpr helpers here. That is a deliberate coupling: ANTIC modes are the
-// engine's display vocabulary today (the documented API spells
-// `engine::TextRegion<antic::Mode::MODE_2, ...>`, and game code already names
-// `antic::` — see API_DESIGN.md). When a second platform family is added, `Mode`
-// should be lifted into a portable enum with per-platform geometry traits; until
-// then keeping the geometry beside the hardware definitions is the clearest home.
+// portable display layer (engine/display.h) is parameterised on a backend mode
+// token and reaches all per-mode geometry through engine::display::traits<ModeT>
+// (engine/display_traits.h); the Atari specialisation in
+// platform/atari/display_traits.h forwards to the constexpr helpers here. So the
+// generic display layer never includes this header — the backend binds to it via
+// the trait specialisation, and a second platform family supplies its own.
 //
 // Depends only on hardware documentation (Dependency Rule 7) and types.h.
 

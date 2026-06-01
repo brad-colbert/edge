@@ -1,19 +1,25 @@
-// test_screen.cpp — unit tests for engine/display.h and engine/screen.h.
+// test_screen.cpp — generic unit tests for engine/display.h and engine/screen.h.
 //
 // Built for the llvm-mos `mos-sim` platform and run under `mos-sim`; main()'s
 // return value becomes the process exit code (0 = pass) for CTest.
 //
-// Everything here is platform-independent: the DisplayLayout / ScreenSet
-// compile-time geometry, the typed-view pixel/char packing, and the set_screen
-// LMS/JVB patching (driven through a MOCK HAL so no real ANTIC is touched). The
-// live ANTIC programming in the Atari HAL is verified separately on Fujisan.
+// These assertions are backend-neutral: the DisplayLayout / ScreenSet compile-time
+// geometry, the typed-view pixel/char packing, and the set_screen view-rebind +
+// callback behaviour (driven through a MOCK HAL so no real display is touched). The
+// backend display-program byte encoding (opcodes, 4K-crossing reloads, DMA bits) is
+// asserted separately in tests/backends/atari/test_atari_display.cpp.
+//
+// The Atari backend is the only one that exists today, so its mode tokens
+// (atari::Mode) and display-program builder are named here as the concrete backend
+// — but every assertion below is about the engine's portable behaviour, not any
+// ANTIC byte.
 
 #include <stdint.h>
 #include <stdio.h>
 
 #include <engine/display.h>
 #include <engine/screen.h>
-#include <engine/platform/atari/registers.h>   // atari::dmactl bit constants
+#include <engine/platform/atari/platform.h>   // backend mode trait + display-program builder
 
 using engine::u8;
 using engine::u16;
@@ -24,30 +30,28 @@ using engine::BitmapRegion;
 using engine::TextRegionView;
 using engine::BitmapRegionView;
 using engine::ScreenSet;
-using engine::DisplayListTemplate;
 
 namespace M = atari;
 
 // ── Mock platform ─────────────────────────────────────────────────────
 //
-// Records the installed display-list address so the set_screen patch can be
-// checked without a real ANTIC.
+// Records the installed display-program address and that DMA was cycled, so
+// set_screen's portable steps can be checked without a real display backend.
 struct MockHal {
-    static const u8* last_dl;
-    static u8        sdmctl;      // SDMCTL shadow, RMW'd as the real HAL does
+    static const u8* last_program;
+    static bool      dma_enabled;
 
-    static void antic_dma_disable() { sdmctl &= M::dmactl::PM_DMA_MASK; }
-    static void antic_dma_enable(u8 mode_bits = M::dmactl::PLAYFIELD_NORMAL) {
-        sdmctl = static_cast<u8>((sdmctl & M::dmactl::PM_DMA_MASK) |
-                                 M::dmactl::DL_ENABLE | mode_bits);
-    }
-    static void set_display_list(const u8* dl) { last_dl = dl; }
+    static void display_dma_disable() { dma_enabled = false; }
+    static void display_dma_enable()  { dma_enabled = true; }
+    static void set_display_program(const u8* p) { last_program = p; }
 };
-const u8* MockHal::last_dl = nullptr;
-u8        MockHal::sdmctl  = 0;
+const u8* MockHal::last_program = nullptr;
+bool      MockHal::dma_enabled  = false;
 
 struct MockPlatform {
     using hal = MockHal;
+    template <typename Layout>
+    using display_program = atari::DisplayProgram<Layout>;
 };
 
 // ── Test screens / config ─────────────────────────────────────────────
@@ -85,13 +89,8 @@ static_assert(MixedLayout::offset(2) == 7240, "region 2 after header + bitmap");
 
 // 3. ScreenSet shared buffer is sized to the largest screen.
 using Screens = GameConfig::screens;
-static_assert(Screens::screen_count == 2,        "two screens");
-static_assert(Screens::max_screen_ram == 7280,   "max(960, 7280) == 7280");
-
-// Mode geometry sanity (the basis for the above).
-static_assert(M::bytes_per_line(M::Mode::MODE_2) == 40,   "Mode 2 = 40 cols");
-static_assert(M::bytes_per_line(M::Mode::BITMAP_E) == 40, "Mode E = 40 bytes/line");
-static_assert(M::bits_per_pixel(M::Mode::BITMAP_E) == 2,  "Mode E is 2bpp");
+static_assert(Screens::screen_count == 2,      "two screens");
+static_assert(Screens::max_screen_ram == 7280, "max(960, 7280) == 7280");
 
 // ── Runtime harness ────────────────────────────────────────────────────
 
@@ -109,10 +108,6 @@ static u16 addr_of(const void* p) {
     return static_cast<u16>(reinterpret_cast<uintptr_t>(p));
 }
 
-static u16 read16(const u8* b, u16 i) {
-    return static_cast<u16>(b[i]) | (static_cast<u16>(b[i + 1]) << 8);
-}
-
 // ── TextRegionView::put_char writes the right offset ───────────────────
 
 static void test_text_view_put_char() {
@@ -128,9 +123,9 @@ static void test_text_view_put_char() {
     view.put_char(0, 0, 0x21);
     CHECK(buf[0] == 0x21);
 
-    // print converts ASCII to ANTIC internal codes ('A'=0x41 -> 0x21).
+    // print converts ASCII to screen codes through the backend trait ('A' -> 0x21).
     view.print(0, 1, "A");
-    CHECK(buf[40] == 0x21);
+    CHECK(buf[40] == engine::display::traits<M::Mode>::to_screen_code('A'));
 }
 
 // ── BitmapRegionView::plot packs 2bpp pixels correctly ─────────────────
@@ -157,45 +152,7 @@ static void test_bitmap_view_plot() {
     CHECK(buf[1] == 0x80);
 }
 
-// ── DisplayListTemplate inserts an LMS at a 4K page crossing ───────────
-//
-// Mode E, 192 lines x 40 = 7680 bytes. Based at $4028 the data spans
-// $4028..$5F27, crossing exactly one 4K boundary ($5000). The first mode line
-// to enter page $5000 starts at $5018 (line 102), so the builder emits a second
-// LMS reloading $5018 in addition to the region's own LMS at $4028.
-using CrossLayout = engine::DisplayLayout<BitmapRegion<M::Mode::BITMAP_E, 192>>;
-static DisplayListTemplate<CrossLayout> g_cross_dl;   // 204 bytes -> static, not stack
-
-static void test_4k_crossing() {
-    g_cross_dl.build(0x4028, 0x4028);
-
-    // Exactly two LMS: region start + one boundary crossing.
-    CHECK(g_cross_dl.lms_count == 2);
-
-    // Region's first LMS reloads the base $4028 (opcode = Mode E | LMS = $4E).
-    const u16 p0 = g_cross_dl.region_lms_pos[0];
-    CHECK(g_cross_dl.bytes[p0 - 1] == 0x4E);
-    CHECK(read16(g_cross_dl.bytes, p0) == 0x4028);
-
-    // The crossing LMS reloads $5018 (first line in page $5000).
-    const u16 p1 = g_cross_dl.lms_pos[1];
-    CHECK(g_cross_dl.bytes[p1 - 1] == 0x4E);
-    CHECK(read16(g_cross_dl.bytes, p1) == 0x5018);
-}
-
-// ── No crossing when a region fits within a 4K page ────────────────────
-
-static DisplayListTemplate<TextLayout> g_nocross_dl;
-
-static void test_no_crossing() {
-    // 40x24 text = 960 bytes, page-aligned base -> stays within one 4K page.
-    g_nocross_dl.build(0x4000, 0x4000);
-    CHECK(g_nocross_dl.lms_count == 1);                 // one LMS, the region's own
-    CHECK(g_nocross_dl.lms_count == TextLayout::region_count);
-    CHECK(read16(g_nocross_dl.bytes, g_nocross_dl.region_lms_pos[0]) == 0x4000);
-}
-
-// ── ScreenManager::set_screen builds the list and rebinds views ────────
+// ── ScreenManager::set_screen builds the program and rebinds views ─────
 
 static engine::ScreenManager<MockPlatform, GameConfig> g_sm;
 
@@ -204,28 +161,18 @@ static void test_set_screen() {
     g_sm.set_screen<ScreenMixed>([&]() { callback_ran = true; });
     CHECK(callback_ran);
 
-    const u8* dl   = g_sm.active_dl();
-    const u16 size = g_sm.active_dl_size();
-    const u16 buf  = addr_of(g_sm.buffer());
+    const u8* program = g_sm.active_dl();
+    const u16 buf     = addr_of(g_sm.buffer());
 
-    // HAL was driven: DMA re-enabled, display list installed at the built list.
-    // No P/M here, so SDMCTL is just DL-enable | normal playfield (0x22).
-    CHECK(MockHal::last_dl == dl);
-    CHECK(MockHal::sdmctl == (M::dmactl::DL_ENABLE | M::dmactl::PLAYFIELD_NORMAL));
+    // The portable steps ran: DMA re-enabled, a display program installed, and the
+    // active program is what the HAL received.
+    CHECK(MockHal::dma_enabled);
+    CHECK(MockHal::last_program == program);
+    CHECK(program != nullptr);
+    CHECK(g_sm.active_dl_size() > 0);
 
-    // Region 0's first LMS sits at a fixed position (after 3 blank lines) and
-    // reloads buffer+0; region 1's first LMS follows it and reloads buffer+40.
-    // (These are deterministic regardless of any later 4K crossings.)
-    CHECK(dl[3] == (0x02 | 0x40));                      // Mode 2 | LMS
-    CHECK(read16(dl, 4) == buf);
-    CHECK(dl[6] == (0x0E | 0x40));                      // Mode E | LMS
-    CHECK(read16(dl, 7) == static_cast<u16>(buf + 40));
-
-    // The list ends in JVB looping back on its own address.
-    CHECK(dl[size - 3] == 0x41);
-    CHECK(read16(dl, size - 2) == addr_of(dl));
-
-    // Typed views bind to their buffer slices (text vs bitmap is compile-time).
+    // Typed views bind to their buffer slices (text vs bitmap is compile-time):
+    // region 0 at buffer+0, region 1 at buffer+40 (after the 40-byte header).
     auto& header = g_sm.region<ScreenMixed, 0>();
     auto& field  = g_sm.region<ScreenMixed, 1>();
     CHECK(addr_of(header.ptr) == buf);
@@ -239,8 +186,6 @@ static void test_set_screen() {
 int main() {
     test_text_view_put_char();
     test_bitmap_view_plot();
-    test_4k_crossing();
-    test_no_crossing();
     test_set_screen();
 
     if (g_failures == 0) {

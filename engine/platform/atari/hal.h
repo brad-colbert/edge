@@ -13,6 +13,7 @@
 // the portable engine/interrupt.h reaches through Platform::hal. The rest
 // (display build, DMA setup, per-axis specialisation) comes in later steps.
 
+#include "../../audio_defs.h"
 #include "antic.h"
 #include "registers.h"
 #include "os.h"
@@ -79,23 +80,23 @@ struct Hal {
     static void write_colpf2(uint8_t v) { *reg::COLPF2 = v; }
     static void write_colpf3(uint8_t v) { *reg::COLPF3 = v; }
     static void write_colbk (uint8_t v) { *reg::COLBK  = v; }
-    static void write_chbase(uint8_t v) {
+    static void set_charset_base(uint8_t v) {
         *os::CHBAS  = v;
         *reg::CHBASE = v;
     }
-    static void write_hscrol(uint8_t v) { *reg::HSCROL = v; }
-    static void write_vscrol(uint8_t v) { *reg::VSCROL = v; }
+    static void set_fine_scroll_x(uint8_t v) { *reg::HSCROL = v; }
+    static void set_fine_scroll_y(uint8_t v) { *reg::VSCROL = v; }
 
     // ── DLI dispatcher addresses ──
     //
     // Addresses the InterruptManager writes into the next-pointer table: the
     // dispatcher entry for C++ handlers and the no-op terminal for the last
     // slot. Defined in dli_dispatch.h.
-    static uint16_t dli_dispatch_addr() {
+    static uint16_t raster_dispatch_addr() {
         return static_cast<uint16_t>(
             reinterpret_cast<uintptr_t>(&edge_dli_dispatch));
     }
-    static uint16_t dli_terminal_addr() {
+    static uint16_t raster_terminal_addr() {
         return static_cast<uint16_t>(
             reinterpret_cast<uintptr_t>(&edge_dli_terminal));
     }
@@ -103,7 +104,7 @@ struct Hal {
     // Patch the C++ DLI dispatcher's operands with the InterruptManager's table
     // and current_ addresses. Called once from engine::Core::init via
     // InterruptManager::arm_dispatch (the single manager instance never moves).
-    static void install_dli_dispatch(uint16_t cur,
+    static void install_raster_dispatch(uint16_t cur,
                                      uint16_t handler_lo, uint16_t handler_hi,
                                      uint16_t next_lo, uint16_t next_hi) {
         install_dispatch(cur, handler_lo, handler_hi, next_lo, next_hi);
@@ -124,12 +125,12 @@ struct Hal {
     // bits, and pm_dma_enable (below) ORs in the P/M bits. antic_dma_disable
     // clears just DL+playfield (keeping P/M) so P/M DMA survives the
     // disable→set_display_list→enable swap a screen change performs.
-    static void antic_dma_disable() { *os::SDMCTL &= dmactl::PM_DMA_MASK; }
-    static void antic_dma_enable(uint8_t mode_bits = dmactl::PLAYFIELD_NORMAL) {
+    static void display_dma_disable() { *os::SDMCTL &= dmactl::PM_DMA_MASK; }
+    static void display_dma_enable(uint8_t mode_bits = dmactl::PLAYFIELD_NORMAL) {
         *os::SDMCTL = static_cast<uint8_t>((*os::SDMCTL & dmactl::PM_DMA_MASK) |
                                            dmactl::DL_ENABLE | mode_bits);
     }
-    static void set_display_list(const uint8_t* dl) {
+    static void set_display_program(const uint8_t* dl) {
         const uint16_t a = static_cast<uint16_t>(reinterpret_cast<uintptr_t>(dl));
         *os::SDLSTL = static_cast<uint8_t>(a & 0xFF);
         *os::SDLSTH = static_cast<uint8_t>(a >> 8);
@@ -146,7 +147,7 @@ struct Hal {
     // count). The walk handles blank-line instructions (low nibble 0, variable
     // count), mode lines with/without an LMS prefix (1 vs 3 bytes), and stops at
     // the jump/JVB terminator (low nibble 1).
-    static void program_dli_lines(uint8_t* dl, uint16_t dl_size,
+    static void program_raster_lines(uint8_t* dl, uint16_t dl_size,
                                   const uint8_t* scanlines, uint8_t count) {
         uint16_t scan = 0;
         uint16_t p    = 0;
@@ -178,7 +179,7 @@ struct Hal {
 
     // Point the OS DLI vector (os::VDSLST, $0200/1) at the chain head the VBI
     // computed; the dispatcher rewrites it mid-frame as it walks the chain.
-    static void write_vdslst(uint16_t a) {
+    static void set_raster_vector(uint16_t a) {
         os::VDSLST[0] = static_cast<uint8_t>(a & 0xFF);
         os::VDSLST[1] = static_cast<uint8_t>(a >> 8);
     }
@@ -186,8 +187,8 @@ struct Hal {
     // Arm/disarm the DLI NMI. NMIEN is write-only (reads return NMIST) so it can't
     // be RMW'd; the engine's VBI NMI is always armed once install_vbi ran, so the
     // correct absolute value is VBI|DLI to enable and VBI alone to disable.
-    static void enable_dli()  { *reg::NMIEN = nmien::VBI | nmien::DLI; }
-    static void disable_dli() { *reg::NMIEN = nmien::VBI; }
+    static void enable_raster()  { *reg::NMIEN = nmien::VBI | nmien::DLI; }
+    static void disable_raster() { *reg::NMIEN = nmien::VBI; }
 
     // ── Player/Missile graphics ──
     //
@@ -195,31 +196,31 @@ struct Hal {
     // are contiguous, so a player/missile index is a direct subscript). The
     // sprite manager (engine/sprites.h) writes zone-0 player positions during
     // the VBI commit and per-zone positions from raw DLIs through these.
-    static void write_hposp(uint8_t player,  uint8_t x) { reg::HPOSP0[player]  = x; }
-    static void write_hposm(uint8_t missile, uint8_t x) { reg::HPOSM0[missile] = x; }
+    static void set_sprite_x(uint8_t player,  uint8_t x) { reg::HPOSP0[player]  = x; }
+    static void set_projectile_x(uint8_t missile, uint8_t x) { reg::HPOSM0[missile] = x; }
 
     // Player colour straight to the GTIA hardware register (COLPM0-3 contiguous).
     // Unlike set_color_pm (which writes the os::PCOLR0 shadow for OS-managed
     // colours), the sprite multiplexer drives COLPM directly: zone-0 colours from
     // the VBI commit, later zones from the boundary DLI, so a sprite keeps its
     // colour on whatever player slot it lands in.
-    static void write_colpm(uint8_t player, uint8_t color) { reg::COLPM0[player] = color; }
+    static void set_sprite_color(uint8_t player, uint8_t color) { reg::COLPM0[player] = color; }
 
     // Player object width (SIZEP0-3 are contiguous, like HPOSP0). `size` is one
     // of atari::sizep:: (NORMAL/DOUBLE/QUAD).
     static void set_player_size(uint8_t player, uint8_t size) { reg::SIZEP0[player] = size; }
 
-    // P/M memory layout for the sprite-commit phase. `res` is the resolution as
-    // a plain byte (0 = single-line, 1 = double-line), matching the underlying
-    // value of engine::PMRes so hal.h needs no engine include. Returns the byte
-    // offset of player `player`'s strip from the P/M base; the caller adds the
-    // (resolution-scaled) scanline within the strip.
-    static uint16_t pm_player_offset(uint8_t res, uint8_t player) {
+    // Sprite memory layout for the commit phase. `res` is the vertical resolution
+    // as a plain byte (0 = single-line, 1 = double-line), matching the underlying
+    // value of engine::SpriteVerticalResolution so hal.h needs no engine include.
+    // Returns the byte offset of sprite `player`'s strip from the P/M base; the
+    // caller adds the (resolution-scaled) scanline within the strip.
+    static uint16_t sprite_strip_offset(uint8_t res, uint8_t player) {
         const bool single = (res == 0);
         return static_cast<uint16_t>(atari::pm_player_base(single) +
                                      player * atari::pm_strip_size(single));
     }
-    static uint16_t pm_strip_size(uint8_t res) {
+    static uint16_t sprite_strip_size(uint8_t res) {
         return atari::pm_strip_size(res == 0);
     }
 
@@ -228,15 +229,31 @@ struct Hal {
     // POKEY voice registers interleave AUDFn/AUDCn from $D200 (AUDF1=$D200,
     // AUDC1=$D201, AUDF2=$D202, …), so a channel's frequency register is
     // AUDF1[channel*2] and its control register is AUDC1[channel*2]. The sound
-    // subsystem (engine/sound.h) writes these during the VBI tick.
-    static void write_audf(uint8_t channel, uint8_t freq) { reg::AUDF1[channel * 2] = freq; }
-    static void write_audc(uint8_t channel, uint8_t ctrl) { reg::AUDC1[channel * 2] = ctrl; }
+    // subsystem (engine/sound.h) drives these during the VBI tick through the
+    // backend-neutral set_voice_freq / set_voice_control / silence_voice seam; the
+    // Waveform→AUDC distortion mapping lives here (POKEY AUDC high-nibble bits).
+    static constexpr uint8_t audc_distortion(engine::audio::Waveform w) {
+        switch (w) {
+            case engine::audio::Waveform::Tone:   return 0xA0;  // pure tone
+            case engine::audio::Waveform::Noise:  return 0x80;  // noise
+            case engine::audio::Waveform::Buzz:   return 0xC0;  // buzzy distortion
+            case engine::audio::Waveform::Silent: return 0x10;  // never reaches POKEY
+        }
+        return 0x10;
+    }
+    static void set_voice_freq(uint8_t channel, uint8_t freq) {
+        reg::AUDF1[channel * 2] = freq;
+    }
+    static void set_voice_control(uint8_t channel, engine::audio::Waveform w, uint8_t vol) {
+        reg::AUDC1[channel * 2] = static_cast<uint8_t>(audc_distortion(w) | vol);
+    }
+    static void silence_voice(uint8_t channel) { reg::AUDC1[channel * 2] = 0; }
 
     // ── Input capture ──
     //
-    // The Core VBI service (engine/core.h) calls these once per frame and feeds
+    // The Core frame service (engine/core.h) calls these once per frame and feeds
     // the result to engine::InputState::update(). The returned bytes are already
-    // in the portable `engine::joy::` / `engine::console::` bit layout
+    // in the portable `engine::joy::` / `engine::syskey::` bit layout
     // (engine/input.h) so the engine side stays platform-free: bit 0 up, 1 down,
     // 2 left, 3 right, 4 fire; for port 0 the high bits carry the console keys
     // (0x20 START, 0x40 SELECT, 0x80 OPTION). Hardware direction bits and the
@@ -275,24 +292,24 @@ struct Hal {
 
     // ── Player/Missile DMA setup ──
     //
-    // pm_area_bytes is the single-line P/M window size; engine::Core sizes its
-    // (alignment-constrained) P/M buffer from it without including antic.h.
-    // set_pm_base points ANTIC at that buffer (high byte); pm_dma_enable arms the
-    // GTIA P/M latches. Full DMACTL P/M-DMA bit setup arrives with the live
-    // display path.
-    static constexpr uint16_t pm_area_bytes = 2048;
-    static void set_pm_base(uint8_t page) { *reg::PMBASE = page; }
+    // sprite_area_bytes is the single-line P/M window size; engine::Core sizes its
+    // (alignment-constrained) sprite buffer from it without including antic.h.
+    // set_sprite_base points ANTIC at that buffer (high byte); sprite_dma_enable
+    // arms the GTIA P/M latches. Full DMACTL P/M-DMA bit setup arrives with the
+    // live display path.
+    static constexpr uint16_t sprite_area_bytes = 2048;
+    static void set_sprite_base(uint8_t page) { *reg::PMBASE = page; }
     // Latch the GTIA P/M DMA (GRACTL, a chip register the OS does not shadow) and
     // OR the P/M DMA bits into SDMCTL alongside whatever DL/playfield bits the
     // screen manager already placed there. `single_line` selects single-scanline
-    // P/M resolution (PM_SINGLE_LINE); double-line leaves it clear.
-    static void pm_dma_enable(bool single_line) {
+    // sprite resolution (PM_SINGLE_LINE); double-line leaves it clear.
+    static void sprite_dma_enable(bool single_line) {
         *reg::GRACTL = gractl::PLAYER_LATCH | gractl::MISSILE_LATCH;
         uint8_t bits = dmactl::PLAYER_DMA | dmactl::MISSILE_DMA;
         if (single_line) bits |= dmactl::PM_SINGLE_LINE;
         *os::SDMCTL = static_cast<uint8_t>(*os::SDMCTL | bits);
     }
-    static void pm_dma_disable() {
+    static void sprite_dma_disable() {
         *reg::GRACTL = 0x00;
         *os::SDMCTL &= static_cast<uint8_t>(~dmactl::PM_DMA_MASK);
     }
@@ -308,7 +325,7 @@ struct Hal {
 
     // Zero the attract-mode timer each frame (from the VBI service) to stop the
     // OS dimming/cycling colours after a few minutes of no input.
-    static void suppress_attract() { *os::ATRACT = 0; }
+    static void suppress_idle_dim() { *os::ATRACT = 0; }
 
     // ── Deferred VBI install ──
     //
@@ -317,7 +334,7 @@ struct Hal {
     // on real hardware, must exit via XITVBV. Like the DLI dispatcher this seam
     // is never executed under `mos-sim` (no NMI) — it exists for compile coverage
     // and the live ANTIC path.
-    static void install_vbi(void (*service)()) {
+    static void install_frame_isr(void (*service)()) {
         // Patch the trampoline's JSR target to the engine VBI service, then
         // point the OS deferred-VBI vector at the trampoline (not the service
         // directly — see edge_vbi_trampoline above).

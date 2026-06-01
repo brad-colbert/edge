@@ -12,25 +12,28 @@
 // calling `plot()` on a text region (or `print()` on a bitmap region) is a
 // compile error (ARCHITECTURE.md "Screen Manager").
 //
-// The mode vocabulary and per-mode geometry come from platform/atari/antic.h;
-// see that header for the note on this coupling. Views and layouts are otherwise
-// platform-free — they only touch screen memory, never hardware registers.
+// The mode vocabulary is a backend mode token (an enum value); all per-mode
+// geometry is reached through engine::display::traits<ModeT> (display_traits.h),
+// so this header includes no platform code. The backend supplies the trait
+// specialisation. Views and layouts are otherwise platform-free — they only
+// touch screen memory, never hardware registers.
 
-#include "platform/atari/antic.h"
+#include "display_traits.h"
 #include "types.h"
 
 namespace engine {
 
 // ── TextRegionView ────────────────────────────────────────────────────
 //
-// Handle over a text region's screen memory. Templated on the ANTIC mode and
-// the row count so the column stride and total length are compile-time
+// Handle over a text region's screen memory. Templated on the backend mode token
+// and the row count so the column stride and total length are compile-time
 // constants (zero runtime geometry cost). `ptr` is set at set_screen time.
-template <atari::Mode Mode, u8 Rows>
+template <auto Mode, u8 Rows>
 struct TextRegionView {
-    static_assert(atari::is_text(Mode), "TextRegionView requires a text mode");
+    using tr = engine::display::traits<decltype(Mode)>;
+    static_assert(tr::is_text(Mode), "TextRegionView requires a text mode");
 
-    static constexpr u8  columns = atari::bytes_per_line(Mode);
+    static constexpr u8  columns = tr::bytes_per_line(Mode);
     static constexpr u8  rows    = Rows;
     static constexpr u16 length  = static_cast<u16>(columns) * Rows;
 
@@ -46,12 +49,12 @@ struct TextRegionView {
         return ptr[static_cast<u16>(row) * columns + col];
     }
 
-    // Print an ASCII string starting at (col, row), converting to ANTIC internal
-    // screen codes. Stops at the NUL terminator; does not wrap rows.
+    // Print an ASCII string starting at (col, row), converting to the backend's
+    // screen-code encoding. Stops at the NUL terminator; does not wrap rows.
     void print(u8 col, u8 row, const char* s) const {
         u16 base = static_cast<u16>(row) * columns + col;
         for (u8 i = 0; s[i] != '\0'; ++i) {
-            ptr[base + i] = atari::ascii_to_internal(s[i]);
+            ptr[base + i] = tr::to_screen_code(s[i]);
         }
     }
 
@@ -62,23 +65,24 @@ struct TextRegionView {
         for (u8 i = 0; i < digits; ++i) {
             u8 d = static_cast<u8>(value % 10);
             value /= 10;
-            ptr[base + (digits - 1 - i)] = atari::ascii_to_internal('0' + d);
+            ptr[base + (digits - 1 - i)] = tr::to_screen_code('0' + d);
         }
     }
 };
 
 // ── BitmapRegionView ──────────────────────────────────────────────────
 //
-// Handle over a bitmap region's screen memory. Templated on the ANTIC mode and
-// the scanline count. Pixel packing is mode-dependent (1bpp / 2bpp). Row
-// addressing uses a precomputed row table when `row_table` is set (the
+// Handle over a bitmap region's screen memory. Templated on the backend mode
+// token and the scanline count. Pixel packing is mode-dependent (1bpp / 2bpp).
+// Row addressing uses a precomputed row table when `row_table` is set (the
 // use_row_table screen flag), otherwise shift-and-add (`y * bytes_per_line`).
-template <atari::Mode Mode, u8 Lines>
+template <auto Mode, u8 Lines>
 struct BitmapRegionView {
-    static_assert(!atari::is_text(Mode), "BitmapRegionView requires a bitmap mode");
+    using tr = engine::display::traits<decltype(Mode)>;
+    static_assert(!tr::is_text(Mode), "BitmapRegionView requires a bitmap mode");
 
-    static constexpr u8  bytes_per_line  = atari::bytes_per_line(Mode);
-    static constexpr u8  bpp             = atari::bits_per_pixel(Mode);
+    static constexpr u8  bytes_per_line  = tr::bytes_per_line(Mode);
+    static constexpr u8  bpp             = tr::bits_per_pixel(Mode);
     static constexpr u8  pixels_per_byte = static_cast<u8>(8 / bpp);
     static constexpr u8  pixel_mask      = static_cast<u8>((1u << bpp) - 1);
     static constexpr u8  width           = bytes_per_line * pixels_per_byte;
@@ -152,24 +156,28 @@ struct BitmapRegionView {
 // bitmap mode-lines), its derived byte geometry, and the view type that draws
 // into it. `ram_bytes = height * bytes_per_line` (DECISIONS.md ADR-026 worked
 // examples).
-template <atari::Mode M, u8 Height>
+template <auto M, u8 Height>
 struct TextRegion {
-    static constexpr atari::Mode mode           = M;
-    static constexpr u8          height         = Height;   // text rows
-    static constexpr bool        is_text        = true;
-    static constexpr u8          bytes_per_line = atari::bytes_per_line(M);
-    static constexpr u16         ram_bytes      = static_cast<u16>(Height) * bytes_per_line;
+    using mode_type = decltype(M);
+    static constexpr mode_type mode           = M;
+    static constexpr u8        height         = Height;   // text rows
+    static constexpr bool      is_text        = true;
+    static constexpr u8        bytes_per_line =
+        engine::display::traits<mode_type>::bytes_per_line(M);
+    static constexpr u16       ram_bytes      = static_cast<u16>(Height) * bytes_per_line;
 
     using view = TextRegionView<M, Height>;
 };
 
-template <atari::Mode M, u8 Height>
+template <auto M, u8 Height>
 struct BitmapRegion {
-    static constexpr atari::Mode mode           = M;
-    static constexpr u8          height         = Height;   // scanlines / mode-lines
-    static constexpr bool        is_text        = false;
-    static constexpr u8          bytes_per_line = atari::bytes_per_line(M);
-    static constexpr u16         ram_bytes      = static_cast<u16>(Height) * bytes_per_line;
+    using mode_type = decltype(M);
+    static constexpr mode_type mode           = M;
+    static constexpr u8        height         = Height;   // scanlines / mode-lines
+    static constexpr bool      is_text        = false;
+    static constexpr u8        bytes_per_line =
+        engine::display::traits<mode_type>::bytes_per_line(M);
+    static constexpr u16       ram_bytes      = static_cast<u16>(Height) * bytes_per_line;
 
     using view = BitmapRegionView<M, Height>;
 };
@@ -210,7 +218,8 @@ struct DisplayLayout {
     static constexpr u16 region_ram[region_count]            = { Regions::ram_bytes... };
     static constexpr u8  region_height[region_count]         = { Regions::height... };
     static constexpr u8  region_mode_byte[region_count]      =
-        { atari::dl_mode_byte(Regions::mode)... };
+        { engine::display::traits<typename Regions::mode_type>::mode_opcode(
+              Regions::mode)... };
     static constexpr u8  region_bytes_per_line[region_count] =
         { Regions::bytes_per_line... };
     static constexpr bool region_is_text[region_count]       = { Regions::is_text... };
