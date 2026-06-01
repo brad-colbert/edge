@@ -20,7 +20,8 @@
 //   static constexpr u8   mode_opcode(ModeT);        // backend display-program byte
 //   static constexpr u8   to_screen_code(char);      // ASCII -> screen tile code
 //   static constexpr u8   fine_scroll_range(ModeT);  // horizontal fine-scroll modulus
-//                                                    //   (only used by scroll-active screens)
+//   static constexpr u8   scroll_fetch_width(ModeT); // bytes fetched per scrolled line
+//                                                    //   (both only used by scroll-active screens)
 //
 // Depends only on types.h.
 

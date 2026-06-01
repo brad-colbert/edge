@@ -48,6 +48,13 @@ using Platform = atari::Platform<
 static constexpr u16 kMapW = 64;
 static constexpr u16 kMapH = 32;
 
+// Horizontal scroll margin: enabling HSCROLL makes ANTIC fetch a wider line
+// (Mode 2: 48 bytes vs 40), so the displayed window sits this many columns into
+// the fetched data and the leftmost columns fall in the left border. Reserving
+// these columns as off-screen margin puts logical column 0 at the visible edge.
+// (= scroll_margin(MODE_2) / 2.)
+static constexpr u16 kMargin = 4;
+
 struct ScrollScreen {
     // Region 0: a fixed 2-row Mode-2 HUD. Region 1: a 22-row Mode-2 window that
     // scrolls over the 64x32 map. ANTIC renders the regions top-to-bottom, so the
@@ -72,19 +79,33 @@ static engine::TileMap<kMapW, kMapH> g_map;
 // ASCII -> ANTIC internal screen code, for direct tile writes.
 static inline u8 g(char c) { return M::ascii_to_internal(c); }
 
-// Fill the map with a coordinate grid (left ruler = row number, every 4th column
-// = column-number marker, checkerboard elsewhere).
+// Fill the map with a coordinate grid, offset right by kMargin so logical column
+// 0 sits at the visible left edge once the HSCROLL margin is accounted for:
+//   physical cols 0..kMargin-1 : '#' left margin (lives in the border)
+//   logical (c-kMargin), rows 0-1 : 2-digit COLUMN ruler (tens / ones)
+//   logical col 0-1 (cols kMargin, kMargin+1) : 2-digit ROW ruler
+//   logical (0,0)              : a '*' origin marker
+//   elsewhere                 : '.' texture
+// At scroll (0,0) the field's top-left cell should now be '*', the top two rows
+// read 00 01 02 ... across, and the left two columns 00 01 02 ... down.
 static void fill_map() {
     for (u16 r = 0; r < kMapH; ++r) {
         for (u16 c = 0; c < kMapW; ++c) {
             u8 t;
-            if (c == 0)            t = g(static_cast<char>('0' + (r / 10)));  // row tens
-            else if (c == 1)       t = g(static_cast<char>('0' + (r % 10)));  // row ones
-            else if ((c & 3) == 0) t = g(static_cast<char>('0' + (c % 10)));  // column marker
-            else                   t = g(((r + c) & 1) ? '.' : ':');          // texture
+            if (c < kMargin) {
+                t = g('#');                                     // left margin / border
+            } else {
+                const u16 lc = static_cast<u16>(c - kMargin);   // logical column
+                if (r == 0)       t = g(static_cast<char>('0' + (lc / 10) % 10));  // col tens
+                else if (r == 1)  t = g(static_cast<char>('0' + (lc % 10)));       // col ones
+                else if (lc == 0) t = g(static_cast<char>('0' + (r / 10) % 10));   // row tens
+                else if (lc == 1) t = g(static_cast<char>('0' + (r % 10)));        // row ones
+                else              t = g('.');                                      // texture
+            }
             g_map.set_tile(c, r, t);
         }
     }
+    g_map.set_tile(kMargin, 0, g('*'));   // logical origin (0,0)
 }
 
 // ── Game state ────────────────────────────────────────────────────────────

@@ -198,7 +198,7 @@ public:
         constexpr ModeT mode = Region::mode;
         using tr = engine::display::traits<ModeT>;
         scroll.activate(Layout::region_map_width[idx], Layout::region_map_height[idx],
-                        Layout::region_height[idx], tr::bytes_per_line(mode),
+                        Layout::region_height[idx], tr::scroll_fetch_width(mode),
                         tr::scanlines_per_line(mode), tr::fine_scroll_range(mode));
     }
 

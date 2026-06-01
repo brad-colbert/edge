@@ -61,15 +61,19 @@ public:
     //   map_width / map_height — full map size in the region's native units
     //                            (text: columns/rows). Bounds coarse scrolling.
     //   visible_lines          — on-screen mode lines of the scroll region.
-    //   bytes_per_line         — display width of one mode line, in bytes.
+    //   fetch_width            — bytes ANTIC fetches per scrolled line, in the
+    //                            region's native units. With horizontal scrolling
+    //                            ANTIC reads WIDER than the display (Mode 2: 48 vs
+    //                            40), so the right-edge clamp uses this, not the
+    //                            display width, to stay inside the map.
     //   scanlines_per_line     — mode-line height; the vertical fine modulus.
     //   fine_scroll_range      — fine units per cell; the horizontal fine modulus.
     void activate(u16 map_width, u16 map_height, u8 visible_lines,
-                  u8 bytes_per_line, u8 scanlines_per_line, u8 fine_scroll_range) {
+                  u8 fetch_width, u8 scanlines_per_line, u8 fine_scroll_range) {
         map_width_     = map_width;
         map_height_    = map_height;
         visible_lines_ = visible_lines;
-        bpl_           = bytes_per_line;
+        fetch_         = fetch_width;
         splpl_         = scanlines_per_line;
         fsr_           = fine_scroll_range;
         active_        = true;
@@ -78,7 +82,7 @@ public:
     void deactivate() {
         active_ = false;
         map_width_ = map_height_ = 0;
-        visible_lines_ = bpl_ = splpl_ = fsr_ = 0;
+        visible_lines_ = fetch_ = splpl_ = fsr_ = 0;
     }
 
     // ── Fine scroll → hardware ────────────────────────────────────────
@@ -107,7 +111,9 @@ public:
     u16 coarse_col() const {
         u16 c = static_cast<u16>(scroll_x_ / fsr_);
         if (scroll_x_ % fsr_) ++c;
-        const u16 max_c = map_width_ > bpl_ ? static_cast<u16>(map_width_ - bpl_) : 0;
+        // Clamp to the FETCH width: ANTIC reads `fetch_` bytes per scrolled line,
+        // so the last in-map coarse column is map_width - fetch_, not - display.
+        const u16 max_c = map_width_ > fetch_ ? static_cast<u16>(map_width_ - fetch_) : 0;
         return c > max_c ? max_c : c;
     }
     u16 coarse_row() const {
@@ -138,7 +144,7 @@ private:
     u16  map_width_     = 0;   // full map row width  (native units) — coarse-col bound
     u16  map_height_    = 0;   // full map height     (native units) — coarse-row bound
     u8   visible_lines_ = 0;   // on-screen scroll mode lines
-    u8   bpl_           = 0;   // bytes_per_line     — scroll-region display width
+    u8   fetch_         = 0;   // fetch_width        — bytes ANTIC reads per scrolled line
     u8   splpl_         = 0;   // scanlines_per_line — vertical fine modulus / row divisor
     u8   fsr_           = 0;   // fine_scroll_range  — horizontal fine modulus / col divisor
 };

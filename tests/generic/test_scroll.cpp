@@ -59,17 +59,17 @@ static unsigned g_failures = 0;
 
 // ── Shared test geometry (a Mode-2 scroll region over a 64x32 map) ──────
 //
-//   bytes_per_line = 40, scanlines_per_line = 8, fine_scroll_range = 4.
-//   map 64 wide x 32 tall, 22 visible lines.
+//   fetch_width = 48 (40 display + 8 HSCROLL margin), scanlines_per_line = 8,
+//   fine_scroll_range = 4. Map 64 wide x 32 tall, 22 visible lines.
 static constexpr u16 MAP_W   = 64;
 static constexpr u16 MAP_H   = 32;
 static constexpr u8  VIS     = 22;
-static constexpr u8  BPL     = 40;
+static constexpr u8  FETCH   = 48;
 static constexpr u8  SPLPL   = 8;
 static constexpr u8  FSR     = 4;
 
 static void activate(ScrollManager<MockPlatform>& sm) {
-    sm.activate(MAP_W, MAP_H, VIS, BPL, SPLPL, FSR);
+    sm.activate(MAP_W, MAP_H, VIS, FETCH, SPLPL, FSR);
 }
 
 // ── Zero scroll: registers cleared, coarse 0 ───────────────────────────
@@ -126,9 +126,9 @@ static void test_edge_clamp() {
     ScrollManager<MockPlatform> sm;
     activate(sm);
 
-    // Horizontal: max coarse col = map_width - bytes_per_line = 64 - 40 = 24.
+    // Horizontal: max coarse col = map_width - fetch_width = 64 - 48 = 16.
     sm.set(4 * 100, 0);                 // would be coarse_col 100
-    CHECK(sm.coarse_col() == 24);
+    CHECK(sm.coarse_col() == 16);
 
     // Vertical: max coarse row = map_height - visible_lines = 32 - 22 = 10.
     sm.set(0, 8 * 100);                 // would be coarse_row 100
