@@ -49,6 +49,7 @@ EDGE_ATARI_OS(VVBLKD, 0x0224);   // deferred vertical-blank vector
 
 // ── System ───────────────────────────────────────────────────────────
 EDGE_ATARI_OS(ATRACT, 0x004D);   // attract-mode timer (write 0/frame to suppress)
+EDGE_ATARI_OS(CHBAS,  0x02F4);   // shadow of CHBASE (character set base page)
 
 #undef EDGE_ATARI_OS
 

@@ -24,9 +24,15 @@ cmake --build build-atari --target hw_test
 Or manually:
 
 ```sh
+cmake -DINPUT=$PWD/demo/TEST.FNT \
+  -DOUTPUT=$PWD/demo/user_charset.h \
+    -P cmake/generate_charset_header.cmake &&
 mos-atari8-dos-clang++ -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra \
     -I. demo/hw_test.cpp -o hw_test.xex
 ```
+
+To try a different 1K font file, replace `demo/TEST.FNT` in the command above,
+or pass `-DEDGE_DEMO_CHARSET_BIN=/path/to/your.fnt` to the CMake build.
 
 ## What to look for
 

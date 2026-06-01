@@ -28,6 +28,8 @@
 
 #include <stdint.h>
 
+#include "user_charset.h"
+
 #include <engine/platform/atari/platform.h>
 #include <engine/core.h>
 
@@ -58,6 +60,8 @@ struct GameConfig {
 using Game = engine::Core<Platform, GameConfig>;
 
 // ── Assets (constexpr, ROM-resident) ─────────────────────────────────────
+
+constexpr auto user_charset = engine::make_charset(demo::assets::kUserCharsetBytes);
 
 constexpr auto arrow = engine::make_sprite<8, 8>({
     0b00011000,
@@ -163,10 +167,10 @@ static void frame_step(const engine::Input& in) {
 
 int main() {
     // Builds the display list, programs the OS shadows (display list, SDMCTL with
-    // P/M DMA), arms the DLI dispatcher, sets up P/M, and installs the deferred-VBI
-    // service. No charset argument -> CHBASE keeps its power-on value pointing at
-    // the Atari ROM character set at $E000.
-    Game::init();
+    // P/M DMA), arms the DLI dispatcher, sets up P/M, loads the demo's custom
+    // 1K charset into engine-managed RAM, points CHBASE at it, and installs the
+    // deferred-VBI service.
+    Game::init(user_charset);
 
     // Single-width player objects (the arrow and the diamond).
     Platform::hal::set_player_size(0, M::sizep::NORMAL);

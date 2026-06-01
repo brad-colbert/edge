@@ -18,11 +18,32 @@ option(EDGE_BUILD_DEMO
        "Build the Atari .xex demo via add_executable (atari8-dos toolchain only)"
        OFF)
 
+set(EDGE_DEMO_CHARSET_BIN
+    ${CMAKE_SOURCE_DIR}/demo/TEST.FNT
+    CACHE FILEPATH
+    "Binary 1K charset used by the hw_test demo")
+set(USER_CHARSET_HEADER ${CMAKE_SOURCE_DIR}/demo/user_charset.h)
+set(GENERATE_CHARSET_HEADER_SCRIPT
+    ${CMAKE_SOURCE_DIR}/cmake/generate_charset_header.cmake)
+
+add_custom_command(
+    OUTPUT ${USER_CHARSET_HEADER}
+    COMMAND ${CMAKE_COMMAND}
+            -DINPUT=${EDGE_DEMO_CHARSET_BIN}
+            -DOUTPUT=${USER_CHARSET_HEADER}
+            -DSYMBOL=kUserCharsetBytes
+            -DNAMESPACE=demo::assets
+            -P ${GENERATE_CHARSET_HEADER_SCRIPT}
+    DEPENDS ${EDGE_DEMO_CHARSET_BIN}
+            ${GENERATE_CHARSET_HEADER_SCRIPT}
+    COMMENT "Generating demo/user_charset.h from ${EDGE_DEMO_CHARSET_BIN}"
+    VERBATIM)
+
 if(EDGE_BUILD_DEMO)
     # Dedicated Atari build (configured with cmake/atari-toolchain.cmake): the
     # compiler already targets atari8-dos, so a normal executable links to a
     # loadable .xex. The test suite is not built in this configure.
-    add_executable(hw_test demo/hw_test.cpp)
+    add_executable(hw_test demo/hw_test.cpp ${USER_CHARSET_HEADER})
     target_compile_options(hw_test PRIVATE
         -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra)
     target_include_directories(hw_test PRIVATE ${CMAKE_SOURCE_DIR})
@@ -57,6 +78,7 @@ if(MOS_ATARI8_CXX)
                 ${CMAKE_SOURCE_DIR}/demo/hw_test.cpp
                 -o ${HW_TEST_XEX}
         DEPENDS ${CMAKE_SOURCE_DIR}/demo/hw_test.cpp
+                ${USER_CHARSET_HEADER}
         COMMENT "Building Atari XEX demo (hw_test.xex)"
         VERBATIM)
     add_custom_target(hw_test DEPENDS ${HW_TEST_XEX})

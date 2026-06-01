@@ -79,7 +79,10 @@ struct Hal {
     static void write_colpf2(uint8_t v) { *reg::COLPF2 = v; }
     static void write_colpf3(uint8_t v) { *reg::COLPF3 = v; }
     static void write_colbk (uint8_t v) { *reg::COLBK  = v; }
-    static void write_chbase(uint8_t v) { *reg::CHBASE = v; }
+    static void write_chbase(uint8_t v) {
+        *os::CHBAS  = v;
+        *reg::CHBASE = v;
+    }
     static void write_hscrol(uint8_t v) { *reg::HSCROL = v; }
     static void write_vscrol(uint8_t v) { *reg::VSCROL = v; }
 
