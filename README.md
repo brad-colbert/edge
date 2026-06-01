@@ -1,6 +1,6 @@
 <img width="1448" height="1086" alt="image" src="https://github.com/user-attachments/assets/76377375-b374-4d6e-8524-b17f22ca1953" />
 
-# EDGE
+# EDGE (Eight-bit Damned! Game Engine)
 EDGE is a C++20 game engine for constrained 6502-class systems, built around a small, deterministic, compile-time configured API instead of a heavy runtime.
 The project is Atari-first today, but its architecture is intended to support additional 6502-family platforms over time. Game code is written against portable engine subsystems while hardware details live behind a platform HAL and compile-time capability profiles.
 
