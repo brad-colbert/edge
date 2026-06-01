@@ -38,7 +38,7 @@ using Platform = atari::Platform<
 >;
 
 struct GameConfig {
-    static constexpr auto gfx_mode       = antic::Mode::MODE_4;
+    static constexpr auto gfx_mode       = atari::Mode::MODE_4;
     static constexpr uint8_t rows        = 24;
     static constexpr uint8_t columns     = 40;
     static constexpr uint8_t max_sprites = 9;
@@ -68,13 +68,13 @@ constexpr auto enemy_shape = Game::make_sprite<8, 8>({
 });
 
 constexpr auto sfx_shoot = Game::make_sound({
-    {pokey::PURE, 120, 8, 4},
-    {pokey::PURE, 200, 4, 2},
+    {engine::audio::Waveform::Tone, 120, 8, 4},
+    {engine::audio::Waveform::Tone, 200, 4, 2},
 });
 
 constexpr auto sfx_explode = Game::make_sound({
-    {pokey::NOISE, 40, 12, 6},
-    {pokey::NOISE, 80, 6,  4},
+    {engine::audio::Waveform::Noise, 40, 12, 6},
+    {engine::audio::Waveform::Noise, 80, 6,  4},
 });
 
 // ── Game State (static, no heap) ────────────────────
@@ -160,16 +160,16 @@ void update_bullets() {
 }
 
 void check_collisions() {
-    auto collisions = Game::pm_collisions();
+    auto collisions = Game::sprite_collisions();
 
-    if (player.iframe == 0 && collisions.player_to_player(0)) {
+    if (player.iframe == 0 && collisions.sprite_to_sprite(0)) {
         player.lives--;
         player.iframe = 120;
         Game::sound.play(sfx_explode, 1);
     }
 
     for (uint8_t m = 0; m < 4; m++) {
-        if (auto hit = collisions.missile_to_player(m)) {
+        if (auto hit = collisions.projectile_to_sprite(m)) {
             auto* e = Game::multiplex.resolve_player(hit);
             if (e) {
                 enemies.release(e);
@@ -253,7 +253,7 @@ multi-screen ScreenSet. They are mutually exclusive.
 ```cpp
 struct GameConfig {
     // ── Display (single screen) ──
-    static constexpr auto gfx_mode = antic::Mode::MODE_4;
+    static constexpr auto gfx_mode = atari::Mode::MODE_4;
     static constexpr uint8_t rows    = 24;
     static constexpr uint8_t columns = 40;
 
@@ -275,7 +275,7 @@ internally treats it as:
 
 ```cpp
 using screens = engine::ScreenSet<
-    engine::DefaultScreen<antic::Mode::MODE_4, 24, 40>
+    engine::DefaultScreen<atari::Mode::MODE_4, 24, 40>
 >;
 ```
 
@@ -286,7 +286,7 @@ One code path, not two.
 ```cpp
 struct TitleScreen {
     using display = engine::DisplayLayout<
-        engine::BitmapRegion<antic::Mode::BITMAP_E, 192>
+        engine::BitmapRegion<atari::Mode::BITMAP_E, 192>
     >;
     static constexpr bool sprites_active = false;
     static constexpr bool scroll_active  = false;
@@ -295,19 +295,19 @@ struct TitleScreen {
 
 struct GameplayScreen {
     using display = engine::DisplayLayout<
-        engine::TextRegion<antic::Mode::MODE_2, 1>,
-        engine::BitmapRegion<antic::Mode::BITMAP_E, 180>,
-        engine::TextRegion<antic::Mode::MODE_2, 1>
+        engine::TextRegion<atari::Mode::MODE_2, 1>,
+        engine::BitmapRegion<atari::Mode::BITMAP_E, 180>,
+        engine::TextRegion<atari::Mode::MODE_2, 1>
     >;
     static constexpr bool sprites_active  = true;
-    static constexpr auto pm_resolution   = PMRes::SingleLine;
+    static constexpr auto pm_resolution   = SpriteVerticalResolution::SingleLine;
     static constexpr bool scroll_active   = true;
     static constexpr bool use_row_table   = true;
 };
 
 struct HighScoreScreen {
     using display = engine::DisplayLayout<
-        engine::TextRegion<antic::Mode::MODE_2, 24>
+        engine::TextRegion<atari::Mode::MODE_2, 24>
     >;
     static constexpr bool sprites_active = false;
     static constexpr bool scroll_active  = false;
@@ -364,7 +364,7 @@ this line, the following are determined at compile time:
 - P/M graphics area location and size
 - Sound channel allocation
 - ZP allocation map
-- DLI chain capacity
+- raster-hook chain capacity
 - Total RAM usage (queryable via `Game::ram_usage`)
 
 ## Display Configuration
@@ -376,7 +376,7 @@ For games that use one mode for the entire screen:
 ```cpp
 struct GameConfig {
     // Character mode
-    static constexpr auto gfx_mode = antic::Mode::MODE_4;
+    static constexpr auto gfx_mode = atari::Mode::MODE_4;
     static constexpr uint8_t rows    = 24;
     static constexpr uint8_t columns = 40;
 };
@@ -386,7 +386,7 @@ Or bitmap:
 
 ```cpp
 struct GameConfig {
-    static constexpr auto gfx_mode    = antic::Mode::BITMAP_E;
+    static constexpr auto gfx_mode    = atari::Mode::BITMAP_E;
     static constexpr uint8_t scanlines = 192;
 };
 ```
@@ -404,18 +404,17 @@ split-screen effects, etc.):
 ```cpp
 struct GameplayScreen {
     using display = engine::DisplayLayout<
-        engine::TextRegion<antic::Mode::MODE_2, 1>,
-        engine::BitmapRegion<antic::Mode::BITMAP_E, 180>,
-        engine::TextRegion<antic::Mode::MODE_2, 1>
+        engine::TextRegion<atari::Mode::MODE_2, 1>,
+        engine::BitmapRegion<atari::Mode::BITMAP_E, 180>,
+        engine::TextRegion<atari::Mode::MODE_2, 1>
     >;
 };
 ```
 
-Each region specifies its ANTIC mode and its height (in text
-rows for text regions, in scanlines for bitmap regions). The
-engine constructs the display list at compile time, allocates
-screen memory for each region, and inserts appropriate DLI
-boundaries between regions.
+Each region specifies its mode and its height (in text rows for
+text regions, in scanlines for bitmap regions). The engine builds
+the display program at set_screen time, allocates screen memory
+for each region, and inserts the appropriate region boundaries.
 
 Regions are accessed by index:
 
@@ -483,7 +482,7 @@ flags:
 ```cpp
 struct TitleScreen {
     using display = engine::DisplayLayout<
-        engine::BitmapRegion<antic::Mode::BITMAP_E, 192>
+        engine::BitmapRegion<atari::Mode::BITMAP_E, 192>
     >;
     static constexpr bool sprites_active = false;
     static constexpr bool scroll_active  = false;
@@ -509,11 +508,11 @@ Game::set_screen<GameplayScreen>();
 
 This single call:
 
-1. Waits for VBI (safe transition point)
+1. Waits for the frame service (safe transition point)
 2. Installs new display list
 3. Clears screen memory
-4. Reconfigures DLI chain (removes old DLIs, installs new
-   engine DLIs per screen config)
+4. Reconfigures raster-hook chain (removes old hooks, installs new
+   engine hooks per screen config)
 5. Enables/disables sprites and scroll per screen config
 6. Updates CHBASE if character set differs
 
@@ -529,18 +528,18 @@ Game::set_screen<GameplayScreen>([]() {
 });
 ```
 
-### DLI Lifecycle Across Screen Changes
+### Raster Hook Lifecycle Across Screen Changes
 
-Non-persistent user DLIs are cleared on screen change. The
-engine reinstalls its own DLIs (multiplex, scroll) based on
+Non-persistent user raster hooks are cleared on screen change. The
+engine reinstalls its own raster hooks (multiplex, scroll) based on
 the new screen's configuration.
 
 ```cpp
 // Cleared on screen change (default)
-Game::interrupts.add_dli(scanline, handler);
+Game::interrupts.add_raster_hook(scanline, handler);
 
 // Survives screen changes (rare, for global effects)
-Game::interrupts.add_persistent_dli(scanline, handler);
+Game::interrupts.add_persistent_raster_hook(scanline, handler);
 ```
 
 ### Game Flow with Multiple Screens
@@ -788,7 +787,7 @@ ergonomics for marginal benefit at small pool sizes.
 
 ### Snapshot Model
 
-Input is captured once per frame during VBI. The game receives
+Input is captured once per frame during the frame service. The game receives
 an immutable snapshot. No polling, no race conditions.
 
 ```cpp
@@ -879,12 +878,12 @@ Game::sprite(3, enemy_shape, e.x, e.y);
 
 `Game::sprite()` updates the logical sprite's state (position,
 shape) in a buffer. It does NOT write to P/M hardware — that
-happens during VBI to avoid tearing. See DECISIONS.md ADR-009.
+happens during the frame service to avoid tearing. See DECISIONS.md ADR-009.
 
 The engine resolves logical-to-hardware mapping:
 
 - On baseline Atari: Players 0-3 mapped to P/M hardware,
-  additional sprites multiplexed via DLI
+  additional sprites multiplexed via raster hooks
 - On VBXE: all sprites rendered via blitter
 - Software fallback available on platforms without hardware
   sprites
@@ -931,21 +930,21 @@ Game::sprite_hide_all();  // hide all sprites
 Hidden sprites are not rendered, not included in collision
 detection, and not assigned to multiplexer zones.
 
-### P/M Resolution
+### Sprite Vertical Resolution
 
-P/M resolution is configured per-screen (see ADR-023):
+Sprite vertical resolution is configured per-screen (see ADR-023):
 
 ```cpp
 struct GameplayScreen {
     // ...
-    static constexpr auto pm_resolution = PMRes::SingleLine;
+    static constexpr auto pm_resolution = SpriteVerticalResolution::SingleLine;
 };
 ```
 
-`PMRes::SingleLine`: 1-scanline Y precision, 256 bytes per
+`SpriteVerticalResolution::SingleLine`: 1-scanline Y precision, 256 bytes per
 player, 1792 bytes P/M RAM total. Most games use this.
 
-`PMRes::DoubleLine`: 2-scanline Y steps, 128 bytes per
+`SpriteVerticalResolution::DoubleLine`: 2-scanline Y steps, 128 bytes per
 player, 896 bytes P/M RAM total. Lower fidelity, saves 896
 bytes.
 
@@ -962,16 +961,16 @@ logical sprites). The game author does not manage zones.
 
 **How it works:**
 
-Each frame during VBI, the multiplexer:
+Each frame during the frame service, the multiplexer:
 
 1. Sorts active sprites by Y (insertion sort, ~80-120 cycles)
 2. Groups sprites into zones of up to 4, placing zone
    boundaries in the gaps between sprite groups
 3. Assigns each sprite in a zone to a hardware player (0-3)
-4. Registers a raw DLI at each zone boundary that writes
-   HPOSP0-3 for the new zone (~53 cycles per DLI)
+4. Registers a raw raster hook at each zone boundary that writes
+   HPOSP0-3 for the new zone (~53 cycles per hook)
 5. The game's render phase pre-writes all sprite shape data
-   into P/M memory at the correct Y offsets — the DLI only
+   into P/M memory at the correct Y offsets — the hook only
    changes horizontal positions, not shape data
 
 **Querying multiplex state:**
@@ -994,7 +993,7 @@ u8 zone = Game::multiplex.zone_for_sprite(logical_index);
 **Zone limits:**
 
 MaxZones is a template parameter on the SpriteManager
-(default 4). Each zone costs one DLI slot (~53 cycles) and
+(default 4). Each zone costs one raster-hook slot (~53 cycles) and
 9 bytes of zone state. With 4 zones and 4 players per zone,
 the engine supports up to 16 multiplexed sprites. If sprites
 can't fit in the available zones (too many overlapping
@@ -1003,7 +1002,7 @@ vertically), the lowest-priority sprites are dropped.
 ### Collision Detection
 
 GTIA provides hardware collision registers, latched once per
-frame during VBI.
+frame during the frame service.
 
 **Non-multiplexed games (≤ 4 sprites):**
 
@@ -1011,11 +1010,11 @@ Collision is straightforward — each hardware player maps to
 exactly one logical sprite:
 
 ```cpp
-auto col = Game::pm_collisions();
+auto col = Game::sprite_collisions();
 
-col.player_to_player(0)    // did Player 0 hit any player?
-col.missile_to_player(2)   // did Missile 2 hit any player?
-col.player_to_playfield(0) // did Player 0 hit playfield?
+col.sprite_to_sprite(0)    // did Player 0 hit any player?
+col.projectile_to_sprite(2)   // did Missile 2 hit any player?
+col.sprite_to_background(0) // did Player 0 hit playfield?
 ```
 
 **Multiplexed games (> 4 sprites):**
@@ -1026,9 +1025,9 @@ zone 0 and Sprite E in zone 1, a P0PL collision could be
 either. The engine provides a candidates bitmask:
 
 ```cpp
-auto col = Game::pm_collisions();
+auto col = Game::sprite_collisions();
 
-if (col.player_to_player(0)) {
+if (col.sprite_to_sprite(0)) {
     // Which logical sprites were on Player 0?
     u16 candidates = Game::multiplex.sprites_on_player(0);
 
@@ -1049,14 +1048,14 @@ comparisons per candidate, which is cheap.
 
 ### Sprite Commit (Internal)
 
-During VBI, the sprite commit phase writes buffered positions
+During the frame service, the sprite commit phase writes buffered positions
 to P/M hardware:
 
 1. Clear dirty ranges of player memory (tracked-range clear,
    see ADR-022, ~1250 cycles vs ~5000 for full clear)
 2. For each active logical sprite: copy shape data into the
    assigned player's memory at the sprite's Y offset
-3. Write HPOSP0-3 for zone 0 (VBI sets first zone positions)
+3. Write HPOSP0-3 for zone 0 (the frame service sets first zone positions)
 4. Update min/max Y tracking for next frame's clear
 
 ### Memory Cost
@@ -1191,23 +1190,23 @@ Defined at compile time as a sequence of frames:
 ```cpp
 constexpr auto sfx_shoot = Game::make_sound({
     // {waveform, frequency, volume, duration_frames}
-    {pokey::PURE,  120, 8, 4},
-    {pokey::PURE,  200, 4, 2},
-    {pokey::SILENT, 0,  0, 0},  // terminal entry
+    {engine::audio::Waveform::Tone,  120, 8, 4},
+    {engine::audio::Waveform::Tone,  200, 4, 2},
+    {engine::audio::Waveform::Silent, 0,  0, 0},  // terminal entry
 });
 ```
 
 Data lives in ROM. The sound subsystem advances one entry per
-N frames during VBI, writing frequency and volume to POKEY
+N frames during the frame service, writing frequency and volume to POKEY
 registers.
 
 ### Waveform Types
 
 ```cpp
-pokey::PURE        // pure tone
-pokey::NOISE       // noise
-pokey::BUZZ        // buzzy distortion
-pokey::SILENT      // silence (terminal marker)
+engine::audio::Waveform::Tone        // pure tone
+engine::audio::Waveform::Noise       // noise
+engine::audio::Waveform::Buzz        // buzzy distortion
+engine::audio::Waveform::Silent      // silence (terminal marker)
 ```
 
 These map to POKEY AUDC distortion bits. Additional waveform
@@ -1512,11 +1511,11 @@ Game::init(tileset);
 In a mixed display with multiple text regions, all text regions
 share the same character set (ANTIC has a single CHBASE
 register). To use different character sets in different regions,
-install a DLI at the region boundary:
+install a raster hook at the region boundary:
 
 ```cpp
-Game::interrupts.add_dli(status_end_scanline, [](auto& ctx) {
-    ctx.write_chbase(alt_charset_page);
+Game::interrupts.add_raster_hook(status_end_scanline, [](auto& ctx) {
+    ctx.set_charset_base(alt_charset_page);
 });
 ```
 
@@ -1559,7 +1558,7 @@ The engine internally manages:
 
 For games with a scrolling playfield and a fixed status bar,
 use a DisplayLayout with separate regions. The engine generates
-a DLI at the split point automatically.
+a raster hook at the split point automatically.
 
 ### Scroll Suspension
 
@@ -1570,11 +1569,11 @@ Game::scroll.resume();    // engine resumes management
 
 ## Interrupts and Hooks
 
-The interrupt manager uses a two-tier DLI dispatch model.
+The interrupt manager uses a two-tier raster-hook dispatch model.
 Understanding the overhead of each tier helps you choose the
 right approach. See DECISIONS.md ADR-019/020/021 for rationale.
 
-### DLI Handler Tiers
+### Raster Hook Handler Tiers
 
 **Tier 1: C++ handlers (~80 cycle overhead)**
 
@@ -1589,7 +1588,7 @@ work on scanlines with generous cycle budgets.
 // Any data the handler needs goes in static variables.
 static u8 sky_color = 0x94;
 
-Game::interrupts.add_dli(scanline, []() {
+Game::interrupts.add_raster_hook(scanline, []() {
     *atari::reg::COLBK = sky_color;
 });
 ```
@@ -1603,7 +1602,7 @@ context.
 Approximate cycle budget for C++ handlers:
 
 ```
-DLI budget (typical):    ~100 cycles
+raster-hook budget (typical):    ~100 cycles
 Engine overhead:          ~80 cycles
 Available for handler:    ~20 cycles (3-4 register writes)
 ```
@@ -1618,7 +1617,7 @@ Full cycle budget available. Required for timing-critical work.
 
 ```cpp
 extern "C" void my_dli_handler();  // defined in .s file
-Game::interrupts.add_raw_dli(scanline, my_dli_handler);
+Game::interrupts.add_raw_raster_hook(scanline, my_dli_handler);
 ```
 
 The raw handler contract:
@@ -1627,91 +1626,88 @@ The raw handler contract:
 - Do your work
 - Load the next handler address and store it in VDSLST
   ($0200/$0201). The engine provides a helper:
-  `Game::interrupts.next_dli_addr()` returns the address
+  `Game::interrupts.next_raster_addr()` returns the address
   of the next handler in the chain.
 - Restore registers
 - Execute RTI
 
-### DLI Context Object
+### Raster Context Object
 
 For C++ handlers that need typed register writes without
-including platform headers, a DLIContext is available:
+including platform headers, a RasterContext is available:
 
 ```cpp
-Game::interrupts.add_dli(scanline, [](DLIContext& ctx) {
-    ctx.write_colpf0(0x2A);
-    ctx.write_colpf1(0x84);
+Game::interrupts.add_raster_hook(scanline, [](RasterContext& ctx) {
+    ctx.set_playfield_color<0>(0x2A);
+    ctx.set_playfield_color<1>(0x84);
 });
 ```
 
-Each `write_*` method compiles to a single `LDA #imm / STA addr`
-pair. The DLIContext struct has zero storage — it's purely a
+Each write method compiles to a single `LDA #imm / STA addr`
+pair. The RasterContext struct has zero storage — it's purely a
 namespace for these operations:
 
 ```cpp
-ctx.write_colpf0(value)   // COLPF0
-ctx.write_colpf1(value)   // COLPF1
-ctx.write_colpf2(value)   // COLPF2
-ctx.write_colpf3(value)   // COLPF3
-ctx.write_colbk(value)    // COLBK
-ctx.write_chbase(value)   // character set base
-ctx.write_hscrol(value)   // horizontal scroll
-ctx.write_vscrol(value)   // vertical scroll
+ctx.set_playfield_color<N>(value)   // playfield colour N (0..3), a template arg
+ctx.set_background_color(value)     // background colour
+ctx.set_charset_base(value)         // character set base
+ctx.set_fine_scroll_x(value)        // horizontal fine scroll
+ctx.set_fine_scroll_y(value)        // vertical fine scroll
 ```
 
-Note: when using DLIContext, the handler signature takes
-`DLIContext&` as a parameter. The engine provides a static
+Note: when using RasterContext, the handler signature takes
+`RasterContext&` as a parameter. The engine provides a static
 instance; the reference adds no runtime cost.
 
-### DLI Persistence Across Screen Changes
+### Raster Hook Persistence Across Screen Changes
 
 ```cpp
 // Cleared on screen change (default)
-Game::interrupts.add_dli(scanline, handler);
+Game::interrupts.add_raster_hook(scanline, handler);
 
 // Survives screen changes
-Game::interrupts.add_persistent_dli(scanline, handler);
+Game::interrupts.add_persistent_raster_hook(scanline, handler);
 ```
 
-### DLI Priority
+### Raster Hook Priority
 
-When multiple DLIs land on the same scanline, the interrupt
+When multiple raster hooks land on the same scanline, the interrupt
 manager chains them in priority order:
 
 1. Engine multiplex (sprite register reprogramming)
 2. Engine scroll (scroll register updates)
-3. User DLI handlers (in registration order)
+3. User raster hooks (in registration order)
 
-Engine DLIs are raw handlers internally — the engine knows
+Engine raster hooks are raw handlers internally — the engine knows
 exactly which registers they touch and saves only those,
 keeping overhead to ~20-30 cycles.
 
 ### Interrupt Manager Configuration
 
-MaxDLIs and MaxVBIHooks are template parameters on the
+MaxRasterHooks and MaxFrameHooks are template parameters on the
 InterruptManager, not GameConfig fields:
 
 ```cpp
-// Engine default: 12 DLI slots, 4 VBI hooks
+// Engine default: 12 raster-hook slots, 4 frame hooks
 // Override if your game needs more or fewer:
 using MyInterrupts = engine::InterruptManager<Platform, 16, 2>;
 ```
 
-Memory cost: `MaxDLIs * 8 + MaxVBIHooks * 2 + 44` bytes RAM
-plus 2 bytes of zero page. For defaults (12 DLIs, 4 VBI hooks):
+Memory cost: `MaxRasterHooks * 8 + MaxFrameHooks * 2 + 44` bytes RAM
+plus 2 bytes of zero page. For defaults (12 raster hooks, 4 frame hooks):
 approximately 152 bytes RAM.
 
-### VBI Hooks
+### Frame Hooks
 
 ```cpp
 extern "C" void my_vbi_work();
-Game::interrupts.add_vbi_hook(my_vbi_work);
+Game::interrupts.add_frame_hook(my_vbi_work);
 ```
 
-User VBI hooks run after all engine VBI housekeeping (input
+User frame hooks run after all engine frame-service housekeeping (input
 capture, sound tick, sprite commit, collision latch, multiplex
-zone computation, DLI chain build). The user gets whatever
-cycles remain in the deferred VBI period.
+zone computation, raster-hook chain build). The user gets whatever
+cycles remain in the frame-service period.
 
 ### Render Phase Hooks
 
@@ -1731,7 +1727,7 @@ Game::run([](const engine::Input& input) {
 });
 ```
 
-The engine synchronizes to VBI. Each callback invocation is
+The engine synchronizes to the frame service. Each callback invocation is
 one frame. On NTSC: 60 FPS. On PAL: 50 FPS.
 
 ### run_until (Returns on Condition)
@@ -1754,8 +1750,9 @@ callback returns true. Used for per-screen game loops
 Game::init(tileset);  // or Game::init() if no charset needed
 ```
 
-Performs all hardware setup: display list, P/M, POKEY, VBI
-handler, input capture. Call once before `run` or `run_until`.
+Performs all hardware setup: display program, sprites, sound, the
+frame-service handler, and input capture. Call once before `run`
+or `run_until`.
 
 ### Frame Overrun Detection
 

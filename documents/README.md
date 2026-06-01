@@ -36,8 +36,11 @@ Mostly engine-level and intended to remain portable:
 Currently backend-specific in the public surface because Atari is the first implementation:
 
 - `atari::Platform<...>` and Atari platform aliases
-- `atari::Mode` display mode vocabulary
-- Atari display-list, DLI, VBI, P/M, and POKEY terminology in some examples
+- the display-mode token: the engine's region/view templates take a backend mode type through
+  `engine::display::traits<ModeT>`, spelled `atari::Mode` for the current backend
+- Atari display-list / ANTIC / GTIA / POKEY terminology, confined to the Atari platform guide and the
+  `demo/atari_hw_test.cpp` example (the generic API speaks of raster hooks, frame hooks, sprites, and
+  `engine::audio::Waveform`)
 
 ## Scope of the Current Docs
 

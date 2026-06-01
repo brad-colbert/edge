@@ -204,7 +204,7 @@ configuration.
 │       │            │            │             │       │
 │  ┌────┴────────────┴────────────┴─────────────┴────┐ │
 │  │              Interrupt Manager                   │ │
-│  │           (DLI chain, VBI dispatch)              │ │
+│  │           (raster-hook chain, frame dispatch)              │ │
 │  └─────────────────────┬───────────────────────────┘ │
 │                        │                              │
 │  ┌─────────────────────┴───────────────────────────┐ │
@@ -258,13 +258,13 @@ depending on complexity). All screens share a single screen
 memory buffer sized to the largest screen's requirements. The
 `set_screen<S>()` transition sequence:
 
-1. Wait for VBI
+1. Wait for the frame service
 2. Disable ANTIC DMA (screen goes blank)
 3. Clear shared screen buffer
 4. Copy display list template, patch LMS addresses
 5. Set ANTIC DLISTL/H to the new display list
 6. Update region view pointers
-7. Clear non-persistent DLIs, rebuild DLI chain
+7. Clear non-persistent raster hooks, rebuild the raster-hook chain
 8. Enable/disable P/M DMA per sprites_active
 9. Set P/M resolution per pm_resolution (DMACTL bit)
 10. Enable/disable scroll per scroll_active
@@ -286,29 +286,33 @@ primitives for bitmap display regions. Available only on
 tables for fast pixel addressing. Additional primitives (line,
 rect, masked blit) planned for future iterations.
 
-**Interrupt Manager** — owns DLI chain construction and VBI
-dispatch. Uses a two-tier DLI model (see DECISIONS.md ADR-019):
-engine-internal DLIs (multiplex, scroll) are raw handlers with
-minimal overhead (~20-30 cycles); user C++ DLIs go through a
-dispatcher with automatic save/restore (~80 cycles overhead);
-user raw DLIs bypass the dispatcher entirely. All DLI types
-coexist in a single chain, sorted by scanline, with priority
-ordering: engine multiplex first, engine scroll second, user
+**Interrupt Manager** — owns raster-hook chain construction and
+frame dispatch. (On the Atari backend a raster hook is delivered as a
+Display List Interrupt and the frame service runs from the Vertical
+Blank Interrupt; the engine vocabulary is raster hook / frame hook /
+frame service, and the Atari delivery terms appear below where they
+describe the hardware mechanism.) Uses a two-tier raster-hook model
+(see DECISIONS.md ADR-019): engine-internal raster hooks (multiplex,
+scroll) are raw handlers with minimal overhead (~20-30 cycles); user
+C++ raster hooks go through a dispatcher with automatic save/restore
+(~80 cycles overhead); user raw hooks bypass the dispatcher entirely.
+All hook types coexist in a single chain, sorted by scanline, with
+priority ordering: engine multiplex first, engine scroll second, user
 handlers third.
 
-The chain is stored as a table of DLI slots (4 bytes each:
+The chain is stored as a table of raster-hook slots (4 bytes each:
 scanline, flags, handler pointer) with parallel handler and
 next-pointer tables for fast indexed access during interrupts.
-Static DLIs (registered at screen setup) and dynamic DLIs
+Static hooks (registered at screen setup) and dynamic hooks
 (rebuilt per-frame by the multiplexer) share the single table.
-The VBI merges and sorts them, sets DLI bits in the display
-list, and points VDSLST at the first handler.
+The frame service merges and sorts them, sets the per-line DLI bits
+in the display list, and points VDSLST at the first handler.
 
-When `set_screen<S>()` is called, all non-persistent user DLIs
+When `set_screen<S>()` is called, all non-persistent user hooks
 are cleared and the engine rebuilds the chain based on the new
-screen's configuration. DLI priority order applies per-screen.
+screen's configuration. Raster-hook priority order applies per-screen.
 
-C++ DLI handlers must be non-capturing lambdas or plain
+C++ raster-hook handlers must be non-capturing lambdas or plain
 function pointers (see DECISIONS.md ADR-020). The dispatcher
 uses a self-modifying JSR for indirect handler calls (see
 DECISIONS.md ADR-021).
@@ -318,7 +322,7 @@ index and scratch). MaxDLIs and MaxVBIHooks are template
 parameters on the InterruptManager, not GameConfig fields.
 
 **Input** — captures joystick and keyboard state once per frame
-during VBI. Provides level (held) and edge (pressed/released)
+during the frame service. Provides level (held) and edge (pressed/released)
 detection. Debouncing handled internally. Game code receives
 a snapshot, never polls hardware directly.
 
@@ -326,7 +330,7 @@ a snapshot, never polls hardware directly.
 resources. Each logical sprite has position (x, y), shape
 pointer, height, and active flag (6 bytes per sprite). The
 game writes logical sprite state during its render phase;
-the engine commits to P/M hardware during VBI.
+the engine commits to P/M hardware during the frame service.
 
 P/M memory management uses tracked-range clearing (see
 DECISIONS.md ADR-022): only the scanline range that was
@@ -355,10 +359,10 @@ Zone assignment algorithm:
    fall in a gap between sprites)
 4. Build per-zone data: player assignments and HPOS values
 
-Zone DLI handlers are engine-internal raw handlers (~53 cycles
+Zone raster-hook handlers are engine-internal raw handlers (~53 cycles
 each): save A, write HPOSP0-3 for the new zone, chain VDSLST,
-restore A, RTI. These are registered as dynamic DLIs with the
-interrupt manager and rebuilt every frame during VBI.
+restore A, RTI. These are registered as dynamic raster hooks with the
+interrupt manager and rebuilt every frame during the frame service.
 
 Collision reverse-mapping: GTIA collision registers accumulate
 across the whole frame and don't distinguish zones. The
@@ -385,7 +389,7 @@ the edge case of buffer wrapping and new-row/column loading.
 
 **Sound** — manages POKEY voice allocation and sound effect /
 music playback. Sound data is `constexpr` ROM tables.
-Processing happens during VBI (envelope advancement, frequency
+Processing happens during the frame service (envelope advancement, frequency
 updates). Capability-gated for stereo POKEY and PokeyMax
 extended voices.
 
@@ -396,7 +400,7 @@ send input and receive state snapshots. The game defines its
 own state and input message structs; the engine handles
 transport, framing, connection management, and polling.
 Network I/O is polled once per frame during the main game
-loop (not during VBI — SIO transactions are too long for
+loop (not during the frame service — SIO transactions are too long for
 interrupt context). Capability-gated: games compiled without
 a network axis have no `Game::net` and incur zero cost.
 Implementation status: API designed, implementation deferred.
@@ -423,8 +427,8 @@ A single frame follows this sequence:
 │     handler/next tables, set DLI bits in   │
 │     display list, set VDSLST to first      │
 │     handler, reset chain index to 0        │
-│  8. VBI user hooks: run any user-provided  │
-│     VBI work (if installed)                │
+│  8. Frame hooks: run any user-provided     │
+│     frame-service work (if installed)      │
 │                                            │
 ├─ VISIBLE FRAME ───────────────────────────┤
 │                                            │
@@ -460,7 +464,7 @@ A single frame follows this sequence:
 ```
 
 Key insight: the game's render phase writes to buffers during
-the visible frame. The VBI commits those buffers to hardware.
+the visible frame. The frame service commits those buffers to hardware.
 This one-frame latency avoids tearing and racing with ANTIC
 DMA. The game author does not need to think about this — the
 API handles the buffering internally.
@@ -471,27 +475,27 @@ The engine is designed to be extended. User code can integrate
 assembly language routines and take direct control of hardware
 resources at well-defined seams.
 
-### 1. DLI Handler Registration
+### 1. Raster Hook Registration
 
-The interrupt manager owns the DLI chain. Users can register
+The interrupt manager owns the raster-hook chain. Users can register
 handlers in two ways:
 
 **C++ handler (engine-managed):**
 
 ```cpp
-Game::interrupts.add_dli(scanline, [](auto& ctx) {
-    ctx.write_colpf0(0x2A);
+Game::interrupts.add_raster_hook(scanline, [](auto& ctx) {
+    ctx.set_playfield_color<0>(0x2A);
 });
 ```
 
 The engine wraps the callback with register save/restore and
-automatic chaining to the next DLI handler.
+automatic chaining to the next raster-hook handler.
 
 **Raw assembly handler (user-managed):**
 
 ```cpp
 extern "C" void my_custom_dli();  // defined in .s file
-Game::interrupts.add_raw_dli(scanline, my_custom_dli);
+Game::interrupts.add_raw_raster_hook(scanline, my_custom_dli);
 ```
 
 The user is responsible for:
@@ -502,18 +506,18 @@ The user is responsible for:
 - Executing RTI to return control to ANTIC
 
 The engine documents the interrupt context in MEMORY_MAP.md,
-including the DLI chain next-handler vector address and
+including the raster-hook chain next-handler vector address and
 available stack space.
 
-### 2. VBI Hook Slots
+### 2. Frame Hook Slots
 
-After the engine completes its VBI work (input capture, sound
+After the engine completes its frame-service work (input capture, sound
 envelope processing, P/M register commits), it calls any
-registered user VBI hooks:
+registered user frame hooks:
 
 ```cpp
 extern "C" void my_vbi_work();
-Game::interrupts.add_vbi_hook(my_vbi_work);
+Game::interrupts.add_frame_hook(my_vbi_work);
 ```
 
 The user hook runs in the deferred VBI (after OS processing).
@@ -570,7 +574,7 @@ Game::hooks.post_render(my_custom_effect);
 
 These hooks run in the main thread during the visible frame,
 so they have access to the full frame cycle budget. They are
-useful for effects that don't fit in a DLI or need to
+useful for effects that don't fit in a raster hook or need to
 coordinate with the game logic.
 
 ### 5. Resource Release and Reclamation
@@ -609,14 +613,14 @@ to COLPF0, AUDF1, or any other register at any time.
 If you do, you accept these consequences:
 
 - Writes to GTIA color registers will be overwritten by the
-  next DLI or VBI that touches them, unless you've released
+  next raster hook or frame service that touches them, unless you've released
   that subsystem.
 - Writes to POKEY audio registers will conflict with the sound
   subsystem. Call `Game::sound.release_channel(N)` first.
 - Writes to ANTIC scroll registers will conflict with the scroll
   subsystem if active. Call `Game::scroll.suspend()` first.
 - Writes to P/M position registers will be overwritten at next
-  VBI commit, unless you've released that player.
+  frame-service commit, unless you've released that player.
 
 The engine provides register addresses as constexpr values so
 assembly code doesn't need to hardcode magic numbers:
@@ -642,16 +646,16 @@ frame, killing your frame budget.
 
 Instead, use one of these patterns:
 
-**Pattern 1: DLI Handler (recommended)**
+**Pattern 1: Raster Hook (recommended)**
 
-If your effect needs scanline precision, write a DLI handler.
-If you're out of DLI slots, the multiplexer is consuming them,
+If your effect needs scanline precision, write a raster-hook handler.
+If you're out of raster-hook slots, the multiplexer is consuming them,
 which means you're already pushing the engine hard. Consider
 whether the effect justifies the complexity.
 
 ```cpp
-Game::interrupts.add_dli(100, [](auto& ctx) {
-    ctx.write_colpf0(0x2A);  // effect
+Game::interrupts.add_raster_hook(100, [](auto& ctx) {
+    ctx.set_playfield_color<0>(0x2A);  // effect
 });
 ```
 
@@ -670,8 +674,8 @@ void update(...) {
 
 **Pattern 3: POKEY Timer (rare)**
 
-If you truly need a timer interrupt separate from VBI/DLI, use
-POKEY's timer and poll it in a VBI hook. This requires you to
+If you truly need a timer interrupt separate from the frame service or raster hooks, use
+POKEY's timer and poll it in a frame hook. This requires you to
 manage POKEY timer state yourself.
 
 The engine provides the tools for patterns 1 and 2, which cover
@@ -692,7 +696,7 @@ engine/
 ├── screen.h            # Screen manager, set_screen, ScreenSet
 ├── display.h           # DisplayLayout, TextRegion, BitmapRegion
 ├── gfx.h               # Bitmap drawing primitives
-├── interrupt.h         # Interrupt manager (DLI/VBI dispatch)
+├── interrupt.h         # Interrupt manager (raster-hook / frame dispatch)
 ├── loop.h              # Game loop, run, run_until
 ├── hooks.h             # User extension hooks
 ├── net.h               # Network subsystem (state sharing)

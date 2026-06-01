@@ -130,7 +130,7 @@ constexpr u8 dl_mode_byte(Mode m) { return static_cast<u8>(m); }
 // ── Player/Missile memory layout ──────────────────────────────────────
 //
 // The single source of truth for the ANTIC P/M DMA layout, the basis for where
-// the sprite manager writes shape bytes (API_DESIGN.md "P/M Resolution",
+// the sprite manager writes shape bytes (API_DESIGN.md "Sprite Vertical Resolution",
 // DECISIONS.md ADR-022/023). `single` selects single-line resolution (2K block,
 // 1-scanline Y precision) vs double-line (1K block, 2-scanline steps).
 //

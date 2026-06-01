@@ -38,7 +38,7 @@ Implemented today:
 - sound effect playback
 - tile and charset helpers
 - scrolling support
-- DLI/VBI interrupt management
+- raster-hook and frame-hook interrupt management
 - fixed-size slot and packed pools
 - fixed-point math and lookup helpers
 
@@ -78,7 +78,7 @@ For a fuller walkthrough, start with [`/documents/QUICK_START.md`](./documents/Q
 
 - [`/engine`](./engine) — public engine headers and the Atari backend
 - [`/tests`](./tests) — `mos-sim` unit tests for engine subsystems
-- [`/demo`](./demo) — hardware validation demo that builds as `hw_test.xex`
+- [`/demo`](./demo) — hardware validation demo that builds as `atari_hw_test.xex`
 - [`/documents`](./documents) — end-user documentation
 - [`/docs`](./docs) — architecture notes, design constraints, and ADRs
 - [`/cmake`](./cmake) — toolchain files for simulator and Atari builds
@@ -102,14 +102,14 @@ ctest --test-dir build --output-on-failure
 From the simulator build directory:
 
 ```sh
-cmake --build build --target hw_test
+cmake --build build --target atari_hw_test
 ```
 
 Or with a dedicated Atari configure:
 
 ```sh
 cmake -B build-atari -DCMAKE_TOOLCHAIN_FILE=cmake/atari-toolchain.cmake -DEDGE_BUILD_DEMO=ON
-cmake --build build-atari --target hw_test
+cmake --build build-atari --target atari_hw_test
 ```
 
 See [`/demo/README.md`](./demo/README.md) for what the demo exercises on real hardware or emulators.

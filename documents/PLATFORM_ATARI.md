@@ -17,8 +17,8 @@ The current backend affects these parts of the public API:
 - display mode names come from `atari::Mode`
 - text output ultimately writes Atari internal screen codes
 - sprite rendering maps to Atari player/missile graphics
-- sound constants map to POKEY waveform bits
-- raster work uses Atari concepts like DLI and VBI
+- the generic `engine::audio::Waveform` timbres map to POKEY distortion settings
+- raster hooks and frame hooks are delivered through the Atari DLI and VBI
 
 That does not mean your whole program should be Atari-specific. In a typical EDGE application, most game logic still lives in:
 
@@ -26,6 +26,16 @@ That does not mean your whole program should be Atari-specific. In a typical EDG
 - `engine::Input`
 - `engine::SlotPool` / `engine::PackedPool`
 - sprite, sound, tile, scroll, and interrupt subsystem APIs
+
+The generic engine concepts and the Atari mechanisms behind them map like this:
+
+| Engine concept | Atari backing |
+| --- | --- |
+| raster hook (`add_raster_hook`) | Display List Interrupt (DLI) |
+| frame hook / frame service | Vertical Blank Interrupt (VBI) |
+| `engine::audio::Waveform` | POKEY AUDC distortion bits |
+| sprite / projectile | player / missile (P/M) graphics |
+| `RasterContext` | direct GTIA/ANTIC register stores during a DLI |
 
 ## Platform Type
 
@@ -115,7 +125,7 @@ Atari-specific behavior behind those calls:
 - up to 4 hardware players exist at once
 - up to 4 hardware missiles exist at once
 - additional logical sprites are multiplexed across vertical zones
-- buffered sprite state is committed during VBI to avoid tearing
+- buffered sprite state is committed during the frame service (the Atari deferred VBI) to avoid tearing
 - collision data comes from GTIA collision registers latched once per frame
 
 Useful multiplex queries:
@@ -125,32 +135,33 @@ Useful multiplex queries:
 - `Game::multiplex.player_for_sprite(logical_index)`
 - `Game::multiplex.zone_for_sprite(logical_index)`
 
-### P/M Resolution
+### Sprite Vertical Resolution
 
 The sprite system supports:
 
-- `engine::PMRes::SingleLine`
-- `engine::PMRes::DoubleLine`
+- `engine::SpriteVerticalResolution::SingleLine`
+- `engine::SpriteVerticalResolution::DoubleLine`
 
-Single-line gives finer vertical precision and uses more P/M memory.
+Single-line gives finer vertical precision and uses more sprite (P/M) memory.
 
 ## Sound on Atari
 
-The current sound effect builders use POKEY-oriented waveform constants:
+EDGE sound effects describe a note's timbre with the generic `engine::audio::Waveform` enum:
 
-- `engine::pokey::PURE`
-- `engine::pokey::NOISE`
-- `engine::pokey::BUZZ`
-- `engine::pokey::SILENT`
+- `engine::audio::Waveform::Tone`
+- `engine::audio::Waveform::Noise`
+- `engine::audio::Waveform::Buzz`
+- `engine::audio::Waveform::Silent` (terminal sentinel)
 
-An EDGE sound effect is still an engine asset built with `engine::make_sound`, but its current interpretation is Atari POKEY playback.
+A sound effect is an engine asset built with `engine::make_sound`; on this backend the HAL maps each
+`Waveform` to the matching POKEY AUDC distortion bits for playback.
 
 Example:
 
 ```cpp
 constexpr auto sfx = engine::make_sound({
-    {engine::pokey::PURE, 80, 10, 12},
-    {engine::pokey::NOISE, 40, 12, 8},
+    {engine::audio::Waveform::Tone, 80, 10, 12},
+    {engine::audio::Waveform::Noise, 40, 12, 8},
 });
 ```
 
@@ -166,7 +177,7 @@ Advanced integration point:
 Relevant behavior on this backend:
 
 - joystick ports come from the selected Atari machine profile
-- `start()`, `select()`, and `option()` map to Atari console keys
+- `system_primary()`, `system_secondary()`, and `system_option()` map to the Atari START / SELECT / OPTION console keys
 - `key()` returns the current keyboard scancode, or `0`
 
 The key point for the game author is still portable: input is captured once per frame and read as an immutable snapshot.
@@ -177,25 +188,25 @@ The general interrupt API maps to Atari raster interrupts and vertical blank han
 
 Portable registration surface:
 
-- `Game::interrupts.add_dli(scanline, handler)`
-- `Game::interrupts.add_raw_dli(scanline, handler)`
-- `Game::interrupts.add_persistent_dli(scanline, handler)`
-- `Game::interrupts.add_vbi_hook(handler)`
+- `Game::interrupts.add_raster_hook(scanline, handler)`
+- `Game::interrupts.add_raw_raster_hook(scanline, handler)`
+- `Game::interrupts.add_persistent_raster_hook(scanline, handler)`
+- `Game::interrupts.add_frame_hook(handler)`
 
 Atari-specific meaning:
 
-- DLI means Display List Interrupt
-- VBI means Vertical Blank Interrupt
-- the interrupt manager programs DLI bits on the active display list
-- sprite multiplexing also consumes DLI slots internally
+- a raster hook is delivered as a Display List Interrupt (DLI)
+- a frame hook runs from the Vertical Blank Interrupt (VBI)
+- the interrupt manager programs the DLI bits on the active display list
+- sprite multiplexing also consumes raster-hook slots internally
 
-For C++ DLI handlers, use `engine::DLIContext<Platform>` to write hardware-facing values without reaching into platform headers directly.
+For C++ raster-hook handlers, use `engine::RasterContext<Platform>` to write hardware-facing values without reaching into platform headers directly. `set_playfield_color<N>` takes the field as a template argument so it stays a single register store.
 
 Example:
 
 ```cpp
 static void split_color() {
-    engine::DLIContext<Platform>{}.write_colpf2(0xC4);
+    engine::RasterContext<Platform>{}.set_playfield_color<2>(0xC4);
 }
 ```
 
@@ -269,7 +280,8 @@ Everything else is part of the general EDGE authoring model.
 
 - `engine/gfx.h` is still a placeholder
 - `engine/net.h` is still a placeholder
-- the display mode vocabulary is not yet abstracted away from Atari types
+- display layouts still use the Atari mode enum (`atari::Mode`) as the concrete backend token, supplied
+  through the `engine::display::traits` seam; a second backend would add its own mode type and traits
 - the first backend is Atari, so some examples necessarily use Atari terminology
 
 That is expected at this stage of the project. The docs in this folder are organized so the general engine shape stays clear even where the concrete implementation is currently Atari-first.
