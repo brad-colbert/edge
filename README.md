@@ -1,6 +1,9 @@
 <img width="1448" height="1086" alt="image" src="https://github.com/user-attachments/assets/76377375-b374-4d6e-8524-b17f22ca1953" />
 
 # EDGE (Eight-bit Damned! Game Engine)
+
+> **Applies to EDGE v0.1.0** — see [CHANGELOG](./CHANGELOG.md) for version history.
+
 EDGE is a C++20 game engine for constrained 6502-class systems, built around a small, deterministic, compile-time configured API instead of a heavy runtime.
 The project is Atari-first today, but its architecture is intended to support additional 6502-family platforms over time. Game code is written against portable engine subsystems while hardware details live behind a platform HAL and compile-time capability profiles.
 
@@ -113,6 +116,24 @@ cmake --build build-atari --target atari_hw_test
 ```
 
 See [`/demo/README.md`](./demo/README.md) for what the demo exercises on real hardware or emulators.
+
+## Versioning and releases
+
+EDGE follows [Semantic Versioning](https://semver.org/). The version number has a
+single source of truth in [`engine/version.h`](./engine/version.h) (the
+`EDGE_VERSION_*` macros); `CMakeLists.txt` parses that header so `PROJECT_VERSION`
+never drifts, and game code can read `EDGE_VERSION_STRING` directly. Every document
+carries an "Applies to EDGE vX.Y.Z" stamp under its title, and all notable changes are
+recorded in [`CHANGELOG.md`](./CHANGELOG.md).
+
+To cut a release:
+
+```sh
+scripts/bump-version.sh X.Y.Z   # updates engine/version.h + every doc stamp
+# then edit CHANGELOG.md: move [Unreleased] notes into a new [X.Y.Z] section
+git commit -am "Release X.Y.Z"
+git tag vX.Y.Z
+```
 
 ## Documentation guide
 

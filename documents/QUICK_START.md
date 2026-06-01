@@ -1,5 +1,7 @@
 # Quick Start
 
+> **Applies to EDGE v0.1.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
+
 This guide introduces EDGE from the engine author's point of view first, then shows the current concrete setup using the Atari backend.
 
 ## The Core Mental Model

@@ -1,5 +1,7 @@
 # Constraints
 
+> **Applies to EDGE v0.1.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
+
 Hardware budgets, platform targets, and non-negotiable rules that
 every design decision must respect.
 

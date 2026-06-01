@@ -1,6 +1,17 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(edge CXX)
+# Single source of truth for the version is engine/version.h (see CHANGELOG.md).
+# Parse the macros here so PROJECT_VERSION never drifts from the header.
+file(STRINGS engine/version.h _edge_ver_major REGEX "EDGE_VERSION_MAJOR")
+file(STRINGS engine/version.h _edge_ver_minor REGEX "EDGE_VERSION_MINOR")
+file(STRINGS engine/version.h _edge_ver_patch REGEX "EDGE_VERSION_PATCH")
+string(REGEX MATCH "[0-9]+" _edge_ver_major "${_edge_ver_major}")
+string(REGEX MATCH "[0-9]+" _edge_ver_minor "${_edge_ver_minor}")
+string(REGEX MATCH "[0-9]+" _edge_ver_patch "${_edge_ver_patch}")
+
+project(edge
+        VERSION ${_edge_ver_major}.${_edge_ver_minor}.${_edge_ver_patch}
+        LANGUAGES CXX)
 
 # The engine is header-only (DECISIONS.md ADR-012); it is consumed as an
 # include directory. Game code and tests include <engine/...>.

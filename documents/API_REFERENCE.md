@@ -1,5 +1,7 @@
 # EDGE API Reference
 
+> **Applies to EDGE v0.1.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
+
 This reference is organized in two layers:
 
 1. the general engine-facing API a programmer writes against

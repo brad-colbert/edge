@@ -30,6 +30,7 @@
 
 #include "user_charset.h"
 
+#include <engine/version.h>
 #include <engine/platform/atari/platform.h>
 #include <engine/core.h>
 
@@ -190,7 +191,7 @@ int main() {
     Game::sprite_color(1, 0xB6);            // diamond, green
 
     // Static HUD labels (written once).
-    Game::print(0, 0, "EDGE ENGINE V0.1");
+    Game::print(0, 0, "EDGE ENGINE V" EDGE_VERSION_STRING);
     Game::print(20, 0, "FRAME:");
     Game::print(0, 1, "JOY:");
     Game::print(9, 1, "FIRE:");

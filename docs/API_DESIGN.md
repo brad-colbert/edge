@@ -1,5 +1,7 @@
 # API Design
 
+> **Applies to EDGE v0.1.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
+
 The user-facing API for the engine. This document describes what
 a game author writes. Internal engine implementation details are
 in ARCHITECTURE.md.

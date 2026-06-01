@@ -1,5 +1,7 @@
 # EDGE Engine Documentation
 
+> **Applies to EDGE v0.1.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
+
 EDGE is a C++ engine for building games and interactive applications on constrained 6502-class systems.
 
 Its design goal is not to hide the machine behind a heavy runtime. The goal is to give the author a small, predictable, compile-time configured API for screens, input, sprites, sound, tiles, interrupts, and fixed-size storage, while keeping hardware details behind a platform backend.
