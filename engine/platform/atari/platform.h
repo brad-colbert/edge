@@ -23,6 +23,7 @@
 #include "display_traits.h"
 #include "hal.h"
 #include "vbxe_config.h"
+#include "vbxe_overlay.h"
 
 namespace atari {
 
@@ -55,6 +56,13 @@ namespace detail {
 // detail::same in screen.h); no <type_traits> dependency.
 template <typename G> struct is_vbxe { static constexpr bool value = false; };
 template <typename C> struct is_vbxe<gfx::VBXE<C>> { static constexpr bool value = true; };
+
+// overlay_hal_for<Gfx>::type — the backend overlay HAL seam the Platform folds
+// into Platform::hal. VBXE supplies OverlayHal<Config>; everything else gets the
+// no-op NullOverlay (both defined in vbxe_overlay.h). This keeps every VBXE type
+// in the backend: the generic engine only ever calls the neutral overlay_* seams.
+template <typename G> struct overlay_hal_for            { using type = NullOverlay; };
+template <typename C> struct overlay_hal_for<gfx::VBXE<C>> { using type = OverlayHal<C>; };
 
 // Extended (bank-switched) RAM total for each memory axis, in bytes.
 constexpr u32 ext_ram_bytes(RAM r) {
@@ -180,7 +188,13 @@ struct Platform {
     static constexpr Network  network  = Net;
 
     using capabilities = AtariCaps<M, R, Gfx, S, Tv, Net>;
-    using hal          = Hal;
+
+    // The HAL the engine talks to: the baseline Atari Hal plus the graphics-axis
+    // overlay seam (OverlayHal<Config> for VBXE, NullOverlay otherwise). Both are
+    // all-static, so multiple inheritance just unifies their static methods under
+    // one Platform::hal:: — existing call sites are unaffected.
+    struct HalBundle : Hal, detail::overlay_hal_for<Gfx>::type {};
+    using hal          = HalBundle;
 
     // The backend display-program builder for a portable layout. engine::Screen-
     // Manager builds each screen's display list as Platform::display_program<Layout>,
