@@ -1,18 +1,24 @@
-// test_vbxe.cpp — unit tests for the VBXE Phase 2 access layer: register
-// addressing off Config::reg_base, the MEMAC window geometry / bank math (both
-// MEMAC-A and MEMAC-B), and the VRAM layout.
+// test_vbxe.cpp — unit tests for the VBXE access layer.
+//
+// Phase 2: register addressing off Config::reg_base, MEMAC window geometry /
+// bank math (MEMAC-A and MEMAC-B), and the VRAM layout.
+// Phase 3: BCB packing/builders, the XDL byte layout, and the default palette.
 //
 // Everything here is compile-time (static_assert) — these files are types and
 // constants, so the checks must hold at build time. The same checks are mirrored
 // as runtime CHECKs so the mos-sim harness sees a passing executable. The tests
-// deliberately do NOT call init()/read()/write() (those drive real MMIO).
+// deliberately do NOT call the hardware-touching paths (MEMAC init/read/write,
+// blitter submit, palette upload) — those drive real MMIO.
 
 #include <stdio.h>
 
+#include <engine/platform/atari/vbxe_blitter.h>
 #include <engine/platform/atari/vbxe_config.h>
 #include <engine/platform/atari/vbxe_layout.h>
 #include <engine/platform/atari/vbxe_memac.h>
+#include <engine/platform/atari/vbxe_palette.h>
 #include <engine/platform/atari/vbxe_registers.h>
+#include <engine/platform/atari/vbxe_xdl.h>
 
 namespace v = atari::vbxe;
 
@@ -88,6 +94,67 @@ static_assert(LDbl::shapes == LDef::shapes + CfgDouble::fb_bytes,
                                                           "double-buffer shifts shapes by fb");
 static_assert(LDbl::shapes_size < LDef::shapes_size,      "double-buffer shrinks shapes area");
 
+// ── 5. Blitter: BCB packing + builders ───────────────────────────────
+static_assert(sizeof(v::BCB) == 21, "BCB is 21 bytes");
+
+// pack_addr: 0x12345 -> {0x45, 0x23, 0x01} (19-bit LE).
+struct AddrBytes { v::u8 b[3]; };
+constexpr AddrBytes pack_addr_(engine::u32 a) { AddrBytes r{}; v::pack_addr(r.b, a); return r; }
+static_assert(pack_addr_(0x12345u).b[0] == 0x45, "pack_addr lo");
+static_assert(pack_addr_(0x12345u).b[1] == 0x23, "pack_addr mid");
+static_assert(pack_addr_(0x12345u).b[2] == 0x01, "pack_addr hi");
+
+// pack_step_y: signed 12-bit LE. -1 -> {0xFF,0x0F}; +160 -> {0xA0,0x00}.
+struct StepBytes { v::u8 b[2]; };
+constexpr StepBytes pack_step_(engine::i16 s) { StepBytes r{}; v::pack_step_y(r.b, s); return r; }
+static_assert(pack_step_(-1).b[0] == 0xFF && pack_step_(-1).b[1] == 0x0F, "pack_step -1");
+static_assert(pack_step_(160).b[0] == 0xA0 && pack_step_(160).b[1] == 0x00, "pack_step +160");
+
+// bcb_clear: constant-source fill (and_mask 0, xor_mask = colour), COPY + NEXT.
+constexpr v::BCB kClear = v::bcb_clear(0x10000u, 320, 240, 320, 0x2A);
+static_assert(kClear.blt_and_mask == 0x00,            "clear: constant source");
+static_assert(kClear.blt_xor_mask == 0x2A,            "clear: colour in xor_mask");
+static_assert(kClear.blt_height == 239,               "clear: height-1");
+static_assert(kClear.blt_width[0] == 0x3F && kClear.blt_width[1] == 0x01, "clear: width-1 = 319");
+static_assert((kClear.blt_control & v::blt_mode::NEXT) != 0,           "clear: NEXT set");
+static_assert((kClear.blt_control & 0x07) == v::blt_mode::COPY,        "clear: COPY mode");
+
+// bcb_sprite: real source (and_mask 0xFF), TRANSPARENT + NEXT.
+constexpr v::BCB kSpr = v::bcb_sprite(0x20000u, 0x10000u, 16, 16, 16, 320);
+static_assert(kSpr.blt_and_mask == 0xFF,                              "sprite: real source");
+static_assert((kSpr.blt_control & 0x07) == v::blt_mode::TRANSPARENT,  "sprite: TRANSPARENT mode");
+static_assert(kSpr.dest_step_y[0] == 0x30 && kSpr.dest_step_y[1] == 0x01,
+                                                      "sprite: dest step_y = 320-16 = 304");
+
+// ── 6. XDL byte layout (full-screen SR_320) ──────────────────────────
+struct XdlResult { v::u8 buf[24]; v::u8 len; };
+constexpr XdlResult build_xdl() {
+    XdlResult r{};
+    r.len = v::build_fullscreen_xdl<CfgDefault>(r.buf, 0x12345u, 320, 240);
+    return r;
+}
+constexpr XdlResult kXdl = build_xdl();
+// ctrl = GMON|RPTL|OVADR|ATT|END = 0x8862 (LE: 0x62, 0x88).
+static_assert(kXdl.len == 10,        "SR_320 fullscreen XDL is 10 bytes");
+static_assert(kXdl.buf[0] == 0x62,   "XDLC lo");
+static_assert(kXdl.buf[1] == 0x88,   "XDLC hi");
+static_assert(kXdl.buf[2] == 239,    "RPTL = height-1");
+static_assert(kXdl.buf[3] == 0x45 && kXdl.buf[4] == 0x23 && kXdl.buf[5] == 0x01,
+                                     "OVADR address bytes");
+static_assert(kXdl.buf[6] == 0x40 && kXdl.buf[7] == 0x01, "OVSTEP = 320");
+static_assert(kXdl.buf[8] == v::ov_width::NORMAL, "ATT width NORMAL");
+static_assert(kXdl.buf[9] == 0xFF,   "ATT priority 255");
+
+// ── 7. Default palette ───────────────────────────────────────────────
+static_assert(sizeof(v::default_palette_0.entries) / sizeof(v::PaletteEntry) == 256,
+                                     "default palette has 256 entries");
+static_assert(v::default_palette_0.entries[0].r == 0x00 &&
+              v::default_palette_0.entries[0].g == 0x00 &&
+              v::default_palette_0.entries[0].b == 0x00, "palette[0] is black");
+static_assert(v::default_palette_0.entries[1].r == 0x26 &&
+              v::default_palette_0.entries[1].g == 0x26 &&
+              v::default_palette_0.entries[1].b == 0x26, "palette[1] from laoo data");
+
 // ── Runtime mirror (for the harness) ─────────────────────────────────
 
 static unsigned g_failures = 0;
@@ -128,11 +195,45 @@ static void test_layout() {
     CHECK(LDbl::shapes_size < LDef::shapes_size);
 }
 
+static void test_blitter() {
+    CHECK(sizeof(v::BCB) == 21);
+    CHECK(kClear.blt_and_mask == 0x00);
+    CHECK(kClear.blt_xor_mask == 0x2A);
+    CHECK((kClear.blt_control & v::blt_mode::NEXT) != 0);
+    CHECK(kSpr.blt_and_mask == 0xFF);
+
+    // BlitterQueue push/full/reset (pure RAM, no MMIO).
+    v::BlitterQueue<2> q;
+    CHECK(q.empty());
+    CHECK(q.push(kClear));
+    CHECK(q.push(kSpr));
+    CHECK(q.full());
+    CHECK(!q.push(kClear));        // full -> rejected
+    CHECK(q.count() == 2);
+    q.reset();
+    CHECK(q.empty());
+}
+
+static void test_xdl() {
+    CHECK(kXdl.len == 10);
+    CHECK(kXdl.buf[0] == 0x62 && kXdl.buf[1] == 0x88);
+    CHECK(kXdl.buf[2] == 239);
+    CHECK(kXdl.buf[9] == 0xFF);
+}
+
+static void test_palette() {
+    CHECK(v::default_palette_0.entries[0].r == 0x00);
+    CHECK(v::default_palette_0.entries[1].g == 0x26);
+}
+
 int main() {
     test_registers();
     test_memac_a();
     test_memac_b();
     test_layout();
+    test_blitter();
+    test_xdl();
+    test_palette();
 
     if (g_failures == 0) {
         printf("ALL TESTS PASSED\n");
