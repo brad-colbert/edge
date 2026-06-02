@@ -1,5 +1,6 @@
 # CMake build output
 /build/
+build*/
 working_documents/
 .claude/
 docs/

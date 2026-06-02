@@ -9,17 +9,20 @@
 // the capability profile and the HAL, both resolved at compile time:
 //
 //     using P = atari::Platform<atari::Machine::XL, atari::RAM::Rambo256,
-//                               atari::Graphics::Baseline, atari::Sound::Stereo>;
+//                               atari::gfx::Baseline, atari::Sound::Stereo>;
 //     using caps = P::capabilities;          // queried via if constexpr
 //
 // Capabilities are composed by starting from baseline Atari values and folding
-// in axis-specific overrides with constexpr expressions on the axis enums.
+// in axis-specific overrides with constexpr expressions on the axis enums. The
+// Graphics axis is a *type* (gfx::Baseline / gfx::VBXE<Config>) rather than an
+// enum, so the VBXE variant can carry a compile-time configuration payload.
 
 #include "../../config/capabilities.h"
 #include "../../types.h"
 #include "display_list.h"
 #include "display_traits.h"
 #include "hal.h"
+#include "vbxe_config.h"
 
 namespace atari {
 
@@ -31,12 +34,27 @@ using engine::u32;
 
 enum class Machine  : u8 { A400, A800, XL, XE };
 enum class RAM      : u8 { Baseline, XE128, Rambo256, U1MB };
-enum class Graphics : u8 { Baseline, VBXE };
 enum class Sound    : u8 { Mono, Stereo, PokeyMax };
 enum class Network  : u8 { None, Fujinet };
 enum class TV       : u8 { NTSC, PAL };
 
+// ── Graphics axis (a type, not an enum) ──────────────────────────────
+//
+// Unlike the other axes, Graphics is a type so the VBXE variant can carry a
+// compile-time configuration (vbxe::Config). Baseline is stock ANTIC+GTIA.
+namespace gfx {
+    struct Baseline {};                                  // stock ANTIC+GTIA
+    template <typename Config = vbxe::DefaultConfig>
+    struct VBXE { using config = Config; };
+}
+
 namespace detail {
+
+// is_vbxe<Gfx>::value — true iff the Graphics axis is a gfx::VBXE<...>.
+// Uses the engine's `static constexpr bool value` trait idiom (cf.
+// detail::same in screen.h); no <type_traits> dependency.
+template <typename G> struct is_vbxe { static constexpr bool value = false; };
+template <typename C> struct is_vbxe<gfx::VBXE<C>> { static constexpr bool value = true; };
 
 // Extended (bank-switched) RAM total for each memory axis, in bytes.
 constexpr u32 ext_ram_bytes(RAM r) {
@@ -79,7 +97,7 @@ constexpr u16 tv_cycles_per_frame(TV tv) {
 // "absent" default. Baseline Atari (400/800/XL/XE) always has ANTIC+GTIA P/M
 // graphics, 4 players + 4 missiles, hardware scroll, a programmable display
 // list, and DLI/VBI interrupts; the extension axes layer on top.
-template <Machine M, RAM R, Graphics G, Sound S, TV Tv, Network N>
+template <Machine M, RAM R, typename Gfx, Sound S, TV Tv, Network N>
 struct AtariCaps : engine::Capabilities {
     // ── Graphics ──
     static constexpr bool has_hardware_sprites = true;
@@ -87,9 +105,24 @@ struct AtariCaps : engine::Capabilities {
     static constexpr bool has_missiles         = true;
     static constexpr u8   max_missiles         = 4;
     static constexpr bool has_hardware_scroll  = true;
-    static constexpr bool has_blitter          = (G == Graphics::VBXE);
+    static constexpr bool has_blitter          = detail::is_vbxe<Gfx>::value;
     static constexpr bool has_display_list     = true;  // ANTIC
     static constexpr bool has_raster_interrupt = true;  // DLI
+
+    // ── Extended graphics (VBXE) ──
+    // VBXE adds 512KB VRAM, a 256-colour overlay plane (incl. an 80-column
+    // text mode and overlay/playfield raster collision), and four 256-colour
+    // hardware palettes. The neutral capability fields are declared in
+    // engine::Capabilities; the VBXE-specific values live here in the backend.
+    static constexpr bool has_vram              = detail::is_vbxe<Gfx>::value;
+    static constexpr u32  vram_bytes            = detail::is_vbxe<Gfx>::value ? 524288u : 0u;
+    static constexpr bool has_overlay           = detail::is_vbxe<Gfx>::value;
+    static constexpr u16  overlay_colors        = detail::is_vbxe<Gfx>::value ? 256 : 0;
+    static constexpr bool has_overlay_text_mode = detail::is_vbxe<Gfx>::value;
+    static constexpr bool has_overlay_collision = detail::is_vbxe<Gfx>::value;
+    static constexpr bool has_palette           = detail::is_vbxe<Gfx>::value;
+    static constexpr u8   palette_count         = detail::is_vbxe<Gfx>::value ? 4 : 0;
+    static constexpr u16  colors_per_palette    = detail::is_vbxe<Gfx>::value ? 256 : 0;
 
     // ── Sound ──
     static constexpr bool has_dedicated_sound   = true;          // POKEY
@@ -135,17 +168,18 @@ struct AtariCaps : engine::Capabilities {
 // TV is a required axis (no default — the machine determines it; ADR-018) and
 // is placed before Network so Network can keep its None default. (C++ forbids
 // a defaulted template parameter before a non-defaulted one.)
-template <Machine M, RAM R, Graphics G, Sound S, TV Tv, Network Net = Network::None>
+template <Machine M, RAM R, typename Gfx, Sound S, TV Tv, Network Net = Network::None>
 struct Platform {
-    // Axis values, queryable at compile time.
+    // Axis values, queryable at compile time. Graphics is a type axis, so it is
+    // exposed as a nested type rather than a constexpr value.
     static constexpr Machine  machine  = M;
     static constexpr RAM      ram       = R;
-    static constexpr Graphics graphics = G;
+    using graphics                      = Gfx;
     static constexpr Sound    sound    = S;
     static constexpr TV       tv       = Tv;
     static constexpr Network  network  = Net;
 
-    using capabilities = AtariCaps<M, R, G, S, Tv, Net>;
+    using capabilities = AtariCaps<M, R, Gfx, S, Tv, Net>;
     using hal          = Hal;
 
     // The backend display-program builder for a portable layout. engine::Screen-
@@ -162,18 +196,18 @@ struct Platform {
 // to the Platform template directly.
 
 using StockXL_NTSC = Platform<
-    Machine::XL, RAM::Baseline, Graphics::Baseline, Sound::Mono, TV::NTSC>;
+    Machine::XL, RAM::Baseline, gfx::Baseline, Sound::Mono, TV::NTSC>;
 
 using StockXL_PAL = Platform<
-    Machine::XL, RAM::Baseline, Graphics::Baseline, Sound::Mono, TV::PAL>;
+    Machine::XL, RAM::Baseline, gfx::Baseline, Sound::Mono, TV::PAL>;
 
 // NTSC by default; for PAL use the full Platform template with TV::PAL.
 using ExpandedXE = Platform<
-    Machine::XE, RAM::XE128, Graphics::Baseline, Sound::Mono, TV::NTSC>;
+    Machine::XE, RAM::XE128, gfx::Baseline, Sound::Mono, TV::NTSC>;
 
 // NTSC by default; for PAL use the full Platform template with TV::PAL.
 using FullUpgrade = Platform<
-    Machine::XL, RAM::U1MB, Graphics::VBXE, Sound::PokeyMax, TV::NTSC, Network::Fujinet>;
+    Machine::XL, RAM::U1MB, gfx::VBXE<>, Sound::PokeyMax, TV::NTSC, Network::Fujinet>;
 
 } // namespace atari
 

@@ -40,7 +40,7 @@ namespace M = atari;
 using Platform = atari::Platform<
     atari::Machine::XL,
     atari::RAM::Baseline,
-    atari::Graphics::Baseline,
+    atari::gfx::Baseline,
     atari::Sound::Mono,
     atari::TV::NTSC>;
 

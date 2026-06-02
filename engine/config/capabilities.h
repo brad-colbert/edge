@@ -39,6 +39,20 @@ struct Capabilities {
     static constexpr bool has_display_list     = false;
     static constexpr bool has_raster_interrupt = false;   // shared with timing
 
+    // ── Extended graphics (VRAM / overlay / palette) ──
+    // Neutral feature flags for an extended graphics subsystem (e.g. the Atari
+    // VBXE). The engine queries these by feature; the platform-specific values
+    // live in the backend capability profile, never here.
+    static constexpr bool has_vram              = false;
+    static constexpr u32  vram_bytes            = 0;
+    static constexpr bool has_overlay           = false;
+    static constexpr u16  overlay_colors        = 0;
+    static constexpr bool has_overlay_text_mode = false;
+    static constexpr bool has_overlay_collision = false;
+    static constexpr bool has_palette           = false;
+    static constexpr u8   palette_count         = 0;
+    static constexpr u16  colors_per_palette    = 0;
+
     // ── Sound ──
     static constexpr bool has_dedicated_sound   = false;
     static constexpr u8   sound_voices          = 0;

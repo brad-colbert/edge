@@ -18,7 +18,7 @@ using FullUpgradeCaps  = a::FullUpgrade::capabilities;
 
 // A custom platform with stereo sound (XL, baseline RAM/graphics, Stereo, NTSC).
 using StereoCaps = a::Platform<
-    a::Machine::XL, a::RAM::Baseline, a::Graphics::Baseline,
+    a::Machine::XL, a::RAM::Baseline, a::gfx::Baseline,
     a::Sound::Stereo, a::TV::NTSC>::capabilities;
 
 // ── Compile-time checks ──────────────────────────────────────────────
@@ -37,6 +37,29 @@ static_assert(ExpandedXECaps::extended_ram_bytes > 0,     "ExpandedXE extended R
 static_assert(FullUpgradeCaps::has_blitter == true,       "FullUpgrade has VBXE blitter");
 static_assert(FullUpgradeCaps::has_extended_sound == true, "FullUpgrade has PokeyMax");
 static_assert(FullUpgradeCaps::has_network == true,       "FullUpgrade has network");
+
+// 3a. FullUpgrade: the VBXE graphics type-axis drives the extended-graphics caps.
+static_assert(FullUpgradeCaps::has_vram == true,              "FullUpgrade has VRAM");
+static_assert(FullUpgradeCaps::vram_bytes == 524288u,         "FullUpgrade has 512KB VRAM");
+static_assert(FullUpgradeCaps::has_overlay == true,           "FullUpgrade has overlay");
+static_assert(FullUpgradeCaps::overlay_colors == 256,         "FullUpgrade overlay 256c");
+static_assert(FullUpgradeCaps::has_overlay_text_mode == true, "FullUpgrade overlay text");
+static_assert(FullUpgradeCaps::has_overlay_collision == true, "FullUpgrade overlay collide");
+static_assert(FullUpgradeCaps::has_palette == true,           "FullUpgrade has palette");
+static_assert(FullUpgradeCaps::palette_count == 4,            "FullUpgrade has 4 palettes");
+static_assert(FullUpgradeCaps::colors_per_palette == 256,     "FullUpgrade 256c/palette");
+
+// 3b. StockXL (baseline graphics): every extended-graphics cap is absent/zero.
+static_assert(StockXLCaps::has_vram == false,              "StockXL has no VRAM");
+static_assert(StockXLCaps::vram_bytes == 0u,               "StockXL VRAM bytes 0");
+static_assert(StockXLCaps::has_overlay == false,           "StockXL has no overlay");
+static_assert(StockXLCaps::overlay_colors == 0,            "StockXL overlay colors 0");
+static_assert(StockXLCaps::has_overlay_text_mode == false, "StockXL no overlay text");
+static_assert(StockXLCaps::has_overlay_collision == false, "StockXL no overlay collide");
+static_assert(StockXLCaps::has_palette == false,           "StockXL has no palette");
+static_assert(StockXLCaps::palette_count == 0,             "StockXL palette count 0");
+static_assert(StockXLCaps::colors_per_palette == 0,        "StockXL colors/palette 0");
+static_assert(StockXLCaps::has_blitter == false,           "StockXL has no blitter");
 
 // 4. Custom Stereo platform reports 8 voices.
 static_assert(StereoCaps::sound_voices == 8,              "Stereo has 8 voices");
@@ -75,6 +98,23 @@ static void test_full_upgrade() {
     CHECK(FullUpgradeCaps::has_blitter == true);
     CHECK(FullUpgradeCaps::has_extended_sound == true);
     CHECK(FullUpgradeCaps::has_network == true);
+
+    // VBXE graphics type-axis drives the extended-graphics caps.
+    CHECK(FullUpgradeCaps::has_vram == true);
+    CHECK(FullUpgradeCaps::vram_bytes == 524288u);
+    CHECK(FullUpgradeCaps::has_overlay == true);
+    CHECK(FullUpgradeCaps::overlay_colors == 256);
+    CHECK(FullUpgradeCaps::has_overlay_text_mode == true);
+    CHECK(FullUpgradeCaps::has_overlay_collision == true);
+    CHECK(FullUpgradeCaps::has_palette == true);
+    CHECK(FullUpgradeCaps::palette_count == 4);
+    CHECK(FullUpgradeCaps::colors_per_palette == 256);
+
+    // Baseline graphics: extended-graphics caps absent.
+    CHECK(StockXLCaps::has_vram == false);
+    CHECK(StockXLCaps::has_overlay == false);
+    CHECK(StockXLCaps::has_palette == false);
+    CHECK(StockXLCaps::has_blitter == false);
 }
 
 static void test_custom_stereo() {
