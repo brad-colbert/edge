@@ -174,6 +174,7 @@ Important contract:
 
 Today, the `Mode` type comes from the Atari backend (`atari::Mode`); the region templates take it as a
 backend mode token and derive geometry through `engine::display::traits<ModeT>`.
+NOTE: This has been abstracted.  doc needs update.
 
 ### ScreenSet
 
