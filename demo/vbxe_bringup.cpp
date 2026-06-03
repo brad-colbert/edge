@@ -148,8 +148,11 @@ static void clear_text() {
 }
 
 // Diagnostic mode: 0 = colour bars, 1 = solid fill, 2 = VRAM round-trip probe.
-// (Set to 2 to confirm the interleave fix prints MISMATCHES 0; 0 is the default.)
+// Override at configure time with `cmake -DEDGE_VBXE_BRINGUP_MODE=N` (which passes
+// -DVBXE_BRINGUP_MODE=N to the compiler); defaults to 0 (colour bars).
+#ifndef VBXE_BRINGUP_MODE
 #define VBXE_BRINGUP_MODE 0
+#endif
 
 int main() {
     // Bring up the overlay: MEMAC window, cleared (transparent) framebuffer,

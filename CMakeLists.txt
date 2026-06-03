@@ -29,6 +29,12 @@ option(EDGE_BUILD_DEMO
        "Build the Atari .xex demo via add_executable (atari8-dos toolchain only)"
        OFF)
 
+# Diagnostic mode for the atari_vbxe_bringup demo: 0 = colour bars, 1 = solid
+# fill, 2 = VRAM round-trip probe. Passed to the compiler as -DVBXE_BRINGUP_MODE.
+set(EDGE_VBXE_BRINGUP_MODE 0
+    CACHE STRING
+    "atari_vbxe_bringup diagnostic mode (0=bars, 1=solid, 2=probe)")
+
 set(EDGE_DEMO_CHARSET_BIN
     ${CMAKE_SOURCE_DIR}/demo/TEST.FNT
     CACHE FILEPATH
@@ -78,6 +84,8 @@ if(EDGE_BUILD_DEMO)
     add_executable(atari_vbxe_bringup demo/vbxe_bringup.cpp)
     target_compile_options(atari_vbxe_bringup PRIVATE
         -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra)
+    target_compile_definitions(atari_vbxe_bringup PRIVATE
+        VBXE_BRINGUP_MODE=${EDGE_VBXE_BRINGUP_MODE})
     target_include_directories(atari_vbxe_bringup PRIVATE ${CMAKE_SOURCE_DIR})
     set_target_properties(atari_vbxe_bringup PROPERTIES OUTPUT_NAME "atari_vbxe_bringup.xex")
     target_link_options(atari_vbxe_bringup PRIVATE
@@ -154,21 +162,31 @@ if(MOS_ATARI8_CXX)
     add_custom_target(atari_scroll_test DEPENDS ${SCROLL_TEST_XEX})
 
     # ── VBXE Phase 4a bring-up smoke test (atari_vbxe_bringup.xex) ───────
+    #   cmake -B build -DEDGE_VBXE_BRINGUP_MODE=2 ...   # 0=bars, 1=solid, 2=probe
     #   cmake --build build --target atari_vbxe_bringup  # -> build/atari_vbxe_bringup.xex
     set(VBXE_BRINGUP_XEX ${CMAKE_BINARY_DIR}/atari_vbxe_bringup.xex)
     set(VBXE_BRINGUP_MAP ${CMAKE_BINARY_DIR}/atari_vbxe_bringup.map)
+    # The Make generator doesn't re-run a custom command when only its command
+    # line (the -DVBXE_BRINGUP_MODE value) changes. file(GENERATE) rewrites this
+    # stamp only when the mode actually changes, so depending on it rebuilds the
+    # .xex exactly when needed.
+    set(VBXE_BRINGUP_MODE_STAMP ${CMAKE_BINARY_DIR}/atari_vbxe_bringup_mode.stamp)
+    file(GENERATE OUTPUT ${VBXE_BRINGUP_MODE_STAMP}
+         CONTENT "${EDGE_VBXE_BRINGUP_MODE}")
     add_custom_command(
         OUTPUT ${VBXE_BRINGUP_XEX}
         COMMAND ${MOS_ATARI8_CXX}
                 -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra
+                -DVBXE_BRINGUP_MODE=${EDGE_VBXE_BRINGUP_MODE}
                 -I${CMAKE_SOURCE_DIR}
                 ${CMAKE_SOURCE_DIR}/demo/vbxe_bringup.cpp
                 -o ${VBXE_BRINGUP_XEX}
                 -Wl,--Map=${VBXE_BRINGUP_MAP}
         DEPENDS ${CMAKE_SOURCE_DIR}/demo/vbxe_bringup.cpp
                 ${EDGE_ENGINE_HEADERS}
+                ${VBXE_BRINGUP_MODE_STAMP}
         BYPRODUCTS ${VBXE_BRINGUP_MAP}
-        COMMENT "Building Atari XEX demo (atari_vbxe_bringup.xex)"
+        COMMENT "Building Atari XEX demo (atari_vbxe_bringup.xex, mode ${EDGE_VBXE_BRINGUP_MODE})"
         VERBATIM)
     add_custom_target(atari_vbxe_bringup DEPENDS ${VBXE_BRINGUP_XEX})
 else()
