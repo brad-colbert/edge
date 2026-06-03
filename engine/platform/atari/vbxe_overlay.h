@@ -74,14 +74,25 @@ struct OverlayHal {
     // Dirty-rect bookkeeping: each frame erases the small rects the previous frame
     // drew (cheap, vs a full-screen clear) and records this frame's rects for the
     // next erase. kMaxRects*2 BCBs (erase + draw) must fit the queue.
+    //
+    // Used for single-buffer (any background) AND double-buffer in Background::Bitmap
+    // mode (where a full-screen master->back copy every frame would keep the blitter
+    // busy the whole frame and starve CPU VRAM access). Double-buffer Flat keeps the
+    // simpler full clear. Because a double-buffer page is recomposed only every other
+    // frame, each page carries its own prev-rect list (prev_[page]); single-buffer
+    // uses index 0 only.
     static constexpr u8 kMaxRects = 8;
     static_assert(kMaxRects * 2 <= 16,
         "erase+draw BCBs (one each per rect) must fit BlitterQueue<16>");
     struct Rect { u32 dest; u8 w, h; };
-    static inline Rect prev_[kMaxRects] = {};
-    static inline Rect cur_[kMaxRects]  = {};
-    static inline u8   prev_count_ = 0;
-    static inline u8   cur_count_  = 0;
+    static inline Rect prev_[2][kMaxRects] = {};
+    static inline Rect cur_[kMaxRects]     = {};
+    static inline u8   prev_count_[2] = { 0, 0 };
+    static inline u8   cur_count_     = 0;
+
+    // Whether the compositor restores per-rect (dirty-rect) rather than full-clearing
+    // the back page: always single-buffer; double-buffer only with a bitmap background.
+    static constexpr bool dirty_rect = (!double_buffered) || bitmap_bg;
 
     // Overlay clear/erase colour. 0 = transparent (ANTIC shows through); a non-zero
     // opaque index makes the overlay a solid field. The per-frame clear and the
@@ -108,6 +119,13 @@ struct OverlayHal {
         else                     return back_fb();
     }
 
+    // Index (0 = fb_a, 1 = fb_b) of the page being composed this frame, for the
+    // per-page dirty-rect lists. Single-buffer is always page 0.
+    static u8 compose_page_idx() {
+        if constexpr (double_buffered) return (back_fb() == Layout::fb_a) ? 0 : 1;
+        else                           return 0;
+    }
+
     // Build a full-screen XDL for framebuffer at `fb_addr` and upload it to `dest`.
     static void build_and_upload_xdl(u32 fb_addr, u32 dest) {
         u8 buf[24];
@@ -131,6 +149,18 @@ struct OverlayHal {
 
     // Fill one whole framebuffer page with a solid colour.
     static void blit_fill(u32 dest, u8 color) { blit_rect(dest, fb_stride, fb_height, color); }
+
+    // Spin until the blitter is idle. The bitmap seams below write VRAM through the
+    // MEMAC window (CPU side); in Background::Bitmap mode the compositor blits the
+    // whole master to the back page asynchronously every frame, reading the master.
+    // A CPU MEMAC write to the master while that copy is in flight is lost (the
+    // blitter has the VRAM bus), so each MEMAC draw waits for idle first — under an
+    // NmiGuard, so the VBI can't start a new compositor blit between the wait and
+    // the write. (When the blitter is already idle this returns at once.)
+    static void wait_blitter_idle() {
+        for (u16 spin = 0; spin < 50000; ++spin)
+            if (!queue_.template busy<Config>()) break;
+    }
 
     // Opaque VRAM->VRAM copy of one whole framebuffer page (src -> dest).
     // Synchronous, like blit_fill: NmiGuard makes it safe after the VBI is armed.
@@ -218,40 +248,37 @@ struct OverlayHal {
         next_shape_ += bytes;
     }
 
-    // Start a frame's overlay composition. Double-buffered: clear the whole hidden
-    // back page to the background colour (cheap to do, invisible until the flip).
-    // Single-buffered: erase only the rects the previous frame drew (a full clear
-    // would be visible and would race the async blitter), then begin recording
-    // this frame's rects.
-    // In sprites-over-bitmap mode the erase is a master->framebuffer copy (restore
-    // the background) instead of a flat clear: double-buffer copies the whole master
-    // to the back page; single-buffer copies only the previous frame's footprints.
+    // Start a frame's overlay composition. Double-buffer Flat: clear the whole hidden
+    // back page to the background colour (cheap, invisible until the flip). Everything
+    // else (single-buffer, and double-buffer Bitmap) erases only the rects drawn the
+    // last time THIS page was composed — a full clear/copy would race the async blitter
+    // and (in Bitmap mode) keep the blitter busy the whole frame, starving CPU VRAM
+    // draws. In Bitmap mode the erase is a master->page copy (restore the background);
+    // otherwise a flat clear to bg_color_. Then begin recording this frame's rects.
     static void overlay_frame_begin() {
         queue_.reset();
-        if constexpr (double_buffered) {
-            if constexpr (bitmap_bg)
-                queue_.push(vbxe::bcb_copy(Layout::master, back_fb(),
-                                           fb_stride, fb_height, fb_stride, fb_stride));
-            else
-                queue_.push(vbxe::bcb_clear(back_fb(), fb_stride, fb_height,
-                                            fb_stride, bg_color_));
+        if constexpr (!dirty_rect) {
+            queue_.push(vbxe::bcb_clear(back_fb(), fb_stride, fb_height,
+                                        fb_stride, bg_color_));
         } else {
-            for (u8 i = 0; i < prev_count_; ++i) {
+            const u8  pidx = compose_page_idx();
+            const u32 page = back_fb();
+            for (u8 i = 0; i < prev_count_[pidx]; ++i) {
+                const Rect& r = prev_[pidx][i];
                 if constexpr (bitmap_bg)
                     queue_.push(vbxe::bcb_copy(
-                        Layout::master + (prev_[i].dest - Layout::fb_a), prev_[i].dest,
-                        prev_[i].w, prev_[i].h, fb_stride, fb_stride));
+                        Layout::master + (r.dest - page), r.dest,
+                        r.w, r.h, fb_stride, fb_stride));
                 else
-                    queue_.push(vbxe::bcb_clear(prev_[i].dest, prev_[i].w, prev_[i].h,
-                                                fb_stride, bg_color_));
+                    queue_.push(vbxe::bcb_clear(r.dest, r.w, r.h, fb_stride, bg_color_));
             }
             cur_count_ = 0;
         }
     }
 
     // Queue one sprite blit into the back buffer at (x, y). Packed1bpp uses the
-    // AND-mask to colour the instance; Pixel8bpp carries its own colours. Single-
-    // buffered also records the rect so the next frame erases it.
+    // AND-mask to colour the instance; Pixel8bpp carries its own colours. Dirty-rect
+    // modes also record the footprint so the next compose of this page erases it.
     static void overlay_blit_sprite(const u8* rom, u8 x, u8 y, u8 color) {
         const ShapeEntry* e = find_shape(rom);
         if (!e) return;
@@ -261,7 +288,7 @@ struct OverlayHal {
         else
             queue_.push(vbxe::bcb_sprite_colored(e->vram, dest, e->w, e->h,
                                                  e->w, fb_stride, color));
-        if constexpr (!double_buffered)
+        if constexpr (dirty_rect)
             if (cur_count_ < kMaxRects) cur_[cur_count_++] = Rect{ dest, e->w, e->h };
     }
 
@@ -275,10 +302,12 @@ struct OverlayHal {
     static void overlay_submit() {
         queue_.template submit<Config>();
         queue_.reset();
-        // Single-buffered: this frame's drawn rects become next frame's erase list.
-        if constexpr (!double_buffered) {
-            for (u8 i = 0; i < cur_count_; ++i) prev_[i] = cur_[i];
-            prev_count_ = cur_count_;
+        // Dirty-rect modes: this frame's drawn rects become this page's next erase
+        // list (recomposed next frame for single-buffer, in two frames for double).
+        if constexpr (dirty_rect) {
+            const u8 pidx = compose_page_idx();
+            for (u8 i = 0; i < cur_count_; ++i) prev_[pidx][i] = cur_[i];
+            prev_count_[pidx] = cur_count_;
         }
     }
 
@@ -324,13 +353,25 @@ struct OverlayHal {
         blit_rect(dest, w, static_cast<u8>(h), color);
     }
 
+    // Plot via the blitter (a 1x1 fill), NOT a per-pixel MEMAC write. The blitter
+    // addresses VRAM linearly (no MEMAC bank switching) and blit_rect is self-
+    // serialising (NmiGuard + wait-for-idle), so a per-pixel draw can't land in the
+    // wrong bank or race the async compositor copy of the master. (A per-pixel MEMAC
+    // write interleaved with the VBI compositor lands in a wrong bank — scattered
+    // pixels across VRAM.) 1-wide fills are proven by hline/vline.
     static void overlay_bitmap_plot(u16 x, u16 y, u8 color) {
-        Memac::write(canvas_fb() + static_cast<u32>(y) * fb_stride + x, &color, 1);
+        const u32 dest = canvas_fb() + static_cast<u32>(y) * fb_stride + x;
+        blit_rect(dest, 1, 1, color);
     }
 
-    // Copy a w×h 8bpp source image (row-packed, stride == w) into the canvas.
+    // Copy a w×h 8bpp source image (row-packed, stride == w) into the canvas. The
+    // source is CPU RAM, so this must go through the MEMAC window (the blitter reads
+    // VRAM only). One NmiGuard spans all rows (no VBI interleave), and we wait for
+    // the blitter to be idle first so we never upload to the master while the
+    // compositor copy is reading it.
     static void overlay_bitmap_blit(u16 x, u16 y, const u8* src, u16 w, u16 h) {
         NmiGuard cs;
+        wait_blitter_idle();
         const u32 base = canvas_fb() + static_cast<u32>(y) * fb_stride + x;
         for (u16 r = 0; r < h; ++r)
             Memac::write(base + static_cast<u32>(r) * fb_stride,
