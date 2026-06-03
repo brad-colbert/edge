@@ -44,9 +44,20 @@ using VbxeTextPlatform = M::Platform<
     M::gfx::VBXE<atari::vbxe::Config<atari::vbxe::Mode::Text_80>>,
     M::Sound::Mono, M::TV::NTSC>;
 
+// VBXE in sprites-over-bitmap mode (double-buffered, Background::Bitmap):
+// exercises the master-canvas compositor + publish seam path.
+using VbxeBmpPlatform = M::Platform<
+    M::Machine::XL, M::RAM::U1MB,
+    M::gfx::VBXE<atari::vbxe::Config<
+        atari::vbxe::Mode::SR_320, atari::vbxe::Buffers::Double,
+        atari::vbxe::RegBase::D640, atari::vbxe::MEMAC_A, 0x00000,
+        atari::vbxe::Background::Bitmap>>,
+    M::Sound::Mono, M::TV::NTSC>;
+
 using BaselineGame = Core<BaselinePlatform, GameConfig>;
 using VbxeGame     = Core<VbxePlatform, GameConfig>;
 using VbxeTextGame = Core<VbxeTextPlatform, GameConfig>;
+using VbxeBmpGame  = Core<VbxeBmpPlatform, GameConfig>;
 
 // The capability axis must drive the two paths apart at compile time.
 static_assert(VbxePlatform::capabilities::has_blitter,          "VBXE has the blitter path");
@@ -64,6 +75,10 @@ static fn_t   volatile g_sink_vbxe_frame = &VbxeGame::frame_service;
 static fn_u8t volatile g_sink_vbxe_bg    = static_cast<fn_u8t>(&VbxeGame::set_overlay_background);
 static fn_t   volatile g_sink_base_init  = static_cast<fn_t>(&BaselineGame::init);
 static fn_t   volatile g_sink_base_frame = &BaselineGame::frame_service;
+// sprites-over-bitmap: instantiate the Bitmap-mode Core + the publish seam.
+static fn_t   volatile g_sink_vbxe_bmp_init    = static_cast<fn_t>(&VbxeBmpGame::init);
+static fn_t   volatile g_sink_vbxe_bmp_frame   = &VbxeBmpGame::frame_service;
+static fn_t   volatile g_sink_vbxe_bmp_publish = &VbxeBmpGame::overlay_publish_background;
 
 // Overlay text-mode forwarders (compile the Text_80 seam path; never run — MMIO).
 static void touch_vbxe_text() {
@@ -92,6 +107,9 @@ int main() {
     CHECK(g_sink_vbxe_text  != nullptr);
     CHECK(g_sink_base_init  != nullptr);
     CHECK(g_sink_base_frame != nullptr);
+    CHECK(g_sink_vbxe_bmp_init    != nullptr);
+    CHECK(g_sink_vbxe_bmp_frame   != nullptr);
+    CHECK(g_sink_vbxe_bmp_publish != nullptr);
 
     // Overlay accessors default to zero before any frame service runs.
     CHECK(VbxeGame::overlay_collision() == 0);

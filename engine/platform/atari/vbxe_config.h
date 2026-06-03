@@ -35,6 +35,12 @@ enum class Mode : uint8_t { SR_320, HR_640, LR_160, Text_80 };
 // Framebuffer double-buffering policy.
 enum class Buffers : uint8_t { Single, Double };
 
+// Background composition policy. Flat: sprites are composed over (and erased back
+// to) a single solid colour. Bitmap: sprites are composed over a drawn bitmap
+// kept in a VRAM "master" canvas, and their footprints are restored from it each
+// frame so the background survives under moving sprites (sprites-over-bitmap).
+enum class Background : uint8_t { Flat, Bitmap };
+
 // MEMAC window size (these values are the hardware MEMAC_CONTROL SIZE bits, not
 // byte counts — 00=4K, 01=8K, 10=16K, 11=32K; the byte size is derived later).
 // MEMAC-A and MEMAC-B are mutually exclusive window choices (never both):
@@ -57,7 +63,8 @@ template <
     Buffers    BufferPolicy = Buffers::Single,
     RegBase    Base = RegBase::D640,
     typename   MemacCfg = MEMAC_A,
-    uint32_t   VRAMOffset = 0x00000    // for SDX VBXE driver coexistence
+    uint32_t   VRAMOffset = 0x00000,   // for SDX VBXE driver coexistence
+    Background Bg = Background::Flat
 >
 struct Config {
     static constexpr Mode    overlay_mode  = OverlayMode;
@@ -65,6 +72,7 @@ struct Config {
     static constexpr RegBase reg_base      = Base;
     using memac = MemacCfg;
     static constexpr uint32_t vram_offset  = VRAMOffset;
+    static constexpr Background background  = Bg;
 
     // Derived: framebuffer size in bytes
     static constexpr uint32_t fb_width =

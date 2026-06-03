@@ -29,6 +29,11 @@ using Cfg8K      = v::Config<v::Mode::SR_320, v::Buffers::Single, v::RegBase::D6
                              v::MEMAC_A_Cfg<0xB0, v::WindowSize::_8K>>;
 using CfgB       = v::Config<v::Mode::SR_320, v::Buffers::Single, v::RegBase::D640, v::MEMAC_B>;
 using CfgDouble  = v::Config<v::Mode::SR_320, v::Buffers::Double>;
+// sprites-over-bitmap: Background::Bitmap adds a master canvas (one framebuffer).
+using CfgBmp     = v::Config<v::Mode::SR_320, v::Buffers::Single, v::RegBase::D640,
+                             v::MEMAC_A, 0x00000, v::Background::Bitmap>;
+using CfgBmpDbl  = v::Config<v::Mode::SR_320, v::Buffers::Double, v::RegBase::D640,
+                             v::MEMAC_A, 0x00000, v::Background::Bitmap>;
 
 // ── 1. Register addressing off reg_base ──────────────────────────────
 static_assert(v::Regs<CfgDefault>::base == 0xD640,                 "default base $D640");
@@ -76,8 +81,10 @@ static_assert((0x12345u >> v::MemacWindow<CfgB>::Window::bank_shift) == 0x4,
                                                                    "0x12345 -> bank 4 @16K");
 
 // ── 4. VRAM layout ───────────────────────────────────────────────────
-using LDef = v::VRAMLayout<CfgDefault>;
-using LDbl = v::VRAMLayout<CfgDouble>;
+using LDef    = v::VRAMLayout<CfgDefault>;
+using LDbl    = v::VRAMLayout<CfgDouble>;
+using LBmp    = v::VRAMLayout<CfgBmp>;
+using LBmpDbl = v::VRAMLayout<CfgBmpDbl>;
 
 // NB: 320u*240u would overflow 16-bit `unsigned int` on the mos target; use a
 // literal large enough to be typed as a 32-bit unsigned.
@@ -93,6 +100,20 @@ static_assert(LDbl::fb_b_size == CfgDouble::fb_bytes,     "double-buffer: fb_b s
 static_assert(LDbl::shapes == LDef::shapes + CfgDouble::fb_bytes,
                                                           "double-buffer shifts shapes by fb");
 static_assert(LDbl::shapes_size < LDef::shapes_size,      "double-buffer shrinks shapes area");
+// Flat background (default): no master region; it coincides with shapes start.
+static_assert(LDef::master_size == 0,                    "flat: no master region");
+static_assert(LDef::master == LDef::shapes,              "flat: master coincides w/ shapes");
+// Bitmap single: master is one framebuffer, between fb_b (==fb_a end) and shapes.
+static_assert(LBmp::master_size == CfgBmp::fb_bytes,     "bitmap: master sized one fb");
+static_assert(LBmp::master == LBmp::fb_b,                "bitmap single: master after fb_a");
+static_assert(LBmp::shapes == LBmp::master + CfgBmp::fb_bytes, "bitmap: shapes after master");
+static_assert(LBmp::fonts + LBmp::fonts_size <= LBmp::vram_size, "bitmap layout fits 512KB");
+// Bitmap double: fb_a, fb_b and master all present, in order.
+static_assert(LBmpDbl::fb_b_size == CfgBmpDbl::fb_bytes, "bitmap double: fb_b sized");
+static_assert(LBmpDbl::master == LBmpDbl::fb_b + CfgBmpDbl::fb_bytes,
+                                                         "bitmap double: master after fb_b");
+static_assert(LBmpDbl::fonts + LBmpDbl::fonts_size <= LBmpDbl::vram_size,
+                                                         "bitmap double layout fits 512KB");
 
 // ── 5. Blitter: BCB packing + builders ───────────────────────────────
 static_assert(sizeof(v::BCB) == 21, "BCB is 21 bytes");
@@ -138,6 +159,20 @@ static_assert((kSprC.blt_control & 0x07) == v::blt_mode::TRANSPARENT, "colored s
 static_assert(kSprC.blt_width[0] == 0x07 && kSprC.blt_width[1] == 0x00, "colored sprite: width-1 = 7");
 static_assert(kSprC.dest_step_y[0] == 0x40 && kSprC.dest_step_y[1] == 0x01,
                                                       "colored sprite: dest step_y = dest_stride 320");
+
+// bcb_copy: opaque VRAM->VRAM copy (real source and_mask 0xFF, COPY + NEXT). Used
+// by sprites-over-bitmap to restore footprints from the master. step_y = stride.
+constexpr v::BCB kCopy = v::bcb_copy(0x30000u, 0x00000u, 16, 8, 320, 320);
+static_assert(kCopy.blt_and_mask == 0xFF,                            "copy: real source");
+static_assert(kCopy.blt_xor_mask == 0x00,                            "copy: no xor");
+static_assert((kCopy.blt_control & 0x07) == v::blt_mode::COPY,       "copy: COPY mode");
+static_assert((kCopy.blt_control & v::blt_mode::NEXT) != 0,          "copy: NEXT set");
+static_assert(kCopy.blt_width[0] == 0x0F && kCopy.blt_width[1] == 0x00, "copy: width-1 = 15");
+static_assert(kCopy.blt_height == 7,                                 "copy: height-1 = 7");
+static_assert(kCopy.source_step_y[0] == 0x40 && kCopy.source_step_y[1] == 0x01,
+                                                      "copy: source step_y = stride 320");
+static_assert(kCopy.dest_step_y[0] == 0x40 && kCopy.dest_step_y[1] == 0x01,
+                                                      "copy: dest step_y = stride 320");
 
 // ── 6. XDL byte layout (full-screen SR_320) ──────────────────────────
 struct XdlResult { v::u8 buf[24]; v::u8 len; };
@@ -230,6 +265,13 @@ static void test_layout() {
     CHECK(LDef::fonts + LDef::fonts_size <= LDef::vram_size);
     CHECK(LDbl::fb_b_size == CfgDouble::fb_bytes);
     CHECK(LDbl::shapes_size < LDef::shapes_size);
+    // sprites-over-bitmap master region.
+    CHECK(LDef::master_size == 0);
+    CHECK(LDef::master == LDef::shapes);
+    CHECK(LBmp::master_size == CfgBmp::fb_bytes);
+    CHECK(LBmp::master == LBmp::fb_b);
+    CHECK(LBmp::shapes == LBmp::master + CfgBmp::fb_bytes);
+    CHECK(LBmpDbl::master == LBmpDbl::fb_b + CfgBmpDbl::fb_bytes);
 }
 
 static void test_blitter() {
@@ -238,6 +280,8 @@ static void test_blitter() {
     CHECK(kClear.blt_xor_mask == 0x2A);
     CHECK((kClear.blt_control & v::blt_mode::NEXT) != 0);
     CHECK(kSpr.blt_and_mask == 0xFF);
+    CHECK(kCopy.blt_and_mask == 0xFF);
+    CHECK((kCopy.blt_control & 0x07) == v::blt_mode::COPY);
 
     // BlitterQueue push/full/reset (pure RAM, no MMIO).
     v::BlitterQueue<2> q;

@@ -42,6 +42,11 @@ struct OverlayHal {
     static constexpr u8  fb_height = 240;                       // overlay scanlines
     static constexpr bool double_buffered =
         (Config::buffer_policy == vbxe::Buffers::Double);
+    // sprites-over-bitmap: compose over (and restore from) a VRAM master canvas
+    // instead of a flat colour. Drawing targets the master; the compositor copies
+    // master->framebuffer under sprite footprints rather than clearing to bg_color_.
+    static constexpr bool bitmap_bg =
+        (Config::background == vbxe::Background::Bitmap);
 
     // Two XDL copies in the reserved XDL region (single-buffer uses only the first).
     static constexpr u32 xdl_a = Layout::xdl;
@@ -70,6 +75,8 @@ struct OverlayHal {
     // drew (cheap, vs a full-screen clear) and records this frame's rects for the
     // next erase. kMaxRects*2 BCBs (erase + draw) must fit the queue.
     static constexpr u8 kMaxRects = 8;
+    static_assert(kMaxRects * 2 <= 16,
+        "erase+draw BCBs (one each per rect) must fit BlitterQueue<16>");
     struct Rect { u32 dest; u8 w, h; };
     static inline Rect prev_[kMaxRects] = {};
     static inline Rect cur_[kMaxRects]  = {};
@@ -92,6 +99,13 @@ struct OverlayHal {
     static u32 back_fb() {
         if constexpr (double_buffered) return active_fb_ ? Layout::fb_a : Layout::fb_b;
         else                           return Layout::fb_a;
+    }
+
+    // The canvas the bitmap-drawing seams target: the master in sprites-over-bitmap
+    // mode (the game draws the background there), else the live back buffer.
+    static u32 canvas_fb() {
+        if constexpr (bitmap_bg) return Layout::master;
+        else                     return back_fb();
     }
 
     // Build a full-screen XDL for framebuffer at `fb_addr` and upload it to `dest`.
@@ -118,6 +132,18 @@ struct OverlayHal {
     // Fill one whole framebuffer page with a solid colour.
     static void blit_fill(u32 dest, u8 color) { blit_rect(dest, fb_stride, fb_height, color); }
 
+    // Opaque VRAM->VRAM copy of one whole framebuffer page (src -> dest).
+    // Synchronous, like blit_fill: NmiGuard makes it safe after the VBI is armed.
+    static void blit_copy(u32 src, u32 dest) {
+        NmiGuard cs;
+        queue_.reset();
+        queue_.push(vbxe::bcb_copy(src, dest, fb_stride, fb_height, fb_stride, fb_stride));
+        queue_.template submit<Config>();
+        for (u16 spin = 0; spin < 50000; ++spin)
+            if (!queue_.template busy<Config>()) break;
+        queue_.reset();
+    }
+
     // ── Neutral seams the engine calls (gated by caps in core.h) ──
 
     // One-time bring-up: open the MEMAC window, clear the framebuffer(s) to black,
@@ -137,10 +163,27 @@ struct OverlayHal {
 
     // Set the overlay background colour and paint the framebuffer(s) with it now,
     // so the field is opaque immediately (and stays so under dirty-rect erasing).
+    // In sprites-over-bitmap mode the colour is the master canvas's base fill: we
+    // fill the master and publish it to the display page(s).
     static void overlay_set_background(u8 color) {
         bg_color_ = color;
-        blit_fill(Layout::fb_a, color);
-        if constexpr (double_buffered) blit_fill(Layout::fb_b, color);
+        if constexpr (bitmap_bg) {
+            blit_fill(Layout::master, color);
+            overlay_publish_background();
+        } else {
+            blit_fill(Layout::fb_a, color);
+            if constexpr (double_buffered) blit_fill(Layout::fb_b, color);
+        }
+    }
+
+    // Publish the master canvas to the live display page(s). The game calls this
+    // after drawing the background via the bitmap seams (and after any dynamic
+    // edit) to seed/refresh what is shown. No-op outside sprites-over-bitmap mode.
+    static void overlay_publish_background() {
+        if constexpr (bitmap_bg) {
+            blit_copy(Layout::master, Layout::fb_a);
+            if constexpr (double_buffered) blit_copy(Layout::master, Layout::fb_b);
+        }
     }
 
     // ── Sprite seams (called from the generic SpriteManager) ──
@@ -180,15 +223,28 @@ struct OverlayHal {
     // Single-buffered: erase only the rects the previous frame drew (a full clear
     // would be visible and would race the async blitter), then begin recording
     // this frame's rects.
+    // In sprites-over-bitmap mode the erase is a master->framebuffer copy (restore
+    // the background) instead of a flat clear: double-buffer copies the whole master
+    // to the back page; single-buffer copies only the previous frame's footprints.
     static void overlay_frame_begin() {
         queue_.reset();
         if constexpr (double_buffered) {
-            queue_.push(vbxe::bcb_clear(back_fb(), fb_stride, fb_height,
-                                        fb_stride, bg_color_));
-        } else {
-            for (u8 i = 0; i < prev_count_; ++i)
-                queue_.push(vbxe::bcb_clear(prev_[i].dest, prev_[i].w, prev_[i].h,
+            if constexpr (bitmap_bg)
+                queue_.push(vbxe::bcb_copy(Layout::master, back_fb(),
+                                           fb_stride, fb_height, fb_stride, fb_stride));
+            else
+                queue_.push(vbxe::bcb_clear(back_fb(), fb_stride, fb_height,
                                             fb_stride, bg_color_));
+        } else {
+            for (u8 i = 0; i < prev_count_; ++i) {
+                if constexpr (bitmap_bg)
+                    queue_.push(vbxe::bcb_copy(
+                        Layout::master + (prev_[i].dest - Layout::fb_a), prev_[i].dest,
+                        prev_[i].w, prev_[i].h, fb_stride, fb_stride));
+                else
+                    queue_.push(vbxe::bcb_clear(prev_[i].dest, prev_[i].w, prev_[i].h,
+                                                fb_stride, bg_color_));
+            }
             cur_count_ = 0;
         }
     }
@@ -261,21 +317,21 @@ struct OverlayHal {
     // page — and are synchronous (blitter rect fills) or direct (MEMAC pixel/row
     // writes), each VBI-atomic via the NmiGuard in blit_rect / Memac.
 
-    static void overlay_bitmap_clear(u8 color) { blit_fill(back_fb(), color); }
+    static void overlay_bitmap_clear(u8 color) { blit_fill(canvas_fb(), color); }
 
     static void overlay_bitmap_fill_rect(u16 x, u16 y, u16 w, u16 h, u8 color) {
-        const u32 dest = back_fb() + static_cast<u32>(y) * fb_stride + x;
+        const u32 dest = canvas_fb() + static_cast<u32>(y) * fb_stride + x;
         blit_rect(dest, w, static_cast<u8>(h), color);
     }
 
     static void overlay_bitmap_plot(u16 x, u16 y, u8 color) {
-        Memac::write(back_fb() + static_cast<u32>(y) * fb_stride + x, &color, 1);
+        Memac::write(canvas_fb() + static_cast<u32>(y) * fb_stride + x, &color, 1);
     }
 
     // Copy a w×h 8bpp source image (row-packed, stride == w) into the canvas.
     static void overlay_bitmap_blit(u16 x, u16 y, const u8* src, u16 w, u16 h) {
         NmiGuard cs;
-        const u32 base = back_fb() + static_cast<u32>(y) * fb_stride + x;
+        const u32 base = canvas_fb() + static_cast<u32>(y) * fb_stride + x;
         for (u16 r = 0; r < h; ++r)
             Memac::write(base + static_cast<u32>(r) * fb_stride,
                          src + static_cast<u32>(r) * w, w);
@@ -347,6 +403,7 @@ struct NullOverlay {
     static void overlay_frame_begin() {}
     static void overlay_blit_sprite(const u8*, u8, u8, u8) {}
     static void overlay_set_background(u8) {}
+    static void overlay_publish_background() {}
     static void overlay_bitmap_clear(u8) {}
     static void overlay_bitmap_fill_rect(u16, u16, u16, u16, u8) {}
     static void overlay_bitmap_plot(u16, u16, u8) {}

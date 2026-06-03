@@ -108,6 +108,15 @@ if(EDGE_BUILD_DEMO)
     set_target_properties(atari_vbxe_text PROPERTIES OUTPUT_NAME "atari_vbxe_text.xex")
     target_link_options(atari_vbxe_text PRIVATE
         "LINKER:--Map=$<TARGET_FILE_DIR:atari_vbxe_text>/atari_vbxe_text.map")
+
+    # VBXE sprites-over-bitmap demo — independent .xex.
+    add_executable(atari_vbxe_sprites demo/vbxe_sprites_over_bitmap.cpp)
+    target_compile_options(atari_vbxe_sprites PRIVATE
+        -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra)
+    target_include_directories(atari_vbxe_sprites PRIVATE ${CMAKE_SOURCE_DIR})
+    set_target_properties(atari_vbxe_sprites PROPERTIES OUTPUT_NAME "atari_vbxe_sprites.xex")
+    target_link_options(atari_vbxe_sprites PRIVATE
+        "LINKER:--Map=$<TARGET_FILE_DIR:atari_vbxe_sprites>/atari_vbxe_sprites.map")
     return()
 endif()
 
@@ -246,6 +255,25 @@ if(MOS_ATARI8_CXX)
         COMMENT "Building Atari XEX demo (atari_vbxe_text.xex)"
         VERBATIM)
     add_custom_target(atari_vbxe_text DEPENDS ${VBXE_TEXT_XEX})
+
+    # ── VBXE sprites-over-bitmap demo (atari_vbxe_sprites.xex) ───────────
+    #   cmake --build build --target atari_vbxe_sprites  # -> build/atari_vbxe_sprites.xex
+    set(VBXE_SPRITES_XEX ${CMAKE_BINARY_DIR}/atari_vbxe_sprites.xex)
+    set(VBXE_SPRITES_MAP ${CMAKE_BINARY_DIR}/atari_vbxe_sprites.map)
+    add_custom_command(
+        OUTPUT ${VBXE_SPRITES_XEX}
+        COMMAND ${MOS_ATARI8_CXX}
+                -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra
+                -I${CMAKE_SOURCE_DIR}
+                ${CMAKE_SOURCE_DIR}/demo/vbxe_sprites_over_bitmap.cpp
+                -o ${VBXE_SPRITES_XEX}
+                -Wl,--Map=${VBXE_SPRITES_MAP}
+        DEPENDS ${CMAKE_SOURCE_DIR}/demo/vbxe_sprites_over_bitmap.cpp
+                ${EDGE_ENGINE_HEADERS}
+        BYPRODUCTS ${VBXE_SPRITES_MAP}
+        COMMENT "Building Atari XEX demo (atari_vbxe_sprites.xex)"
+        VERBATIM)
+    add_custom_target(atari_vbxe_sprites DEPENDS ${VBXE_SPRITES_XEX})
 else()
     message(STATUS "mos-atari8-dos-clang++ not found; 'atari_hw_test'/'atari_scroll_test'/'atari_vbxe_bringup' demo targets unavailable")
 endif()

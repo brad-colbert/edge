@@ -33,9 +33,16 @@ struct VRAMLayout {
     static constexpr u32 fb_b_size =
         (Config::buffer_policy == Buffers::Double) ? Config::fb_bytes : 0;
 
-    // Shape/sprite data area: everything between the framebuffers and the fixed
-    // tail regions below.
-    static constexpr u32 shapes = fb_b + fb_b_size;
+    // Master bitmap canvas (only when Background::Bitmap): one framebuffer holding
+    // the authoritative background. sprites-over-bitmap draws here and restores
+    // sprite footprints from it. Zero-sized in Flat mode (coincides with shapes).
+    static constexpr u32 master = fb_b + fb_b_size;
+    static constexpr u32 master_size =
+        (Config::background == Background::Bitmap) ? Config::fb_bytes : 0;
+
+    // Shape/sprite data area: everything between the framebuffers/master and the
+    // fixed tail regions below.
+    static constexpr u32 shapes = master + master_size;
 
     // Fixed tail region sizes.
     static constexpr u32 xdl_size       = 2048;    // XDL (small)
@@ -63,9 +70,12 @@ struct VRAMLayout {
         "VRAM layout exceeds 512KB with current offset and buffer policy");
     static_assert(shapes <= shapes_end,
         "framebuffers + offset leave no room for shapes before the fixed tail");
-    // Single-buffered: framebuffer B is zero-sized and coincides with shapes.
-    static_assert(fb_b_size != 0 || fb_b == shapes,
-        "single-buffer layout: empty fb_b must coincide with shapes start");
+    // Single-buffered: framebuffer B is zero-sized and coincides with master.
+    static_assert(fb_b_size != 0 || fb_b == master,
+        "single-buffer layout: empty fb_b must coincide with master start");
+    // Flat background: the master region is zero-sized and coincides with shapes.
+    static_assert(master_size != 0 || master == shapes,
+        "flat-background layout: empty master must coincide with shapes start");
 };
 
 } // namespace atari::vbxe

@@ -217,6 +217,15 @@ public:
         Platform::hal::overlay_set_background(color);
     }
 
+    // Publish the background bitmap drawn via gfx() to the live display page(s).
+    // For sprites-over-bitmap configs (Background::Bitmap): the game draws the
+    // background with gfx() (which targets the VRAM master canvas), then calls this
+    // to seed/refresh what is shown; sprite footprints are then restored from the
+    // master each frame. No-op on platforms without an overlay or in Flat mode.
+    static void overlay_publish_background() {
+        Platform::hal::overlay_publish_background();
+    }
+
     // ── Overlay text mode (VBXE Text_80; no-op on platforms without it) ──
     // A dedicated text surface separate from the baseline ANTIC TextRegion API.
     // Chars are raw font indices (no screen-code remap); `attr` is the cell colour
