@@ -193,13 +193,15 @@ public:
 
     // ── Overlay (extended-graphics) frame controls ──
     //
-    // Request a back/front buffer swap on the next frame service. Available only
-    // on platforms with double-buffered VRAM overlays; the swap itself is done by
-    // the backend in frame_service().
-    static void flip() {
-        static_assert(engine::caps_of_t<Platform>::has_vram,
-                      "flip() requires a platform with VRAM (e.g. VBXE)");
-        flip_requested_ = true;
+    // Double-buffered overlays present + flip automatically each frame service (the
+    // backend shows the page composed last frame, then composes the next); there is
+    // no explicit flip() — the engine owns the cadence.
+    //
+    // Set the overlay's opaque background colour (the field sprites are composed
+    // over and erased back to). 0 = transparent. No-op on platforms without an
+    // overlay. Call after init().
+    static void set_overlay_background(u8 color) {
+        Platform::hal::overlay_set_background(color);
     }
     // Overlay collision latched at the last frame service (overlay vs PF/PMG, and
     // the blitter's overlay-vs-overlay code). Zero on platforms without overlays.
@@ -290,14 +292,19 @@ public:
         //    has its own collision model; baseline writes P/M hardware sprites.
         if (hooks.pre_sprite_commit) hooks.pre_sprite_commit();
 
-        // Commit buffered sprites — self-dispatching by backend: the VBXE path
-        // (commit_blitter) clears the back buffer and queues a blit per active
-        // sprite; the baseline path (commit_pm) writes P/M memory. (pm_buffer_ is
-        // ignored on the blitter path.)
-        sprites.commit(pm_buffer_);
-
+        // Commit buffered sprites — self-dispatching by backend.
         if constexpr (caps::has_blitter) {
-            // VBXE: run the queued blits (upload the BCB chain + start the blitter).
+            // VBXE: present first — show the page composed last frame (which had a
+            // full frame's display time to finish) and flip so we now compose the
+            // hidden page. Then commit this frame's blits (commit_blitter clears the
+            // back page and queues a blit per active sprite) and start them async.
+            // The blit is deliberately NOT waited on here: a synchronous wait makes
+            // the VBI outrun a frame, letting the next VBI NMI re-enter this handler
+            // (stack overflow). The present's wait is for LAST frame's blit, already
+            // finished, so it returns at once. Single-buffer present is a no-op (it
+            // composes the visible page in place, dirty-rect).
+            Platform::hal::overlay_present();
+            sprites.commit(pm_buffer_);
             Platform::hal::overlay_submit();
 
             // 4. Latch overlay collisions (overlay↔PF/PMG and overlay↔overlay).
@@ -305,17 +312,9 @@ public:
                 overlay_collision_      = Platform::hal::overlay_collision();
                 overlay_blit_collision_ = Platform::hal::overlay_blit_collision();
             }
-
-            // Page flip on request (double-buffered overlays only; the backend
-            // no-ops a single-buffer flip, so the policy stays out of here).
-            if constexpr (caps::has_vram) {
-                if (flip_requested_) {
-                    Platform::hal::overlay_flip();
-                    flip_requested_ = false;
-                }
-            }
         } else {
-            // Baseline P/M path: latch this frame's collisions, then clear.
+            // Baseline P/M path: write P/M memory, then latch + clear collisions.
+            sprites.commit(pm_buffer_);
             for (u8 i = 0; i < 4; ++i) {
                 collisions_.s_bg[i] = Platform::hal::coll_player_playfield(i);
                 collisions_.s_s[i]  = Platform::hal::coll_player_player(i);
@@ -389,7 +388,6 @@ private:
     //    platforms — a few bytes on baseline, never named with VBXE identity) ──
     static inline u8   overlay_collision_      = 0;
     static inline u8   overlay_blit_collision_ = 0;
-    static inline bool flip_requested_         = false;
 };
 
 } // namespace engine

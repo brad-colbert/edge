@@ -206,13 +206,18 @@ public:
 
     BCB& operator[](u8 i) { return queue_[i]; }
 
-    // Upload the chain to VRAM and trigger the blitter.
+    // Upload the chain to VRAM and start the blitter, asynchronously: the blitter
+    // runs while the CPU continues (it has the rest of the frame to finish). We do
+    // NOT busy-wait for completion here — a synchronous wait inside the VBI makes
+    // the VBI longer than a frame and lets the next VBI NMI re-enter it (stack
+    // overflow). The double-buffer present waits for the previous frame's blit
+    // (already finished) before flipping; see OverlayHal::overlay_present.
+    //
+    // The bounded wait at the START guards against overwriting a still-in-flight
+    // BCB list (normally already idle, so it returns immediately).
     template <typename Config>
     void submit() {
         if (count_ == 0) return;
-        // The blitter reads its BCB list from VRAM asynchronously. Wait for any
-        // previous chain to finish before overwriting that list (bounded so a
-        // misbehaving chain can't hang the VBI).
         for (u16 spin = 0; spin < 50000; ++spin) {
             if ((static_cast<u8>(Regs<Config>::BLITTER_BUSY) &
                  (blitter_busy::BUSY | blitter_busy::BCB_LOAD)) == 0) break;

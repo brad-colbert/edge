@@ -50,12 +50,13 @@ static_assert(!BaselinePlatform::capabilities::has_blitter,     "baseline uses t
 // ── Force instantiation of both Cores' entry points (compiles, never runs) ──
 // Volatile sinks (volatile on the pointer object) so the optimiser can't drop
 // the odr-use that triggers instantiation.
-using fn_t = void (*)();
-static fn_t volatile g_sink_vbxe_init  = static_cast<fn_t>(&VbxeGame::init);
-static fn_t volatile g_sink_vbxe_frame = &VbxeGame::frame_service;
-static fn_t volatile g_sink_vbxe_flip  = static_cast<fn_t>(&VbxeGame::flip);
-static fn_t volatile g_sink_base_init  = static_cast<fn_t>(&BaselineGame::init);
-static fn_t volatile g_sink_base_frame = &BaselineGame::frame_service;
+using fn_t   = void (*)();
+using fn_u8t = void (*)(engine::u8);
+static fn_t   volatile g_sink_vbxe_init  = static_cast<fn_t>(&VbxeGame::init);
+static fn_t   volatile g_sink_vbxe_frame = &VbxeGame::frame_service;
+static fn_u8t volatile g_sink_vbxe_bg    = static_cast<fn_u8t>(&VbxeGame::set_overlay_background);
+static fn_t   volatile g_sink_base_init  = static_cast<fn_t>(&BaselineGame::init);
+static fn_t   volatile g_sink_base_frame = &BaselineGame::frame_service;
 
 static unsigned g_failures = 0;
 #define CHECK(cond)                                                        \
@@ -70,7 +71,7 @@ int main() {
     // Touch the sinks so the entry points are emitted and linked.
     CHECK(g_sink_vbxe_init  != nullptr);
     CHECK(g_sink_vbxe_frame != nullptr);
-    CHECK(g_sink_vbxe_flip  != nullptr);
+    CHECK(g_sink_vbxe_bg    != nullptr);
     CHECK(g_sink_base_init  != nullptr);
     CHECK(g_sink_base_frame != nullptr);
 

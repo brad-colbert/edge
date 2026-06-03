@@ -41,15 +41,16 @@ namespace V = atari::vbxe;
 
 // ── Platform + game configuration ────────────────────────────────────────
 //
-// Default VBXE config: SR_320, single-buffered, $D640, MEMAC-A $B000/4K.
+// VBXE config: SR_320, DOUBLE-buffered, $D640, MEMAC-A $B000/4K. Double-buffering
+// gives MODE 3 flicker-free sprites (render the hidden page, then flip). The
+// static modes (0/1/2) just paint fb_a and never flip, so they're unaffected.
+using Cfg = V::Config<V::Mode::SR_320, V::Buffers::Double>;
 using Platform = M::Platform<
     M::Machine::XL,
     M::RAM::Baseline,
-    M::gfx::VBXE<>,
+    M::gfx::VBXE<Cfg>,
     M::Sound::Mono,
     M::TV::NTSC>;
-
-using Cfg = V::DefaultConfig;   // == the config gfx::VBXE<> carries
 
 struct ScreenText {
     using display = engine::DisplayLayout<engine::TextRegion<M::Mode::MODE_2, 24>>;
@@ -65,11 +66,11 @@ using Game = engine::Core<Platform, GameConfig>;
 // Sprite-demo shapes (MODE 3). kBall is a Packed1bpp P/M-style 8x8 bitmap
 // (coloured per-instance via sprite_color); kPix is a Pixel8bpp 8x8 shape whose
 // rows carry palette-1 indices 1..8 directly (index 0 = transparent).
-constexpr auto kBall = engine::make_sprite<8, 8>({
+[[maybe_unused]] constexpr auto kBall = engine::make_sprite<8, 8>({
     0b00111100, 0b01111110, 0b11111111, 0b11111111,
     0b11111111, 0b11111111, 0b01111110, 0b00111100,
 });
-constexpr auto kPix = engine::make_pixel_sprite<8, 8>({
+[[maybe_unused]] constexpr auto kPix = engine::make_pixel_sprite<8, 8>({
     1,1,1,1,1,1,1,1,  2,2,2,2,2,2,2,2,
     3,3,3,3,3,3,3,3,  4,4,4,4,4,4,4,4,
     5,5,5,5,5,5,5,5,  6,6,6,6,6,6,6,6,
@@ -89,6 +90,7 @@ static void load_test_palette() {
     V::set_color<Cfg>(1, 6, 0xFE, 0x00, 0xFE);   // magenta
     V::set_color<Cfg>(1, 7, 0xFE, 0x80, 0x00);   // orange
     V::set_color<Cfg>(1, 8, 0xFE, 0xFE, 0xFE);   // white
+    V::set_color<Cfg>(1, 9, 0x00, 0x00, 0x40);   // index 9 = dark blue (MODE 3 background)
 }
 
 // Fill the whole framebuffer with one opaque colour index. The cleanest possible
@@ -117,7 +119,7 @@ static void load_test_palette() {
 
 // Blank the text region (the shared screen buffer isn't cleared on set_screen,
 // so wipe it before printing the probe result over a transparent overlay).
-static void clear_text() {
+[[maybe_unused]] static void clear_text() {
     for (u8 r = 0; r < 24; ++r)
         for (u8 c = 0; c < 40; ++c)
             Game::put_char(c, r, 0);          // ANTIC internal code 0 = blank
@@ -179,12 +181,11 @@ int main() {
     // NMI masking is needed here — the VBXE's $D6xx register accesses in the VBI
     // can't interleave a $B000 window burst.
 #if VBXE_BRINGUP_MODE == 3
-    // Sprite demo: two sprites bouncing horizontally, drawn by the blitter. Wipe
-    // the ANTIC screen so the cleared (transparent) overlay shows a dark field.
-    // Positions are buffered each frame; the frame service clears the back buffer
-    // and blits the active sprites.
-    clear_text();
-    Game::sprite_color(0, 1);   // kBall coloured palette-1 index 1 (red), sticky
+    // Double-buffered sprite demo: two sprites bouncing horizontally over an opaque
+    // overlay (so the ANTIC backdrop is fully hidden). The engine presents + flips
+    // automatically each frame (compose the hidden page, then show it) — flicker-free.
+    Game::set_overlay_background(9);   // opaque dark-blue field (palette-1 index 9)
+    Game::sprite_color(0, 1);          // kBall coloured palette-1 index 1 (red), sticky
     Game::run([](const auto&) {
         static u16 t = 0; ++t;
         const u8 x0 = static_cast<u8>(40 + (t % 200));

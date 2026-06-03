@@ -76,6 +76,11 @@ struct OverlayHal {
     static inline u8   prev_count_ = 0;
     static inline u8   cur_count_  = 0;
 
+    // Overlay clear/erase colour. 0 = transparent (ANTIC shows through); a non-zero
+    // opaque index makes the overlay a solid field. The per-frame clear and the
+    // single-buffer dirty-rect erase both use it, so sprites erase back to it.
+    static inline u8 bg_color_ = 0;
+
     static const ShapeEntry* find_shape(const u8* rom) {
         for (u8 i = 0; i < reg_count_; ++i)
             if (registry_[i].rom == rom) return &registry_[i];
@@ -96,21 +101,43 @@ struct OverlayHal {
         vbxe::upload_xdl<Config>(buf, len, dest);
     }
 
+    // Fill one whole framebuffer page with a solid colour using the blitter (far
+    // faster than a MEMAC memset of 76800 bytes). Synchronous: waits for the fill
+    // to finish before returning. The NmiGuard makes it safe to call even after the
+    // VBI is armed (init / set_background), since the VBI shares queue_/the blitter.
+    static void blit_fill(u32 dest, u8 color) {
+        NmiGuard cs;
+        queue_.reset();
+        queue_.push(vbxe::bcb_fill_rect(dest, fb_stride, fb_height, fb_stride, color));
+        queue_.template submit<Config>();
+        for (u16 spin = 0; spin < 50000; ++spin)
+            if (!queue_.template busy<Config>()) break;
+        queue_.reset();
+    }
+
     // ── Neutral seams the engine calls (gated by caps in core.h) ──
 
     // One-time bring-up: open the MEMAC window, clear the framebuffer(s) to black,
     // build + point at the XDL, and enable XDL processing.
     static void overlay_init() {
         Memac::init();
-        Memac::fill(Layout::fb_a, Config::fb_bytes, 0);
+        blit_fill(Layout::fb_a, 0);
         build_and_upload_xdl(Layout::fb_a, xdl_a);
         if constexpr (double_buffered) {
-            Memac::fill(Layout::fb_b, Config::fb_bytes, 0);
+            blit_fill(Layout::fb_b, 0);
             build_and_upload_xdl(Layout::fb_b, xdl_b);
         }
         active_fb_ = 0;
         vbxe::set_xdl_addr<Config>(xdl_a);
         vbxe::xdl_enable<Config>();
+    }
+
+    // Set the overlay background colour and paint the framebuffer(s) with it now,
+    // so the field is opaque immediately (and stays so under dirty-rect erasing).
+    static void overlay_set_background(u8 color) {
+        bg_color_ = color;
+        blit_fill(Layout::fb_a, color);
+        if constexpr (double_buffered) blit_fill(Layout::fb_b, color);
     }
 
     // ── Sprite seams (called from the generic SpriteManager) ──
@@ -145,21 +172,27 @@ struct OverlayHal {
         next_shape_ += bytes;
     }
 
-    // Start a frame's overlay composition: erase the rects the previous frame
-    // drew (small constant-source clears to transparent), then begin recording
-    // this frame's rects. A full-screen clear every frame is too expensive and
-    // races the async blitter; erasing only what moved is cheap and tear-light.
+    // Start a frame's overlay composition. Double-buffered: clear the whole hidden
+    // back page to the background colour (cheap to do, invisible until the flip).
+    // Single-buffered: erase only the rects the previous frame drew (a full clear
+    // would be visible and would race the async blitter), then begin recording
+    // this frame's rects.
     static void overlay_frame_begin() {
         queue_.reset();
-        for (u8 i = 0; i < prev_count_; ++i)
-            queue_.push(vbxe::bcb_clear(prev_[i].dest, prev_[i].w, prev_[i].h,
-                                        fb_stride, 0));
-        cur_count_ = 0;
+        if constexpr (double_buffered) {
+            queue_.push(vbxe::bcb_clear(back_fb(), fb_stride, fb_height,
+                                        fb_stride, bg_color_));
+        } else {
+            for (u8 i = 0; i < prev_count_; ++i)
+                queue_.push(vbxe::bcb_clear(prev_[i].dest, prev_[i].w, prev_[i].h,
+                                            fb_stride, bg_color_));
+            cur_count_ = 0;
+        }
     }
 
-    // Queue one sprite blit into the back buffer at (x, y), and record its rect so
-    // the next frame erases it. Packed1bpp uses the AND-mask to colour the
-    // instance; Pixel8bpp carries its own colours.
+    // Queue one sprite blit into the back buffer at (x, y). Packed1bpp uses the
+    // AND-mask to colour the instance; Pixel8bpp carries its own colours. Single-
+    // buffered also records the rect so the next frame erases it.
     static void overlay_blit_sprite(const u8* rom, u8 x, u8 y, u8 color) {
         const ShapeEntry* e = find_shape(rom);
         if (!e) return;
@@ -169,7 +202,8 @@ struct OverlayHal {
         else
             queue_.push(vbxe::bcb_sprite_colored(e->vram, dest, e->w, e->h,
                                                  e->w, fb_stride, color));
-        if (cur_count_ < kMaxRects) cur_[cur_count_++] = Rect{ dest, e->w, e->h };
+        if constexpr (!double_buffered)
+            if (cur_count_ < kMaxRects) cur_[cur_count_++] = Rect{ dest, e->w, e->h };
     }
 
     // These VBI-time seams touch VBXE core registers. They do NOT need to guard
@@ -182,9 +216,11 @@ struct OverlayHal {
     static void overlay_submit() {
         queue_.template submit<Config>();
         queue_.reset();
-        // This frame's drawn rects become next frame's erase list.
-        for (u8 i = 0; i < cur_count_; ++i) prev_[i] = cur_[i];
-        prev_count_ = cur_count_;
+        // Single-buffered: this frame's drawn rects become next frame's erase list.
+        if constexpr (!double_buffered) {
+            for (u8 i = 0; i < cur_count_; ++i) prev_[i] = cur_[i];
+            prev_count_ = cur_count_;
+        }
     }
 
     // Latch the overlay-vs-playfield/PMG raster collision and clear it for next frame.
@@ -199,10 +235,17 @@ struct OverlayHal {
         return static_cast<u8>(R::BLT_COLLISION);
     }
 
-    // Double-buffer page flip: show the other framebuffer by repointing the XDL.
-    // Single-buffer is a compile-time no-op (the engine never sees the policy).
-    static void overlay_flip() {
+    // Present the page composed during the PREVIOUS frame, then flip so this frame
+    // composes the other one. Called at the START of frame composition (before the
+    // sprite commit), so the page being shown has had a full frame's display time
+    // to finish rendering — the wait below returns immediately. This is what keeps
+    // the VBI short: we never busy-wait for the CURRENT frame's blit (that would
+    // overrun the frame and let the next VBI NMI re-enter frame_service → stack
+    // overflow). Single-buffer is a compile-time no-op (composes in place, no flip).
+    static void overlay_present() {
         if constexpr (double_buffered) {
+            for (u16 spin = 0; spin < 50000; ++spin)
+                if (!queue_.template busy<Config>()) break;
             active_fb_ = static_cast<u8>(active_fb_ ^ 1);
             vbxe::set_xdl_addr<Config>(active_fb_ ? xdl_b : xdl_a);
         }
@@ -217,10 +260,11 @@ struct NullOverlay {
     static void overlay_submit() {}
     static u8   overlay_collision() { return 0; }
     static u8   overlay_blit_collision() { return 0; }
-    static void overlay_flip() {}
+    static void overlay_present() {}
     static void overlay_register_shape(const u8*, u8, u8, engine::SpriteFormat) {}
     static void overlay_frame_begin() {}
     static void overlay_blit_sprite(const u8*, u8, u8, u8) {}
+    static void overlay_set_background(u8) {}
 };
 
 } // namespace atari
