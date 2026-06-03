@@ -275,6 +275,13 @@ struct DisplayLayout {
         return region_count;
     }
 
+    // Index of the first non-scroll bitmap region (the gfx canvas), else region_count.
+    static constexpr u8 bitmap_region_index() {
+        for (u8 i = 0; i < region_count; ++i)
+            if (!region_is_text[i] && !region_is_scroll[i]) return i;
+        return region_count;
+    }
+
     // Byte offset of region n into the shared screen buffer.
     static constexpr u16 offset(u8 n) {
         u16 acc = 0;

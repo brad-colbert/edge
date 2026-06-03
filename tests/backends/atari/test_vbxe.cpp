@@ -160,6 +160,28 @@ static_assert(kXdl.buf[8] == static_cast<v::u8>(v::ov_width::NORMAL | (v::ATT_OV
 static_assert(kXdl.buf[8] == 0x11,   "ATT byte1 = 0x11 (normal width, OV palette 1)");
 static_assert(kXdl.buf[9] == 0xFF,   "ATT priority 255");
 
+// ── 6b. XDL byte layout (full-screen Text_80) ────────────────────────
+// Text mode adds TMON + CHBASE; the hardware advances OVADR by OVSTEP every 8
+// scanlines (one record covers all rows). FX Core manual pp.9,14.
+using CfgText = v::Config<v::Mode::Text_80>;
+struct XdlTextResult { v::u8 buf[24]; v::u8 len; };
+constexpr XdlTextResult build_text_xdl() {
+    XdlTextResult r{};
+    r.len = v::build_fullscreen_xdl<CfgText>(r.buf, 0x12345u, 160, 240);
+    return r;
+}
+constexpr XdlTextResult kTextXdl = build_text_xdl();
+// ctrl = TMON|RPTL|OVADR|CHBASE|ATT|END = 0x8961 (LE: 0x61, 0x89).
+static_assert(kTextXdl.len == 11,      "Text_80 fullscreen XDL is 11 bytes (adds CHBASE)");
+static_assert(kTextXdl.buf[0] == 0x61, "text XDLC lo (TMON set, GMON clear)");
+static_assert(kTextXdl.buf[1] == 0x89, "text XDLC hi (CHBASE set)");
+static_assert(kTextXdl.buf[2] == 239,  "text RPTL = height-1");
+static_assert(kTextXdl.buf[6] == 0xA0 && kTextXdl.buf[7] == 0x00, "text OVSTEP = 160 (80 cols x 2)");
+static_assert(kTextXdl.buf[8] == static_cast<v::u8>(v::VRAMLayout<CfgText>::fonts >> 11),
+                                       "text CHBASE = fonts >> 11 (2K page)");
+static_assert(kTextXdl.buf[9]  == 0x11, "text ATT byte1 = 0x11 (normal width, OV palette 1)");
+static_assert(kTextXdl.buf[10] == 0xFF, "text ATT priority 255");
+
 // ── 7. Default palette ───────────────────────────────────────────────
 static_assert(sizeof(v::default_palette_0.entries) / sizeof(v::PaletteEntry) == 256,
                                      "default palette has 256 entries");

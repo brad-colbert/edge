@@ -90,6 +90,24 @@ if(EDGE_BUILD_DEMO)
     set_target_properties(atari_vbxe_bringup PROPERTIES OUTPUT_NAME "atari_vbxe_bringup.xex")
     target_link_options(atari_vbxe_bringup PRIVATE
         "LINKER:--Map=$<TARGET_FILE_DIR:atari_vbxe_bringup>/atari_vbxe_bringup.map")
+
+    # VBXE bitmap-drawing (gfx) demo — independent .xex.
+    add_executable(atari_vbxe_gfx demo/vbxe_gfx.cpp)
+    target_compile_options(atari_vbxe_gfx PRIVATE
+        -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra)
+    target_include_directories(atari_vbxe_gfx PRIVATE ${CMAKE_SOURCE_DIR})
+    set_target_properties(atari_vbxe_gfx PROPERTIES OUTPUT_NAME "atari_vbxe_gfx.xex")
+    target_link_options(atari_vbxe_gfx PRIVATE
+        "LINKER:--Map=$<TARGET_FILE_DIR:atari_vbxe_gfx>/atari_vbxe_gfx.map")
+
+    # VBXE 80-column text-mode demo — independent .xex.
+    add_executable(atari_vbxe_text demo/vbxe_text.cpp)
+    target_compile_options(atari_vbxe_text PRIVATE
+        -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra)
+    target_include_directories(atari_vbxe_text PRIVATE ${CMAKE_SOURCE_DIR})
+    set_target_properties(atari_vbxe_text PROPERTIES OUTPUT_NAME "atari_vbxe_text.xex")
+    target_link_options(atari_vbxe_text PRIVATE
+        "LINKER:--Map=$<TARGET_FILE_DIR:atari_vbxe_text>/atari_vbxe_text.map")
     return()
 endif()
 
@@ -189,6 +207,45 @@ if(MOS_ATARI8_CXX)
         COMMENT "Building Atari XEX demo (atari_vbxe_bringup.xex, mode ${EDGE_VBXE_BRINGUP_MODE})"
         VERBATIM)
     add_custom_target(atari_vbxe_bringup DEPENDS ${VBXE_BRINGUP_XEX})
+
+    # ── VBXE bitmap-drawing (gfx) demo (atari_vbxe_gfx.xex) ──────────────
+    #   cmake --build build --target atari_vbxe_gfx   # -> build/atari_vbxe_gfx.xex
+    set(VBXE_GFX_XEX ${CMAKE_BINARY_DIR}/atari_vbxe_gfx.xex)
+    set(VBXE_GFX_MAP ${CMAKE_BINARY_DIR}/atari_vbxe_gfx.map)
+    add_custom_command(
+        OUTPUT ${VBXE_GFX_XEX}
+        COMMAND ${MOS_ATARI8_CXX}
+                -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra
+                -I${CMAKE_SOURCE_DIR}
+                ${CMAKE_SOURCE_DIR}/demo/vbxe_gfx.cpp
+                -o ${VBXE_GFX_XEX}
+                -Wl,--Map=${VBXE_GFX_MAP}
+        DEPENDS ${CMAKE_SOURCE_DIR}/demo/vbxe_gfx.cpp
+                ${EDGE_ENGINE_HEADERS}
+        BYPRODUCTS ${VBXE_GFX_MAP}
+        COMMENT "Building Atari XEX demo (atari_vbxe_gfx.xex)"
+        VERBATIM)
+    add_custom_target(atari_vbxe_gfx DEPENDS ${VBXE_GFX_XEX})
+
+    # ── VBXE 80-column text-mode demo (atari_vbxe_text.xex) ──────────────
+    #   cmake --build build --target atari_vbxe_text   # -> build/atari_vbxe_text.xex
+    set(VBXE_TEXT_XEX ${CMAKE_BINARY_DIR}/atari_vbxe_text.xex)
+    set(VBXE_TEXT_MAP ${CMAKE_BINARY_DIR}/atari_vbxe_text.map)
+    add_custom_command(
+        OUTPUT ${VBXE_TEXT_XEX}
+        COMMAND ${MOS_ATARI8_CXX}
+                -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra
+                -I${CMAKE_SOURCE_DIR}
+                ${CMAKE_SOURCE_DIR}/demo/vbxe_text.cpp
+                -o ${VBXE_TEXT_XEX}
+                -Wl,--Map=${VBXE_TEXT_MAP}
+        DEPENDS ${CMAKE_SOURCE_DIR}/demo/vbxe_text.cpp
+                ${CMAKE_SOURCE_DIR}/demo/PREPPIEPC_FNT.h
+                ${EDGE_ENGINE_HEADERS}
+        BYPRODUCTS ${VBXE_TEXT_MAP}
+        COMMENT "Building Atari XEX demo (atari_vbxe_text.xex)"
+        VERBATIM)
+    add_custom_target(atari_vbxe_text DEPENDS ${VBXE_TEXT_XEX})
 else()
     message(STATUS "mos-atari8-dos-clang++ not found; 'atari_hw_test'/'atari_scroll_test'/'atari_vbxe_bringup' demo targets unavailable")
 endif()

@@ -38,8 +38,15 @@ using BaselinePlatform = M::Platform<
 using VbxePlatform = M::Platform<
     M::Machine::XL, M::RAM::U1MB, M::gfx::VBXE<>, M::Sound::Mono, M::TV::NTSC>;
 
+// VBXE in 80-column text mode (exercises the overlay-text seam path).
+using VbxeTextPlatform = M::Platform<
+    M::Machine::XL, M::RAM::U1MB,
+    M::gfx::VBXE<atari::vbxe::Config<atari::vbxe::Mode::Text_80>>,
+    M::Sound::Mono, M::TV::NTSC>;
+
 using BaselineGame = Core<BaselinePlatform, GameConfig>;
 using VbxeGame     = Core<VbxePlatform, GameConfig>;
+using VbxeTextGame = Core<VbxeTextPlatform, GameConfig>;
 
 // The capability axis must drive the two paths apart at compile time.
 static_assert(VbxePlatform::capabilities::has_blitter,          "VBXE has the blitter path");
@@ -58,6 +65,16 @@ static fn_u8t volatile g_sink_vbxe_bg    = static_cast<fn_u8t>(&VbxeGame::set_ov
 static fn_t   volatile g_sink_base_init  = static_cast<fn_t>(&BaselineGame::init);
 static fn_t   volatile g_sink_base_frame = &BaselineGame::frame_service;
 
+// Overlay text-mode forwarders (compile the Text_80 seam path; never run — MMIO).
+static void touch_vbxe_text() {
+    static const engine::u8 font[8] = { 0 };
+    VbxeTextGame::overlay_text_font(font, 8);
+    VbxeTextGame::overlay_text_clear(0x20, 0x81);
+    VbxeTextGame::overlay_put_char(0, 0, static_cast<engine::u8>('A'), 0x81);
+    VbxeTextGame::overlay_print(0, 1, "HI", 0x81);
+}
+static fn_t volatile g_sink_vbxe_text = &touch_vbxe_text;
+
 static unsigned g_failures = 0;
 #define CHECK(cond)                                                        \
     do {                                                                   \
@@ -72,6 +89,7 @@ int main() {
     CHECK(g_sink_vbxe_init  != nullptr);
     CHECK(g_sink_vbxe_frame != nullptr);
     CHECK(g_sink_vbxe_bg    != nullptr);
+    CHECK(g_sink_vbxe_text  != nullptr);
     CHECK(g_sink_base_init  != nullptr);
     CHECK(g_sink_base_frame != nullptr);
 

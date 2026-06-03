@@ -25,6 +25,7 @@
 
 #include "config/capabilities.h"
 #include "display.h"
+#include "gfx.h"
 #include "hooks.h"
 #include "input.h"
 #include "interrupt.h"
@@ -49,6 +50,15 @@ struct initial_screen { using type = typename Screens::template screen_at<0>; };
 template <typename C, typename Screens>
 struct initial_screen<C, Screens, void_t<typename C::initial_screen>> {
     using type = typename C::initial_screen;
+};
+
+// gfx_region: GameConfig::bitmap_region if present, else void. Gives the bitmap
+// subsystem (engine/gfx.h) its baseline software-view type; void = blitter-only.
+template <typename C, typename = void>
+struct gfx_region { using type = void; };
+template <typename C>
+struct gfx_region<C, void_t<typename C::bitmap_region>> {
+    using type = typename C::bitmap_region;
 };
 
 // Scalar config fields with engine defaults when the game omits them.
@@ -121,6 +131,8 @@ public:
     using Scroll    = ScrollManager<Platform>;
     using Tiles     = TileManager<Platform>;
     using Interrupts = InterruptManager<Platform, kMaxRasterHooks, kMaxFrameHooks>;
+    using GfxRegion = typename cdetail::gfx_region<GameConfig>::type;
+    using Gfx       = BitmapOps<Platform, GfxRegion>;
 
     // ── Subsystem instances (static singletons) ──
     static inline Screen     screen{};
@@ -129,6 +141,7 @@ public:
     static inline Scroll     scroll{};
     static inline Tiles      tiles{};
     static inline Interrupts interrupts{};
+    static inline Gfx        gfx_{};
     static inline InputState<kPorts> input{};
     static inline Hooks      hooks{};
 
@@ -203,6 +216,24 @@ public:
     static void set_overlay_background(u8 color) {
         Platform::hal::overlay_set_background(color);
     }
+
+    // ── Overlay text mode (VBXE Text_80; no-op on platforms without it) ──
+    // A dedicated text surface separate from the baseline ANTIC TextRegion API.
+    // Chars are raw font indices (no screen-code remap); `attr` is the cell colour
+    // attribute (foreground index in b0-b6; b7=1 = opaque background). Call after
+    // init(), on a Text_80 overlay config.
+    static void overlay_text_font(const u8* glyphs, u16 bytes) {
+        Platform::hal::overlay_text_font(glyphs, bytes);
+    }
+    static void overlay_text_clear(u8 ch, u8 attr) {
+        Platform::hal::overlay_text_clear(ch, attr);
+    }
+    static void overlay_put_char(u8 col, u8 row, u8 ch, u8 attr) {
+        Platform::hal::overlay_text_put(col, row, ch, attr);
+    }
+    static void overlay_print(u8 col, u8 row, const char* s, u8 attr) {
+        Platform::hal::overlay_text_print(col, row, s, attr);
+    }
     // Overlay collision latched at the last frame service (overlay vs PF/PMG, and
     // the blitter's overlay-vs-overlay code). Zero on platforms without overlays.
     static u8 overlay_collision()      { return overlay_collision_; }
@@ -225,6 +256,12 @@ public:
     template <typename S, u8 N>
     static auto& region() { return screen.template region<S, N>(); }
 
+    // ── Bitmap drawing ──
+    // The bitmap canvas: the VBXE overlay framebuffer on blitter platforms, else a
+    // BitmapRegion (GameConfig::bitmap_region) via its software view. Call after
+    // init(); on baseline the view is bound to the screen buffer by set_screen().
+    static Gfx& gfx() { return gfx_; }
+
     // ── Screen transition ──
     // Deactivate scroll on every transition; a scroll screen re-arms it via
     // scroll_map() once the game has bound its map buffer.
@@ -232,6 +269,15 @@ public:
     static void set_screen(Cb cb) {
         scroll.deactivate();
         screen.template set_screen<S>(cb);
+        // Baseline: bind the bitmap canvas to S's first bitmap region (if any), so
+        // Game::gfx() draws into the live screen buffer. Blitter platforms draw the
+        // VRAM overlay through the seams and ignore this.
+        if constexpr (!engine::caps_of_t<Platform>::has_blitter) {
+            using Layout = typename S::display;
+            constexpr u8 bidx = Layout::bitmap_region_index();
+            if constexpr (bidx < Layout::region_count)
+                gfx_.attach(screen.buffer() + Layout::offset(bidx));
+        }
     }
 
     // ── Scroll map binding ──

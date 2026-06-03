@@ -101,19 +101,22 @@ struct OverlayHal {
         vbxe::upload_xdl<Config>(buf, len, dest);
     }
 
-    // Fill one whole framebuffer page with a solid colour using the blitter (far
-    // faster than a MEMAC memset of 76800 bytes). Synchronous: waits for the fill
-    // to finish before returning. The NmiGuard makes it safe to call even after the
-    // VBI is armed (init / set_background), since the VBI shares queue_/the blitter.
-    static void blit_fill(u32 dest, u8 color) {
+    // Fill a w×h rectangle at `dest` with a solid colour via the blitter (far
+    // faster than a MEMAC memset). Synchronous: waits for the fill to finish before
+    // returning. The NmiGuard makes it safe to call even after the VBI is armed
+    // (init / set_background / bitmap ops), since the VBI shares queue_/the blitter.
+    static void blit_rect(u32 dest, u16 w, u8 h, u8 color) {
         NmiGuard cs;
         queue_.reset();
-        queue_.push(vbxe::bcb_fill_rect(dest, fb_stride, fb_height, fb_stride, color));
+        queue_.push(vbxe::bcb_fill_rect(dest, w, h, fb_stride, color));
         queue_.template submit<Config>();
         for (u16 spin = 0; spin < 50000; ++spin)
             if (!queue_.template busy<Config>()) break;
         queue_.reset();
     }
+
+    // Fill one whole framebuffer page with a solid colour.
+    static void blit_fill(u32 dest, u8 color) { blit_rect(dest, fb_stride, fb_height, color); }
 
     // ── Neutral seams the engine calls (gated by caps in core.h) ──
 
@@ -250,6 +253,85 @@ struct OverlayHal {
             vbxe::set_xdl_addr<Config>(active_fb_ ? xdl_b : xdl_a);
         }
     }
+
+    // ── Bitmap-canvas seams (engine/gfx.h BitmapOps draws into the overlay) ──
+    //
+    // The canvas is the overlay framebuffer (8bpp; one byte per pixel = a palette
+    // index). All ops target back_fb() — single-buffer, so that is the visible
+    // page — and are synchronous (blitter rect fills) or direct (MEMAC pixel/row
+    // writes), each VBI-atomic via the NmiGuard in blit_rect / Memac.
+
+    static void overlay_bitmap_clear(u8 color) { blit_fill(back_fb(), color); }
+
+    static void overlay_bitmap_fill_rect(u16 x, u16 y, u16 w, u16 h, u8 color) {
+        const u32 dest = back_fb() + static_cast<u32>(y) * fb_stride + x;
+        blit_rect(dest, w, static_cast<u8>(h), color);
+    }
+
+    static void overlay_bitmap_plot(u16 x, u16 y, u8 color) {
+        Memac::write(back_fb() + static_cast<u32>(y) * fb_stride + x, &color, 1);
+    }
+
+    // Copy a w×h 8bpp source image (row-packed, stride == w) into the canvas.
+    static void overlay_bitmap_blit(u16 x, u16 y, const u8* src, u16 w, u16 h) {
+        NmiGuard cs;
+        const u32 base = back_fb() + static_cast<u32>(y) * fb_stride + x;
+        for (u16 r = 0; r < h; ++r)
+            Memac::write(base + static_cast<u32>(r) * fb_stride,
+                         src + static_cast<u32>(r) * w, w);
+    }
+
+    // ── Overlay text-mode seams (Mode::Text_80; FX Core manual pp.9,14,16) ──
+    //
+    // In text mode the "framebuffer" at OVADR is a character map of char+attribute
+    // byte pairs (char first), one 8x8 glyph cell per pair; the row stride is
+    // 2*cols bytes and the hardware advances OVADR by that step every 8 scanlines.
+    // The font (256 glyphs x 8 bytes, 1bpp) lives at the 2K-aligned `fonts` region
+    // pointed to by CHBASE. Attribute: b0-b6 = foreground palette index (0..127);
+    // b7=1 gives an opaque background of index (attr&127)+128, b7=0 transparent.
+    // The map is fb_a (OVADR); all writes are VBI-atomic via Memac/NmiGuard.
+    static constexpr u16 text_cols      = static_cast<u16>(Config::fb_width / 2);
+    static constexpr u16 text_row_bytes = static_cast<u16>(Config::fb_width);
+    static constexpr u16 text_rows      = static_cast<u16>(fb_height / 8);
+
+    // Upload a 1bpp font (256 glyphs x 8 bytes = 2048) to the CHBASE font region.
+    static void overlay_text_font(const u8* glyphs, u16 bytes) {
+        Memac::write(Layout::fonts, glyphs, bytes);
+    }
+
+    // Fill the whole character map with one char+attribute cell.
+    static void overlay_text_clear(u8 ch, u8 attr) {
+        u8 row[text_row_bytes];
+        for (u16 c = 0; c < text_cols; ++c) {
+            row[c * 2]     = ch;
+            row[c * 2 + 1] = attr;
+        }
+        NmiGuard cs;
+        for (u16 r = 0; r < text_rows; ++r)
+            Memac::write(Layout::fb_a + static_cast<u32>(r) * text_row_bytes,
+                         row, text_row_bytes);
+    }
+
+    // Write one char+attribute cell at (col, row).
+    static void overlay_text_put(u16 col, u16 row, u8 ch, u8 attr) {
+        const u8 cell[2] = { ch, attr };
+        Memac::write(Layout::fb_a + static_cast<u32>(row) * text_row_bytes + col * 2,
+                     cell, 2);
+    }
+
+    // Write a NUL-terminated string at (col, row) with one attribute, clipped to
+    // the row width. The font is indexed by raw byte (PC code page) — no remap.
+    static void overlay_text_print(u16 col, u16 row, const char* s, u8 attr) {
+        u8 buf[text_row_bytes];
+        u16 n = 0;
+        for (; s[n] != '\0' && (col + n) < text_cols; ++n) {
+            buf[n * 2]     = static_cast<u8>(s[n]);
+            buf[n * 2 + 1] = attr;
+        }
+        if (n)
+            Memac::write(Layout::fb_a + static_cast<u32>(row) * text_row_bytes + col * 2,
+                         buf, static_cast<u16>(n * 2));
+    }
 };
 
 // Overlay seam for non-VBXE platforms: every operation is a no-op. The generic
@@ -265,6 +347,14 @@ struct NullOverlay {
     static void overlay_frame_begin() {}
     static void overlay_blit_sprite(const u8*, u8, u8, u8) {}
     static void overlay_set_background(u8) {}
+    static void overlay_bitmap_clear(u8) {}
+    static void overlay_bitmap_fill_rect(u16, u16, u16, u16, u8) {}
+    static void overlay_bitmap_plot(u16, u16, u8) {}
+    static void overlay_bitmap_blit(u16, u16, const u8*, u16, u16) {}
+    static void overlay_text_font(const u8*, u16) {}
+    static void overlay_text_clear(u8, u8) {}
+    static void overlay_text_put(u16, u16, u8, u8) {}
+    static void overlay_text_print(u16, u16, const char*, u8) {}
 };
 
 } // namespace atari
