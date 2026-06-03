@@ -119,12 +119,25 @@ static_assert(kClear.blt_width[0] == 0x3F && kClear.blt_width[1] == 0x01, "clear
 static_assert((kClear.blt_control & v::blt_mode::NEXT) != 0,           "clear: NEXT set");
 static_assert((kClear.blt_control & 0x07) == v::blt_mode::COPY,        "clear: COPY mode");
 
-// bcb_sprite: real source (and_mask 0xFF), TRANSPARENT + NEXT.
+// bcb_sprite: real source (and_mask 0xFF), TRANSPARENT + NEXT. step_y is the FULL
+// stride (row-base advance), not stride-width: source 16, dest 320 (= 0x140).
 constexpr v::BCB kSpr = v::bcb_sprite(0x20000u, 0x10000u, 16, 16, 16, 320);
 static_assert(kSpr.blt_and_mask == 0xFF,                              "sprite: real source");
 static_assert((kSpr.blt_control & 0x07) == v::blt_mode::TRANSPARENT,  "sprite: TRANSPARENT mode");
-static_assert(kSpr.dest_step_y[0] == 0x30 && kSpr.dest_step_y[1] == 0x01,
-                                                      "sprite: dest step_y = 320-16 = 304");
+static_assert(kSpr.source_step_y[0] == 0x10 && kSpr.source_step_y[1] == 0x00,
+                                                      "sprite: source step_y = src_stride 16");
+static_assert(kSpr.dest_step_y[0] == 0x40 && kSpr.dest_step_y[1] == 0x01,
+                                                      "sprite: dest step_y = dest_stride 320");
+
+// bcb_sprite_colored: 1bpp-expanded sprite coloured via the AND-mask (set->color,
+// 0->transparent), still TRANSPARENT mode.
+constexpr v::BCB kSprC = v::bcb_sprite_colored(0x20000u, 0x10000u, 8, 8, 8, 320, 0x1E);
+static_assert(kSprC.blt_and_mask == 0x1E,                            "colored sprite: and_mask = color");
+static_assert(kSprC.blt_xor_mask == 0x00,                            "colored sprite: no xor");
+static_assert((kSprC.blt_control & 0x07) == v::blt_mode::TRANSPARENT, "colored sprite: TRANSPARENT mode");
+static_assert(kSprC.blt_width[0] == 0x07 && kSprC.blt_width[1] == 0x00, "colored sprite: width-1 = 7");
+static_assert(kSprC.dest_step_y[0] == 0x40 && kSprC.dest_step_y[1] == 0x01,
+                                                      "colored sprite: dest step_y = dest_stride 320");
 
 // ── 6. XDL byte layout (full-screen SR_320) ──────────────────────────
 struct XdlResult { v::u8 buf[24]; v::u8 len; };

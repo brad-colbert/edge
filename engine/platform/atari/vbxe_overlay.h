@@ -15,6 +15,7 @@
 // bring-up spine (init / submit / collision / flip); the sprite-commit and
 // bitmap paths that populate the queue land in 4b.
 
+#include "../../sprites.h"   // engine::SpriteFormat (neutral shape pixel format)
 #include "../../types.h"
 #include "vbxe_blitter.h"
 #include "vbxe_config.h"
@@ -50,6 +51,44 @@ struct OverlayHal {
     static inline vbxe::BlitterQueue<16> queue_{};
     static inline u8 active_fb_ = 0;       // 0 = framebuffer A shown, 1 = B
 
+    // Shape registry: maps a ROM shape pointer to its uploaded VRAM copy. Shapes
+    // are bump-allocated in the layout's shapes region and never freed (they live
+    // for the run). Keyed by the ROM pointer the generic SpriteManager already
+    // holds, so no per-sprite width/format needs to live in LogicalSprite.
+    static constexpr u8 kMaxShapes = 32;
+    struct ShapeEntry {
+        const u8*           rom;
+        u32                 vram;
+        u8                  w, h;
+        engine::SpriteFormat fmt;
+    };
+    static inline ShapeEntry registry_[kMaxShapes] = {};
+    static inline u8  reg_count_  = 0;
+    static inline u32 next_shape_ = Layout::shapes;
+
+    // Dirty-rect bookkeeping: each frame erases the small rects the previous frame
+    // drew (cheap, vs a full-screen clear) and records this frame's rects for the
+    // next erase. kMaxRects*2 BCBs (erase + draw) must fit the queue.
+    static constexpr u8 kMaxRects = 8;
+    struct Rect { u32 dest; u8 w, h; };
+    static inline Rect prev_[kMaxRects] = {};
+    static inline Rect cur_[kMaxRects]  = {};
+    static inline u8   prev_count_ = 0;
+    static inline u8   cur_count_  = 0;
+
+    static const ShapeEntry* find_shape(const u8* rom) {
+        for (u8 i = 0; i < reg_count_; ++i)
+            if (registry_[i].rom == rom) return &registry_[i];
+        return nullptr;
+    }
+
+    // The framebuffer the current frame composes into: the inactive page when
+    // double-buffered (flip shows it afterwards), else the single page (tears).
+    static u32 back_fb() {
+        if constexpr (double_buffered) return active_fb_ ? Layout::fb_a : Layout::fb_b;
+        else                           return Layout::fb_a;
+    }
+
     // Build a full-screen XDL for framebuffer at `fb_addr` and upload it to `dest`.
     static void build_and_upload_xdl(u32 fb_addr, u32 dest) {
         u8 buf[24];
@@ -74,6 +113,65 @@ struct OverlayHal {
         vbxe::xdl_enable<Config>();
     }
 
+    // ── Sprite seams (called from the generic SpriteManager) ──
+
+    // Register a shape by its ROM pointer, lazily uploading it to VRAM. Called
+    // from sprite() on the main thread (which knows width/format). Packed1bpp is
+    // expanded row-by-row to 8bpp (set pixel -> 0xFF, clear -> 0x00); Pixel8bpp
+    // is uploaded as-is. No-op if already registered (or registry/shape too big).
+    static void overlay_register_shape(const u8* rom, u8 w, u8 h, engine::SpriteFormat fmt) {
+        if (find_shape(rom) || reg_count_ >= kMaxShapes) return;
+        const u16 bytes = static_cast<u16>(w) * h;
+        const u32 vram  = next_shape_;
+
+        if (fmt == engine::SpriteFormat::Pixel8bpp) {
+            Memac::write(vram, rom, bytes);
+        } else {
+            if (w > 64) return;                 // wider than the row scratch
+            const u8 ppb = static_cast<u8>(w / 8);   // pixels per source bit (1 or 2)
+            u8 row[64];
+            for (u8 r = 0; r < h; ++r) {
+                u8 bits = rom[r];
+                u8 c = 0;
+                for (u8 b = 0; b < 8; ++b) {
+                    const u8 v = (bits & 0x80) ? 0xFF : 0x00;
+                    bits = static_cast<u8>(bits << 1);
+                    for (u8 k = 0; k < ppb; ++k) row[c++] = v;
+                }
+                Memac::write(vram + static_cast<u32>(r) * w, row, w);
+            }
+        }
+        registry_[reg_count_++] = ShapeEntry{ rom, vram, w, h, fmt };
+        next_shape_ += bytes;
+    }
+
+    // Start a frame's overlay composition: erase the rects the previous frame
+    // drew (small constant-source clears to transparent), then begin recording
+    // this frame's rects. A full-screen clear every frame is too expensive and
+    // races the async blitter; erasing only what moved is cheap and tear-light.
+    static void overlay_frame_begin() {
+        queue_.reset();
+        for (u8 i = 0; i < prev_count_; ++i)
+            queue_.push(vbxe::bcb_clear(prev_[i].dest, prev_[i].w, prev_[i].h,
+                                        fb_stride, 0));
+        cur_count_ = 0;
+    }
+
+    // Queue one sprite blit into the back buffer at (x, y), and record its rect so
+    // the next frame erases it. Packed1bpp uses the AND-mask to colour the
+    // instance; Pixel8bpp carries its own colours.
+    static void overlay_blit_sprite(const u8* rom, u8 x, u8 y, u8 color) {
+        const ShapeEntry* e = find_shape(rom);
+        if (!e) return;
+        const u32 dest = back_fb() + static_cast<u32>(y) * fb_stride + x;
+        if (e->fmt == engine::SpriteFormat::Pixel8bpp)
+            queue_.push(vbxe::bcb_sprite(e->vram, dest, e->w, e->h, e->w, fb_stride));
+        else
+            queue_.push(vbxe::bcb_sprite_colored(e->vram, dest, e->w, e->h,
+                                                 e->w, fb_stride, color));
+        if (cur_count_ < kMaxRects) cur_[cur_count_++] = Rect{ dest, e->w, e->h };
+    }
+
     // These VBI-time seams touch VBXE core registers. They do NOT need to guard
     // the MEMAC bank: main-thread VBXE operations run inside an NmiGuard
     // (vbxe_memac.h / vbxe_palette.h), so the VBI can never preempt one — the two
@@ -84,6 +182,9 @@ struct OverlayHal {
     static void overlay_submit() {
         queue_.template submit<Config>();
         queue_.reset();
+        // This frame's drawn rects become next frame's erase list.
+        for (u8 i = 0; i < cur_count_; ++i) prev_[i] = cur_[i];
+        prev_count_ = cur_count_;
     }
 
     // Latch the overlay-vs-playfield/PMG raster collision and clear it for next frame.
@@ -117,6 +218,9 @@ struct NullOverlay {
     static u8   overlay_collision() { return 0; }
     static u8   overlay_blit_collision() { return 0; }
     static void overlay_flip() {}
+    static void overlay_register_shape(const u8*, u8, u8, engine::SpriteFormat) {}
+    static void overlay_frame_begin() {}
+    static void overlay_blit_sprite(const u8*, u8, u8, u8) {}
 };
 
 } // namespace atari

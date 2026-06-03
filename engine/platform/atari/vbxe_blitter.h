@@ -70,6 +70,11 @@ constexpr void pack_addr(u8 out[3], u32 addr) {
 }
 
 // Signed 12-bit step -> 2 little-endian bytes (two's complement in the low 12 bits).
+// NOTE on step_y: the blitter advances the row-base address by step_y after each
+// row, and the X position is internal to the row — so step_y is the FULL row
+// stride, NOT stride-width. (The Phase 3 prompt's "stride - width" was wrong; it
+// renders every row shifted left by `width`, collapsing sprites into a diagonal
+// line and making rectangle fills re-clear only the first row. Hardware-confirmed.)
 constexpr void pack_step_y(u8 out[2], i16 step) {
     out[0] = static_cast<u8>(step & 0xFF);
     out[1] = static_cast<u8>((step >> 8) & 0x0F);
@@ -92,7 +97,7 @@ constexpr BCB bcb_fill_rect(u32 dest, u16 width, u8 height,
     // source_adr unused (constant source); leave zero.
     b.source_step_x = 1;
     pack_addr(b.dest_adr, dest);
-    pack_step_y(b.dest_step_y, static_cast<i16>(dest_stride - width));
+    pack_step_y(b.dest_step_y, static_cast<i16>(dest_stride));
     b.dest_step_x = 1;
     pack_width(b.blt_width, static_cast<u16>(width - 1));
     b.blt_height = static_cast<u8>(height - 1);
@@ -113,14 +118,35 @@ constexpr BCB bcb_sprite(u32 src, u32 dest, u16 width, u8 height,
                          u16 src_stride, u16 dest_stride) {
     BCB b{};
     pack_addr(b.source_adr, src);
-    pack_step_y(b.source_step_y, static_cast<i16>(src_stride - width));
+    pack_step_y(b.source_step_y, static_cast<i16>(src_stride));
     b.source_step_x = 1;
     pack_addr(b.dest_adr, dest);
-    pack_step_y(b.dest_step_y, static_cast<i16>(dest_stride - width));
+    pack_step_y(b.dest_step_y, static_cast<i16>(dest_stride));
     b.dest_step_x = 1;
     pack_width(b.blt_width, static_cast<u16>(width - 1));
     b.blt_height = static_cast<u8>(height - 1);
     b.blt_and_mask = 0xFF;          // real source data (not constant)
+    b.blt_xor_mask = 0x00;
+    b.blt_control = static_cast<u8>(blt_mode::TRANSPARENT | blt_mode::NEXT);
+    return b;
+}
+
+// Blit a 1bpp-expanded sprite, colouring it via the AND-mask. The source holds
+// 0xFF for set pixels and 0x00 for clear; source'' = source & color, so set
+// pixels become `color` and clear pixels become 0 (transparent in mode 1). This
+// lets one expanded shape in VRAM be drawn in any colour per instance.
+constexpr BCB bcb_sprite_colored(u32 src, u32 dest, u16 width, u8 height,
+                                 u16 src_stride, u16 dest_stride, u8 color) {
+    BCB b{};
+    pack_addr(b.source_adr, src);
+    pack_step_y(b.source_step_y, static_cast<i16>(src_stride));
+    b.source_step_x = 1;
+    pack_addr(b.dest_adr, dest);
+    pack_step_y(b.dest_step_y, static_cast<i16>(dest_stride));
+    b.dest_step_x = 1;
+    pack_width(b.blt_width, static_cast<u16>(width - 1));
+    b.blt_height = static_cast<u8>(height - 1);
+    b.blt_and_mask = color;         // set pixel (0xFF) -> color; clear (0x00) -> 0
     b.blt_xor_mask = 0x00;
     b.blt_control = static_cast<u8>(blt_mode::TRANSPARENT | blt_mode::NEXT);
     return b;
@@ -131,10 +157,10 @@ constexpr BCB bcb_copy(u32 src, u32 dest, u16 width, u8 height,
                        u16 src_stride, u16 dest_stride) {
     BCB b{};
     pack_addr(b.source_adr, src);
-    pack_step_y(b.source_step_y, static_cast<i16>(src_stride - width));
+    pack_step_y(b.source_step_y, static_cast<i16>(src_stride));
     b.source_step_x = 1;
     pack_addr(b.dest_adr, dest);
-    pack_step_y(b.dest_step_y, static_cast<i16>(dest_stride - width));
+    pack_step_y(b.dest_step_y, static_cast<i16>(dest_stride));
     b.dest_step_x = 1;
     pack_width(b.blt_width, static_cast<u16>(width - 1));
     b.blt_height = static_cast<u8>(height - 1);
@@ -184,6 +210,13 @@ public:
     template <typename Config>
     void submit() {
         if (count_ == 0) return;
+        // The blitter reads its BCB list from VRAM asynchronously. Wait for any
+        // previous chain to finish before overwriting that list (bounded so a
+        // misbehaving chain can't hang the VBI).
+        for (u16 spin = 0; spin < 50000; ++spin) {
+            if ((static_cast<u8>(Regs<Config>::BLITTER_BUSY) &
+                 (blitter_busy::BUSY | blitter_busy::BCB_LOAD)) == 0) break;
+        }
         queue_[count_ - 1].blt_control &= static_cast<u8>(~blt_mode::NEXT);  // last BCB ends the chain
         using Layout = VRAMLayout<Config>;
         MemacWindow<Config>::write(

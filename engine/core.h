@@ -81,17 +81,6 @@ struct ports<P, void_t<decltype(P::capabilities::joystick_ports)>> {
     static constexpr u8 value = P::capabilities::joystick_ports;
 };
 
-// Capability profile resolver: Platform::capabilities if the platform supplies
-// one, else the engine's reference Capabilities (every field defaulted to
-// absent/zero). This lets minimal platforms (and test mocks) omit the profile
-// and degrade to the baseline paths rather than failing to compile.
-template <typename P, typename = void>
-struct caps_of { using type = engine::Capabilities; };
-template <typename P>
-struct caps_of<P, void_t<typename P::capabilities>> {
-    using type = typename P::capabilities;
-};
-
 } // namespace cdetail
 
 // ── SpriteCollisionState ────────────────────────────────────────────────
@@ -158,7 +147,7 @@ public:
     // charset base at its power-on default.
     template <typename Charset>
     static void init(const Charset& cs) {
-        using caps = typename cdetail::caps_of<Platform>::type;
+        using caps = engine::caps_of_t<Platform>;
         if constexpr (caps::has_blitter) {
             // VBXE overlay bring-up (MEMAC window + full-screen XDL + enable).
             Platform::hal::overlay_init();
@@ -176,7 +165,7 @@ public:
         Platform::hal::install_frame_isr(&frame_service);
     }
     static void init() {
-        using caps = typename cdetail::caps_of<Platform>::type;
+        using caps = engine::caps_of_t<Platform>;
         if constexpr (caps::has_blitter) {
             Platform::hal::overlay_init();
         } else {
@@ -208,7 +197,7 @@ public:
     // on platforms with double-buffered VRAM overlays; the swap itself is done by
     // the backend in frame_service().
     static void flip() {
-        static_assert(cdetail::caps_of<Platform>::type::has_vram,
+        static_assert(engine::caps_of_t<Platform>::has_vram,
                       "flip() requires a platform with VRAM (e.g. VBXE)");
         flip_requested_ = true;
     }
@@ -275,7 +264,7 @@ public:
     // ARCHITECTURE.md "Data Flow Per Frame" order. Non-capturing so its address is
     // a plain void(*)() for install_frame_isr().
     static void frame_service() {
-        using caps = typename cdetail::caps_of<Platform>::type;
+        using caps = engine::caps_of_t<Platform>;
 
         // 0. Suppress idle-dim (the backend would otherwise dim/cycle colours
         //    after a few minutes of no console/keyboard input).
@@ -301,9 +290,14 @@ public:
         //    has its own collision model; baseline writes P/M hardware sprites.
         if (hooks.pre_sprite_commit) hooks.pre_sprite_commit();
 
+        // Commit buffered sprites — self-dispatching by backend: the VBXE path
+        // (commit_blitter) clears the back buffer and queues a blit per active
+        // sprite; the baseline path (commit_pm) writes P/M memory. (pm_buffer_ is
+        // ignored on the blitter path.)
+        sprites.commit(pm_buffer_);
+
         if constexpr (caps::has_blitter) {
-            // VBXE: submit the frame's queued blitter commands (the sprite/bitmap
-            // paths that fill the queue arrive in 4b — empty submit is a no-op).
+            // VBXE: run the queued blits (upload the BCB chain + start the blitter).
             Platform::hal::overlay_submit();
 
             // 4. Latch overlay collisions (overlay↔PF/PMG and overlay↔overlay).
@@ -321,10 +315,7 @@ public:
                 }
             }
         } else {
-            // Baseline P/M path.
-            sprites.commit(pm_buffer_);
-
-            // 4. Latch this frame's collisions, then clear for the next.
+            // Baseline P/M path: latch this frame's collisions, then clear.
             for (u8 i = 0; i < 4; ++i) {
                 collisions_.s_bg[i] = Platform::hal::coll_player_playfield(i);
                 collisions_.s_s[i]  = Platform::hal::coll_player_player(i);

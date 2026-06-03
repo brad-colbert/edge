@@ -56,11 +56,25 @@ struct ScreenText {
 };
 struct GameConfig {
     using screens = engine::ScreenSet<ScreenText>;
-    static constexpr u8 max_sprites    = 1;
+    static constexpr u8 max_sprites    = 4;
     static constexpr u8 sound_channels = 1;
 };
 
 using Game = engine::Core<Platform, GameConfig>;
+
+// Sprite-demo shapes (MODE 3). kBall is a Packed1bpp P/M-style 8x8 bitmap
+// (coloured per-instance via sprite_color); kPix is a Pixel8bpp 8x8 shape whose
+// rows carry palette-1 indices 1..8 directly (index 0 = transparent).
+constexpr auto kBall = engine::make_sprite<8, 8>({
+    0b00111100, 0b01111110, 0b11111111, 0b11111111,
+    0b11111111, 0b11111111, 0b01111110, 0b00111100,
+});
+constexpr auto kPix = engine::make_pixel_sprite<8, 8>({
+    1,1,1,1,1,1,1,1,  2,2,2,2,2,2,2,2,
+    3,3,3,3,3,3,3,3,  4,4,4,4,4,4,4,4,
+    5,5,5,5,5,5,5,5,  6,6,6,6,6,6,6,6,
+    7,7,7,7,7,7,7,7,  8,8,8,8,8,8,8,8,
+});
 
 // Eight vivid, fully-saturated colours loaded into palette 1 (the overlay's
 // default palette), indices 1..8. Components are 7-bit values in bits 7..1, so
@@ -147,9 +161,9 @@ static void clear_text() {
                                   : "RESULT: STILL CORRUPT");
 }
 
-// Diagnostic mode: 0 = colour bars, 1 = solid fill, 2 = VRAM round-trip probe.
-// Override at configure time with `cmake -DEDGE_VBXE_BRINGUP_MODE=N` (which passes
-// -DVBXE_BRINGUP_MODE=N to the compiler); defaults to 0 (colour bars).
+// Diagnostic mode: 0 = colour bars, 1 = solid fill, 2 = VRAM round-trip probe,
+// 3 = two animated sprites (blitter). Override at configure time with
+// `cmake -DEDGE_VBXE_BRINGUP_MODE=N` (passes -DVBXE_BRINGUP_MODE=N); default 0.
 #ifndef VBXE_BRINGUP_MODE
 #define VBXE_BRINGUP_MODE 0
 #endif
@@ -164,14 +178,29 @@ int main() {
     // The MEMAC/palette helpers are internally VBI-atomic (NmiGuard), so no manual
     // NMI masking is needed here — the VBXE's $D6xx register accesses in the VBI
     // can't interleave a $B000 window burst.
-#if VBXE_BRINGUP_MODE == 2
-    run_probe();            // overlay stays transparent; text result shows through
-#elif VBXE_BRINGUP_MODE == 1
-    fill_solid(1);          // solid red over the whole overlay
+#if VBXE_BRINGUP_MODE == 3
+    // Sprite demo: two sprites bouncing horizontally, drawn by the blitter. Wipe
+    // the ANTIC screen so the cleared (transparent) overlay shows a dark field.
+    // Positions are buffered each frame; the frame service clears the back buffer
+    // and blits the active sprites.
+    clear_text();
+    Game::sprite_color(0, 1);   // kBall coloured palette-1 index 1 (red), sticky
+    Game::run([](const auto&) {
+        static u16 t = 0; ++t;
+        const u8 x0 = static_cast<u8>(40 + (t % 200));
+        const u8 x1 = static_cast<u8>(40 + ((t + 100) % 200));
+        Game::sprite(0, kBall, x0, 100);
+        Game::sprite(1, kPix,  x1, 140);
+    });
 #else
+#  if VBXE_BRINGUP_MODE == 2
+    run_probe();            // overlay stays transparent; text result shows through
+#  elif VBXE_BRINGUP_MODE == 1
+    fill_solid(1);          // solid red over the whole overlay
+#  else
     paint_test_bars();      // eight vivid colour bars
-#endif
-
+#  endif
     // Idle loop — the frame service runs each VBI; nothing else to do.
     Game::run([](const auto&) {});
+#endif
 }

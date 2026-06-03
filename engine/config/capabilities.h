@@ -28,6 +28,25 @@ enum class NetworkTransport : u8 {
     Serial,
 };
 
+struct Capabilities; // (defined below)
+
+namespace cap_detail {
+template <typename...> using void_t = void;
+}
+
+// caps_of<P>::type — a platform's capability profile if it has one, else the
+// reference Capabilities (every field defaulted to absent/zero). Lets minimal
+// platforms and test mocks omit the profile and degrade to baseline paths rather
+// than failing to compile. Used by the engine subsystems (core.h, sprites.h).
+template <typename P, typename = void>
+struct caps_of { using type = Capabilities; };
+template <typename P>
+struct caps_of<P, cap_detail::void_t<typename P::capabilities>> {
+    using type = typename P::capabilities;
+};
+template <typename P>
+using caps_of_t = typename caps_of<P>::type;
+
 struct Capabilities {
     // ── Graphics ──
     static constexpr bool has_hardware_sprites = false;

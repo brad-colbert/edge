@@ -22,10 +22,22 @@
 //
 // Depends on types.h and interrupt.h.
 
+#include "config/capabilities.h"
 #include "interrupt.h"
 #include "types.h"
 
 namespace engine {
+
+// ── Sprite pixel formats ──────────────────────────────────────────────
+//
+// How a shape's pixels are packed. Neutral (describes packing, not a backend):
+//   Packed1bpp — 1 bit/pixel, 1 byte/row (the Atari P/M format). Renders on any
+//                backend; on a blitter platform it is expanded to 8bpp in VRAM
+//                and coloured per-instance.
+//   Pixel8bpp  — 1 byte/pixel colour indices (W*H bytes). Richer art for blitter
+//                platforms; not representable in hardware P/M, so it requires a
+//                blitter (a static_assert enforces this in sprite()).
+enum class SpriteFormat : u8 { Packed1bpp, Pixel8bpp };
 
 // ── SpriteShape ───────────────────────────────────────────────────────
 //
@@ -40,6 +52,7 @@ template <u8 Width, u8 Height>
 struct SpriteShape {
     static constexpr u8 width  = Width;
     static constexpr u8 height = Height;
+    static constexpr SpriteFormat format = SpriteFormat::Packed1bpp;
     u8 data[Height];
 };
 
@@ -49,6 +62,28 @@ template <u8 Width, u8 Height>
 constexpr SpriteShape<Width, Height> make_sprite(const u8 (&rows)[Height]) {
     SpriteShape<Width, Height> s{};
     for (u8 i = 0; i < Height; ++i) s.data[i] = rows[i];
+    return s;
+}
+
+// ── PixelShape ────────────────────────────────────────────────────────
+//
+// An 8bpp shape: `Width*Height` bytes of colour indices (index 0 = transparent).
+// Same surface as SpriteShape (width/height/format/data), so the one `sprite()`
+// template consumes either. Blitter-only (sprite() static_asserts on baseline).
+template <u8 Width, u8 Height>
+struct PixelShape {
+    static constexpr u8 width  = Width;
+    static constexpr u8 height = Height;
+    static constexpr SpriteFormat format = SpriteFormat::Pixel8bpp;
+    u8 data[static_cast<u16>(Width) * Height];
+};
+
+// Build a PixelShape from a braced array of W*H colour indices, row-major.
+template <u8 Width, u8 Height>
+constexpr PixelShape<Width, Height> make_pixel_sprite(
+        const u8 (&px)[static_cast<u16>(Width) * Height]) {
+    PixelShape<Width, Height> s{};
+    for (u16 i = 0; i < static_cast<u16>(Width) * Height; ++i) s.data[i] = px[i];
     return s;
 }
 
@@ -109,6 +144,8 @@ public:
     static constexpr u8 kPlayers  = 4;
     static constexpr u8 kMissiles = 4;
 
+    using caps = engine::caps_of_t<Platform>;
+
     // ── Logical sprite state (buffered; committed during the frame service) ──
     template <typename Shape>
     void sprite(u8 slot, const Shape& shape, u8 x, u8 y) {
@@ -121,6 +158,16 @@ public:
         s.shape  = shape.data;
         s.flags  = static_cast<u8>(LogicalSprite::FLAG_ACTIVE |
                                    LogicalSprite::FLAG_VISIBLE);
+        // On a blitter backend, register the shape (lazily uploaded to VRAM and
+        // keyed by its ROM pointer) so the commit phase can blit it. The shape's
+        // width/format are only known here (the Shape type), not in LogicalSprite.
+        if constexpr (caps::has_blitter) {
+            Platform::hal::overlay_register_shape(
+                shape.data, Shape::width, Shape::height, Shape::format);
+        } else {
+            static_assert(Shape::format == SpriteFormat::Packed1bpp,
+                "Pixel8bpp sprites require a blitter platform (e.g. VBXE)");
+        }
     }
 
     // Set a sprite's colour (its hardware colour). The multiplexer applies it to the
@@ -171,6 +218,14 @@ public:
             order_[j] = key;
         }
 
+        // On a blitter backend there are no hardware-player limits, so there is
+        // no zone grouping — the Y-sort above is enough for back-to-front draw
+        // order. (commit_blitter walks order_[0..active_count_).)
+        if constexpr (caps::has_blitter) {
+            zone_count_ = 0;
+            return;
+        }
+
         // Greedy grouping: ceil(active / 4) zones, capped at MaxZones. Sprites
         // beyond MaxZones*4 (lowest on screen) are dropped.
         u8 placed = active_count_;
@@ -212,8 +267,29 @@ public:
     // sprite's Y offset, write zone-0 horizontal positions, push projectile
     // positions, and record this frame's dirty ranges for the next clear.
     // `sprite_base` points at the sprite base (a real address on hardware, a test buffer
-    // under the simulator).
+    // under the simulator). On a blitter backend it is ignored — sprites are
+    // composed in VRAM via the overlay seams instead of P/M memory.
     void commit(u8* sprite_base) {
+        if constexpr (caps::has_blitter) {
+            commit_blitter();
+        } else {
+            commit_pm(sprite_base);
+        }
+    }
+
+    // Blitter commit: clear the back buffer, then blit each active sprite (sorted
+    // back-to-front by update_zones) into it via the overlay seams. No P/M memory,
+    // no tracked-range clear, no zone-0 register writes. The frame service runs
+    // the queued blits afterwards (overlay_submit).
+    void commit_blitter() {
+        Platform::hal::overlay_frame_begin();
+        for (u8 i = 0; i < active_count_; ++i) {
+            const LogicalSprite& s = sprites_[order_[i]];
+            Platform::hal::overlay_blit_sprite(s.shape, s.x, s.y, s.color);
+        }
+    }
+
+    void commit_pm(u8* sprite_base) {
         const u8 res = static_cast<u8>(res_);
 
         // 1. Clear last frame's dirty range for each player.
@@ -287,6 +363,12 @@ public:
     // simulator (no hardware raster), consistent with the backend dispatcher.
     template <typename IM>
     void build_raster_hooks(IM& im) {
+        // A blitter backend has no hardware players to reposition mid-frame, so no
+        // zone-boundary DLIs are needed — just clear any stale dynamic hooks.
+        if constexpr (caps::has_blitter) {
+            im.begin_dynamic();
+            return;
+        }
         s_active_   = this;
         s_hook_zone_ = 0;
         im.begin_dynamic();
