@@ -74,6 +74,11 @@ struct OverlayHal {
         vbxe::xdl_enable<Config>();
     }
 
+    // These VBI-time seams touch VBXE core registers. They do NOT need to guard
+    // the MEMAC bank: main-thread VBXE operations run inside an NmiGuard
+    // (vbxe_memac.h / vbxe_palette.h), so the VBI can never preempt one — the two
+    // contexts never interleave their VBXE access.
+
     // Submit the frame's queued blitter commands (no-op while the queue is empty,
     // i.e. until the 4b sprite/bitmap paths push BCBs).
     static void overlay_submit() {

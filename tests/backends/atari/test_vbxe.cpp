@@ -142,7 +142,9 @@ static_assert(kXdl.buf[2] == 239,    "RPTL = height-1");
 static_assert(kXdl.buf[3] == 0x45 && kXdl.buf[4] == 0x23 && kXdl.buf[5] == 0x01,
                                      "OVADR address bytes");
 static_assert(kXdl.buf[6] == 0x40 && kXdl.buf[7] == 0x01, "OVSTEP = 320");
-static_assert(kXdl.buf[8] == v::ov_width::NORMAL, "ATT width NORMAL");
+static_assert(kXdl.buf[8] == static_cast<v::u8>(v::ov_width::NORMAL | (v::ATT_OV_PALETTE << 4)),
+                                     "ATT width NORMAL + OV palette 1");
+static_assert(kXdl.buf[8] == 0x11,   "ATT byte1 = 0x11 (normal width, OV palette 1)");
 static_assert(kXdl.buf[9] == 0xFF,   "ATT priority 255");
 
 // ── 7. Default palette ───────────────────────────────────────────────

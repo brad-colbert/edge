@@ -15,6 +15,7 @@
 
 #include "../../types.h"
 #include "laoo_palette.h"
+#include "nmi.h"             // atari::NmiGuard — palette writes must not race the VBI
 #include "vbxe_registers.h"
 
 namespace atari::vbxe {
@@ -55,6 +56,7 @@ inline constexpr Palette<256> default_palette_0 = detail::make_laoo_palette();
 template <typename Config, u16 N>
 void upload_palette(u8 palette_index, const Palette<N>& pal) {
     using R = Regs<Config>;
+    NmiGuard cs;   // the PSEL/CSEL/CR/CG/CB stream must not be interleaved by the VBI
     R::PSEL = palette_index;
     R::CSEL = 0;
     for (u16 i = 0; i < N; ++i) {
@@ -68,6 +70,7 @@ void upload_palette(u8 palette_index, const Palette<N>& pal) {
 template <typename Config>
 void set_color(u8 palette, u8 index, u8 r, u8 g, u8 b) {
     using R = Regs<Config>;
+    NmiGuard cs;   // PSEL/CSEL/CR/CG/CB is a multi-write sequence; keep it atomic vs the VBI
     R::PSEL = palette;
     R::CSEL = index;
     R::CR = r;

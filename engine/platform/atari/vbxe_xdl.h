@@ -46,12 +46,19 @@ namespace xdlc {
     inline constexpr u16 END    = 0x8000;  // last XDL record, wait for VSYNC
 } // namespace xdlc
 
-// ATT byte 1: overlay/map width (the palette nibbles default to 0 here).
+// ATT byte 1 fields (manual p12): b0-b1 OV_WIDTH, b4-b5 XDL OV PALETTE,
+// b6-b7 XDL PF PALETTE.
 namespace ov_width {
     inline constexpr u8 NARROW = 0;   // 256px
     inline constexpr u8 NORMAL = 1;   // 320px
     inline constexpr u8 WIDE   = 2;   // 336px
 } // namespace ov_width
+
+// The overlay reads its colours from this hardware palette. Palette 1 is the
+// manual's default for the overlay (palette 0 is the GTIA/playfield palette),
+// and is where the engine/game uploads the overlay colours. The field occupies
+// b4-b5 of ATT byte 1.
+inline constexpr u8 ATT_OV_PALETTE = 1;
 
 // Build a single-record full-screen overlay XDL into `buf`. Returns bytes used
 // (<= 22). `fb_addr` is the 19-bit VRAM framebuffer address; `fb_stride` the
@@ -88,7 +95,10 @@ constexpr u8 build_fullscreen_xdl(u8* buf, u32 fb_addr, u16 fb_stride, u8 height
         // CHBASE: font base in 2K pages within VBXE VRAM.
         buf[p++] = static_cast<u8>(VRAMLayout<Config>::fonts >> 11);
     }
-    buf[p++] = ov_width::NORMAL;                      // ATT byte1: width + palette(0)
+    // ATT byte1: NORMAL width + select OV palette 1 (b4-b5). Selecting the
+    // overlay's palette here is required — leaving the field 0 forces palette 0
+    // (the playfield palette), so overlay colours would come from the wrong set.
+    buf[p++] = static_cast<u8>(ov_width::NORMAL | (ATT_OV_PALETTE << 4));
     buf[p++] = 0xFF;                                  // ATT byte2: priority (overlay on top)
     return p;
 }

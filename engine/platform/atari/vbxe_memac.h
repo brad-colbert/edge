@@ -15,6 +15,7 @@
 
 #include "../../mmio.h"
 #include "../../types.h"
+#include "nmi.h"             // atari::NmiGuard — VBXE access must not race the VBI
 #include "registers.h"       // atari::reg::PORTB (MEMAC-B EXTSEL warning)
 #include "vbxe_config.h"
 #include "vbxe_registers.h"
@@ -96,14 +97,29 @@ struct MemacWindow {
 
     // Bulk transfers between CPU RAM and VRAM. vram_addr is a linear VRAM offset
     // (0 .. 512K); the window handles any bank boundaries the run crosses.
+    //
+    // Two-part hazard fix (both required), proven on hardware via the bring-up
+    // probe: a VBI that touches a VBXE $D6xx register while the MEMAC window is
+    // ENABLED (MGE set) corrupts VRAM at the window's current address — whether
+    // or not the CPU is mid-burst. So each transfer (1) runs inside an NmiGuard
+    // (no VBI while MGE is up for the burst), and (2) closes the window (clears
+    // MGE) before re-enabling NMI, so VBIs between transfers see a disabled
+    // window and can't corrupt VRAM. MGE only gates the CPU aperture; the overlay
+    // video fetch reads VRAM independently, so the display is unaffected.
     static void write(u32 vram_addr, const u8* src, u16 len) {
+        NmiGuard cs;
         Window{}.copy(vram_addr, src, len);
+        disable();
     }
     static void read(u32 vram_addr, u8* dst, u16 len) {
+        NmiGuard cs;
         Window{}.read(vram_addr, dst, len);
+        disable();
     }
     static void fill(u32 vram_addr, u32 len, u8 value) {
+        NmiGuard cs;
         Window{}.fill(vram_addr, len, value);
+        disable();
     }
 };
 

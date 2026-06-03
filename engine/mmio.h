@@ -15,6 +15,13 @@
 // [[gnu::always_inline]] each access collapses to a single LDA/STA against the
 // literal address even at -O0. Depends only on types.h (+ <string.h> for the
 // bulk window copy/fill helpers).
+//
+// CAUTION: the banked-window bulk helpers select a bank and then access the
+// window; the bank-select register is shared hardware state. If an interrupt
+// (e.g. a VBI that also touches the same chip) preempts a transfer and changes
+// or disturbs the bank, the rest of the transfer lands in the wrong place. The
+// owning backend must keep the bank stable across interrupts (the Atari VBXE
+// backend does this by having its VBI save/restore MEMAC_BANK_SEL).
 
 #include <string.h>
 
@@ -99,7 +106,8 @@ struct MmioBankedWindow {
             Base + (static_cast<u16>(addr) & offset_mask));
     }
 
-    // Efficient banked fill: per-bank memset runs (not a byte loop).
+    // Efficient banked fill: per-bank memset runs. Each run stays within one
+    // bank's window, so no run straddles a bank switch.
     inline void fill(u32 start, u32 len, u8 value) const noexcept {
         while (len) {
             const u16 off = static_cast<u16>(start) & offset_mask;

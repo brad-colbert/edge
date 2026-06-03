@@ -73,6 +73,15 @@ if(EDGE_BUILD_DEMO)
     set_target_properties(atari_scroll_test PROPERTIES OUTPUT_NAME "atari_scroll_test.xex")
     target_link_options(atari_scroll_test PRIVATE
         "LINKER:--Map=$<TARGET_FILE_DIR:atari_scroll_test>/atari_scroll_test.map")
+
+    # VBXE Phase 4a bring-up smoke test — independent .xex (no charset header).
+    add_executable(atari_vbxe_bringup demo/vbxe_bringup.cpp)
+    target_compile_options(atari_vbxe_bringup PRIVATE
+        -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra)
+    target_include_directories(atari_vbxe_bringup PRIVATE ${CMAKE_SOURCE_DIR})
+    set_target_properties(atari_vbxe_bringup PROPERTIES OUTPUT_NAME "atari_vbxe_bringup.xex")
+    target_link_options(atari_vbxe_bringup PRIVATE
+        "LINKER:--Map=$<TARGET_FILE_DIR:atari_vbxe_bringup>/atari_vbxe_bringup.map")
     return()
 endif()
 
@@ -94,6 +103,13 @@ add_subdirectory(tests)
 #  cmake/atari-toolchain.cmake and the add_executable target it enables.)
 find_program(MOS_ATARI8_CXX mos-atari8-dos-clang++)
 if(MOS_ATARI8_CXX)
+    # The header-only engine is consumed by #include, so the custom-command demo
+    # builds (unlike compiled targets) don't auto-track header changes. Glob the
+    # engine headers and add them to each demo's DEPENDS so editing any engine
+    # header re-links the affected .xex.
+    file(GLOB_RECURSE EDGE_ENGINE_HEADERS CONFIGURE_DEPENDS
+         ${CMAKE_SOURCE_DIR}/engine/*.h)
+
     set(HW_TEST_XEX ${CMAKE_BINARY_DIR}/atari_hw_test.xex)
     # Linker map (memory layout + final symbol/function addresses) emitted
     # alongside the .xex to aid hardware debugging on Altirra/Fujisan. Link-step
@@ -109,6 +125,7 @@ if(MOS_ATARI8_CXX)
                 -Wl,--Map=${HW_TEST_MAP}
         DEPENDS ${CMAKE_SOURCE_DIR}/demo/atari_hw_test.cpp
                 ${USER_CHARSET_HEADER}
+                ${EDGE_ENGINE_HEADERS}
         BYPRODUCTS ${HW_TEST_MAP}
         COMMENT "Building Atari XEX demo (atari_hw_test.xex)"
         VERBATIM)
@@ -130,10 +147,30 @@ if(MOS_ATARI8_CXX)
                 -o ${SCROLL_TEST_XEX}
                 -Wl,--Map=${SCROLL_TEST_MAP}
         DEPENDS ${CMAKE_SOURCE_DIR}/demo/atari_scroll_test.cpp
+                ${EDGE_ENGINE_HEADERS}
         BYPRODUCTS ${SCROLL_TEST_MAP}
         COMMENT "Building Atari XEX demo (atari_scroll_test.xex)"
         VERBATIM)
     add_custom_target(atari_scroll_test DEPENDS ${SCROLL_TEST_XEX})
+
+    # ── VBXE Phase 4a bring-up smoke test (atari_vbxe_bringup.xex) ───────
+    #   cmake --build build --target atari_vbxe_bringup  # -> build/atari_vbxe_bringup.xex
+    set(VBXE_BRINGUP_XEX ${CMAKE_BINARY_DIR}/atari_vbxe_bringup.xex)
+    set(VBXE_BRINGUP_MAP ${CMAKE_BINARY_DIR}/atari_vbxe_bringup.map)
+    add_custom_command(
+        OUTPUT ${VBXE_BRINGUP_XEX}
+        COMMAND ${MOS_ATARI8_CXX}
+                -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra
+                -I${CMAKE_SOURCE_DIR}
+                ${CMAKE_SOURCE_DIR}/demo/vbxe_bringup.cpp
+                -o ${VBXE_BRINGUP_XEX}
+                -Wl,--Map=${VBXE_BRINGUP_MAP}
+        DEPENDS ${CMAKE_SOURCE_DIR}/demo/vbxe_bringup.cpp
+                ${EDGE_ENGINE_HEADERS}
+        BYPRODUCTS ${VBXE_BRINGUP_MAP}
+        COMMENT "Building Atari XEX demo (atari_vbxe_bringup.xex)"
+        VERBATIM)
+    add_custom_target(atari_vbxe_bringup DEPENDS ${VBXE_BRINGUP_XEX})
 else()
-    message(STATUS "mos-atari8-dos-clang++ not found; 'atari_hw_test'/'atari_scroll_test' demo targets unavailable")
+    message(STATUS "mos-atari8-dos-clang++ not found; 'atari_hw_test'/'atari_scroll_test'/'atari_vbxe_bringup' demo targets unavailable")
 endif()
