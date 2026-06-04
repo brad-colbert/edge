@@ -280,6 +280,14 @@ Background / compositing (for sprites-over-bitmap):
 - `Game::overlay_publish_background()` — publish the bitmap drawn via `Game::gfx()`
   to the live display page(s); sprite footprints are then restored from it each
   frame
+- `Game::antic_playfield(bool enable)` — enable/disable the ANTIC playfield
+  (character/bitmap) DMA. **Atari-only, opt-in.** When an opaque VBXE overlay
+  covers the screen the ANTIC playfield is invisible, but its per-scanline VRAM
+  DMA starves the blitter's restore copies and can collapse the compositor's
+  per-frame budget (e.g. `Background::Bitmap` ran the loop at ~8 Hz instead of
+  60). Call `antic_playfield(false)` once after init — and after any
+  `set_screen`, which re-enables it — to free the bus; the overlay keeps driving
+  the display. Leave it enabled for transparent overlays that show ANTIC through.
 
 Overlay collision snapshots, latched at the frame service:
 

@@ -226,6 +226,17 @@ public:
         Platform::hal::overlay_publish_background();
     }
 
+    // Enable/disable the ANTIC playfield (character/bitmap) DMA. When an opaque
+    // VBXE overlay covers the screen the ANTIC playfield is invisible, but its
+    // per-scanline VRAM-bus DMA starves the blitter's restore copies and collapses
+    // the overlay compositor's per-frame budget. Call antic_playfield(false) once
+    // after init (and after any set_screen, which re-enables it) to free the bus;
+    // the overlay keeps driving the display. Leave it enabled for transparent
+    // overlays that show ANTIC through. Atari-only; opt-in (see API_REFERENCE.md).
+    static void antic_playfield(bool enable) {
+        Platform::hal::set_antic_playfield_dma(enable);
+    }
+
     // ── Overlay text mode (VBXE Text_80; no-op on platforms without it) ──
     // A dedicated text surface separate from the baseline ANTIC TextRegion API.
     // Chars are raw font indices (no screen-code remap); `attr` is the cell colour
