@@ -1,0 +1,460 @@
+#ifndef ENGINE_PLATFORM_ATARI_VBXE_OVERLAY_H
+#define ENGINE_PLATFORM_ATARI_VBXE_OVERLAY_H
+
+// platform/atari/vbxe_overlay.h — the VBXE overlay HAL seam.
+//
+// This is the backend half of the portable engine's graphics seam. The generic
+// engine (engine/core.h) reaches VBXE only through neutral, capability-gated
+// `overlay_*` static methods — it never names a VBXE type. All VBXE state (the
+// blitter queue, the active-framebuffer index) and all VBXE types (Config, the
+// MEMAC window, the XDL/blitter/layout helpers) live here, behind the seam.
+//
+// The Platform bundles OverlayHal<Config> into Platform::hal (see platform.h) so
+// `Platform::hal::overlay_init()` etc. resolve alongside the baseline Hal
+// methods. Non-VBXE platforms get NullOverlay (no-op seams). Phase 4a wires the
+// bring-up spine (init / submit / collision / flip); the sprite-commit and
+// bitmap paths that populate the queue land in 4b.
+
+#include "../../sprites.h"   // engine::SpriteFormat (neutral shape pixel format)
+#include "../../types.h"
+#include "vbxe_blitter.h"
+#include "vbxe_config.h"
+#include "vbxe_layout.h"
+#include "vbxe_memac.h"
+#include "vbxe_registers.h"
+#include "vbxe_xdl.h"
+
+namespace atari {
+
+using engine::u8;
+using engine::u16;
+using engine::u32;
+
+// Overlay seam for a VBXE Config. All members static (the HAL is stateless from
+// the engine's view; the VBXE state below is per-Config static storage).
+template <typename Config>
+struct OverlayHal {
+    using Layout = vbxe::VRAMLayout<Config>;
+    using Memac  = vbxe::MemacWindow<Config>;
+    using R      = vbxe::Regs<Config>;
+
+    static constexpr u16 fb_stride = static_cast<u16>(Config::fb_width);
+    static constexpr u8  fb_height = 240;                       // overlay scanlines
+    static constexpr bool double_buffered =
+        (Config::buffer_policy == vbxe::Buffers::Double);
+    // sprites-over-bitmap: compose over (and restore from) a VRAM master canvas
+    // instead of a flat colour. Drawing targets the master; the compositor copies
+    // master->framebuffer under sprite footprints rather than clearing to bg_color_.
+    static constexpr bool bitmap_bg =
+        (Config::background == vbxe::Background::Bitmap);
+
+    // Two XDL copies in the reserved XDL region (single-buffer uses only the first).
+    static constexpr u32 xdl_a = Layout::xdl;
+    static constexpr u32 xdl_b = Layout::xdl + 32;
+
+    // ── Backend VBXE state (lives here, never in the generic engine) ──
+    static inline vbxe::BlitterQueue<16> queue_{};
+    static inline u8 active_fb_ = 0;       // 0 = framebuffer A shown, 1 = B
+
+    // Shape registry: maps a ROM shape pointer to its uploaded VRAM copy. Shapes
+    // are bump-allocated in the layout's shapes region and never freed (they live
+    // for the run). Keyed by the ROM pointer the generic SpriteManager already
+    // holds, so no per-sprite width/format needs to live in LogicalSprite.
+    static constexpr u8 kMaxShapes = 32;
+    struct ShapeEntry {
+        const u8*           rom;
+        u32                 vram;
+        u8                  w, h;
+        engine::SpriteFormat fmt;
+    };
+    static inline ShapeEntry registry_[kMaxShapes] = {};
+    static inline u8  reg_count_  = 0;
+    static inline u32 next_shape_ = Layout::shapes;
+
+    // Dirty-rect bookkeeping: each frame erases the small rects the previous frame
+    // drew (cheap, vs a full-screen clear) and records this frame's rects for the
+    // next erase. kMaxRects*2 BCBs (erase + draw) must fit the queue.
+    //
+    // Used for single-buffer (any background) AND double-buffer in Background::Bitmap
+    // mode (where a full-screen master->back copy every frame would keep the blitter
+    // busy the whole frame and starve CPU VRAM access). Double-buffer Flat keeps the
+    // simpler full clear. Because a double-buffer page is recomposed only every other
+    // frame, each page carries its own prev-rect list (prev_[page]); single-buffer
+    // uses index 0 only.
+    static constexpr u8 kMaxRects = 8;
+    static_assert(kMaxRects * 2 <= 16,
+        "erase+draw BCBs (one each per rect) must fit BlitterQueue<16>");
+    struct Rect { u32 dest; u8 w, h; };
+    static inline Rect prev_[2][kMaxRects] = {};
+    static inline Rect cur_[kMaxRects]     = {};
+    static inline u8   prev_count_[2] = { 0, 0 };
+    static inline u8   cur_count_     = 0;
+
+    // Whether the compositor restores per-rect (dirty-rect) rather than full-clearing
+    // the back page: always single-buffer; double-buffer only with a bitmap background.
+    static constexpr bool dirty_rect = (!double_buffered) || bitmap_bg;
+
+    // Overlay clear/erase colour. 0 = transparent (ANTIC shows through); a non-zero
+    // opaque index makes the overlay a solid field. The per-frame clear and the
+    // single-buffer dirty-rect erase both use it, so sprites erase back to it.
+    static inline u8 bg_color_ = 0;
+
+    static const ShapeEntry* find_shape(const u8* rom) {
+        for (u8 i = 0; i < reg_count_; ++i)
+            if (registry_[i].rom == rom) return &registry_[i];
+        return nullptr;
+    }
+
+    // The framebuffer the current frame composes into: the inactive page when
+    // double-buffered (flip shows it afterwards), else the single page (tears).
+    static u32 back_fb() {
+        if constexpr (double_buffered) return active_fb_ ? Layout::fb_a : Layout::fb_b;
+        else                           return Layout::fb_a;
+    }
+
+    // The canvas the bitmap-drawing seams target: the master in sprites-over-bitmap
+    // mode (the game draws the background there), else the live back buffer.
+    static u32 canvas_fb() {
+        if constexpr (bitmap_bg) return Layout::master;
+        else                     return back_fb();
+    }
+
+    // Index (0 = fb_a, 1 = fb_b) of the page being composed this frame, for the
+    // per-page dirty-rect lists. Single-buffer is always page 0.
+    static u8 compose_page_idx() {
+        if constexpr (double_buffered) return (back_fb() == Layout::fb_a) ? 0 : 1;
+        else                           return 0;
+    }
+
+    // Build a full-screen XDL for framebuffer at `fb_addr` and upload it to `dest`.
+    static void build_and_upload_xdl(u32 fb_addr, u32 dest) {
+        u8 buf[24];
+        const u8 len = vbxe::build_fullscreen_xdl<Config>(buf, fb_addr, fb_stride, fb_height);
+        vbxe::upload_xdl<Config>(buf, len, dest);
+    }
+
+    // Fill a w×h rectangle at `dest` with a solid colour via the blitter (far
+    // faster than a MEMAC memset). Synchronous: waits for the fill to finish before
+    // returning. The NmiGuard makes it safe to call even after the VBI is armed
+    // (init / set_background / bitmap ops), since the VBI shares queue_/the blitter.
+    static void blit_rect(u32 dest, u16 w, u8 h, u8 color) {
+        NmiGuard cs;
+        queue_.reset();
+        queue_.push(vbxe::bcb_fill_rect(dest, w, h, fb_stride, color));
+        queue_.template submit<Config>();
+        for (u16 spin = 0; spin < 50000; ++spin)
+            if (!queue_.template busy<Config>()) break;
+        queue_.reset();
+    }
+
+    // Fill one whole framebuffer page with a solid colour.
+    static void blit_fill(u32 dest, u8 color) { blit_rect(dest, fb_stride, fb_height, color); }
+
+    // Spin until the blitter is idle. The bitmap seams below write VRAM through the
+    // MEMAC window (CPU side); in Background::Bitmap mode the compositor blits the
+    // whole master to the back page asynchronously every frame, reading the master.
+    // A CPU MEMAC write to the master while that copy is in flight is lost (the
+    // blitter has the VRAM bus), so each MEMAC draw waits for idle first — under an
+    // NmiGuard, so the VBI can't start a new compositor blit between the wait and
+    // the write. (When the blitter is already idle this returns at once.)
+    static void wait_blitter_idle() {
+        for (u16 spin = 0; spin < 50000; ++spin)
+            if (!queue_.template busy<Config>()) break;
+    }
+
+    // Opaque VRAM->VRAM copy of one whole framebuffer page (src -> dest).
+    // Synchronous, like blit_fill: NmiGuard makes it safe after the VBI is armed.
+    static void blit_copy(u32 src, u32 dest) {
+        NmiGuard cs;
+        queue_.reset();
+        queue_.push(vbxe::bcb_copy(src, dest, fb_stride, fb_height, fb_stride, fb_stride));
+        queue_.template submit<Config>();
+        for (u16 spin = 0; spin < 50000; ++spin)
+            if (!queue_.template busy<Config>()) break;
+        queue_.reset();
+    }
+
+    // ── Neutral seams the engine calls (gated by caps in core.h) ──
+
+    // One-time bring-up: open the MEMAC window, clear the framebuffer(s) to black,
+    // build + point at the XDL, and enable XDL processing.
+    static void overlay_init() {
+        Memac::init();
+        blit_fill(Layout::fb_a, 0);
+        build_and_upload_xdl(Layout::fb_a, xdl_a);
+        if constexpr (double_buffered) {
+            blit_fill(Layout::fb_b, 0);
+            build_and_upload_xdl(Layout::fb_b, xdl_b);
+        }
+        active_fb_ = 0;
+        vbxe::set_xdl_addr<Config>(xdl_a);
+        vbxe::xdl_enable<Config>();
+    }
+
+    // Set the overlay background colour and paint the framebuffer(s) with it now,
+    // so the field is opaque immediately (and stays so under dirty-rect erasing).
+    // In sprites-over-bitmap mode the colour is the master canvas's base fill: we
+    // fill the master and publish it to the display page(s).
+    static void overlay_set_background(u8 color) {
+        bg_color_ = color;
+        if constexpr (bitmap_bg) {
+            blit_fill(Layout::master, color);
+            overlay_publish_background();
+        } else {
+            blit_fill(Layout::fb_a, color);
+            if constexpr (double_buffered) blit_fill(Layout::fb_b, color);
+        }
+    }
+
+    // Publish the master canvas to the live display page(s). The game calls this
+    // after drawing the background via the bitmap seams (and after any dynamic
+    // edit) to seed/refresh what is shown. No-op outside sprites-over-bitmap mode.
+    static void overlay_publish_background() {
+        if constexpr (bitmap_bg) {
+            blit_copy(Layout::master, Layout::fb_a);
+            if constexpr (double_buffered) blit_copy(Layout::master, Layout::fb_b);
+        }
+    }
+
+    // ── Sprite seams (called from the generic SpriteManager) ──
+
+    // Register a shape by its ROM pointer, lazily uploading it to VRAM. Called
+    // from sprite() on the main thread (which knows width/format). Packed1bpp is
+    // expanded row-by-row to 8bpp (set pixel -> 0xFF, clear -> 0x00); Pixel8bpp
+    // is uploaded as-is. No-op if already registered (or registry/shape too big).
+    static void overlay_register_shape(const u8* rom, u8 w, u8 h, engine::SpriteFormat fmt) {
+        if (find_shape(rom) || reg_count_ >= kMaxShapes) return;
+        const u16 bytes = static_cast<u16>(w) * h;
+        const u32 vram  = next_shape_;
+
+        if (fmt == engine::SpriteFormat::Pixel8bpp) {
+            Memac::write(vram, rom, bytes);
+        } else {
+            if (w > 64) return;                 // wider than the row scratch
+            const u8 ppb = static_cast<u8>(w / 8);   // pixels per source bit (1 or 2)
+            u8 row[64];
+            for (u8 r = 0; r < h; ++r) {
+                u8 bits = rom[r];
+                u8 c = 0;
+                for (u8 b = 0; b < 8; ++b) {
+                    const u8 v = (bits & 0x80) ? 0xFF : 0x00;
+                    bits = static_cast<u8>(bits << 1);
+                    for (u8 k = 0; k < ppb; ++k) row[c++] = v;
+                }
+                Memac::write(vram + static_cast<u32>(r) * w, row, w);
+            }
+        }
+        registry_[reg_count_++] = ShapeEntry{ rom, vram, w, h, fmt };
+        next_shape_ += bytes;
+    }
+
+    // Start a frame's overlay composition. Double-buffer Flat: clear the whole hidden
+    // back page to the background colour (cheap, invisible until the flip). Everything
+    // else (single-buffer, and double-buffer Bitmap) erases only the rects drawn the
+    // last time THIS page was composed — a full clear/copy would race the async blitter
+    // and (in Bitmap mode) keep the blitter busy the whole frame, starving CPU VRAM
+    // draws. In Bitmap mode the erase is a master->page copy (restore the background);
+    // otherwise a flat clear to bg_color_. Then begin recording this frame's rects.
+    static void overlay_frame_begin() {
+        queue_.reset();
+        if constexpr (!dirty_rect) {
+            queue_.push(vbxe::bcb_clear(back_fb(), fb_stride, fb_height,
+                                        fb_stride, bg_color_));
+        } else {
+            const u8  pidx = compose_page_idx();
+            const u32 page = back_fb();
+            for (u8 i = 0; i < prev_count_[pidx]; ++i) {
+                const Rect& r = prev_[pidx][i];
+                if constexpr (bitmap_bg)
+                    queue_.push(vbxe::bcb_copy(
+                        Layout::master + (r.dest - page), r.dest,
+                        r.w, r.h, fb_stride, fb_stride));
+                else
+                    queue_.push(vbxe::bcb_clear(r.dest, r.w, r.h, fb_stride, bg_color_));
+            }
+            cur_count_ = 0;
+        }
+    }
+
+    // Queue one sprite blit into the back buffer at (x, y). Packed1bpp uses the
+    // AND-mask to colour the instance; Pixel8bpp carries its own colours. Dirty-rect
+    // modes also record the footprint so the next compose of this page erases it.
+    static void overlay_blit_sprite(const u8* rom, u8 x, u8 y, u8 color) {
+        const ShapeEntry* e = find_shape(rom);
+        if (!e) return;
+        const u32 dest = back_fb() + static_cast<u32>(y) * fb_stride + x;
+        if (e->fmt == engine::SpriteFormat::Pixel8bpp)
+            queue_.push(vbxe::bcb_sprite(e->vram, dest, e->w, e->h, e->w, fb_stride));
+        else
+            queue_.push(vbxe::bcb_sprite_colored(e->vram, dest, e->w, e->h,
+                                                 e->w, fb_stride, color));
+        if constexpr (dirty_rect)
+            if (cur_count_ < kMaxRects) cur_[cur_count_++] = Rect{ dest, e->w, e->h };
+    }
+
+    // These VBI-time seams touch VBXE core registers. They do NOT need to guard
+    // the MEMAC bank: main-thread VBXE operations run inside an NmiGuard
+    // (vbxe_memac.h / vbxe_palette.h), so the VBI can never preempt one — the two
+    // contexts never interleave their VBXE access.
+
+    // Submit the frame's queued blitter commands (no-op while the queue is empty,
+    // i.e. until the 4b sprite/bitmap paths push BCBs).
+    static void overlay_submit() {
+        queue_.template submit<Config>();
+        queue_.reset();
+        // Dirty-rect modes: this frame's drawn rects become this page's next erase
+        // list (recomposed next frame for single-buffer, in two frames for double).
+        if constexpr (dirty_rect) {
+            const u8 pidx = compose_page_idx();
+            for (u8 i = 0; i < cur_count_; ++i) prev_[pidx][i] = cur_[i];
+            prev_count_[pidx] = cur_count_;
+        }
+    }
+
+    // Latch the overlay-vs-playfield/PMG raster collision and clear it for next frame.
+    static u8 overlay_collision() {
+        const u8 c = static_cast<u8>(R::COLDETECT);
+        R::COLCLR = 0;                        // any write clears COLDETECT
+        return c;
+    }
+
+    // Latch the blitter (overlay-vs-overlay) collision code.
+    static u8 overlay_blit_collision() {
+        return static_cast<u8>(R::BLT_COLLISION);
+    }
+
+    // Present the page composed during the PREVIOUS frame, then flip so this frame
+    // composes the other one. Called at the START of frame composition (before the
+    // sprite commit), so the page being shown has had a full frame's display time
+    // to finish rendering — the wait below returns immediately. This is what keeps
+    // the VBI short: we never busy-wait for the CURRENT frame's blit (that would
+    // overrun the frame and let the next VBI NMI re-enter frame_service → stack
+    // overflow). Single-buffer is a compile-time no-op (composes in place, no flip).
+    static void overlay_present() {
+        if constexpr (double_buffered) {
+            for (u16 spin = 0; spin < 50000; ++spin)
+                if (!queue_.template busy<Config>()) break;
+            active_fb_ = static_cast<u8>(active_fb_ ^ 1);
+            vbxe::set_xdl_addr<Config>(active_fb_ ? xdl_b : xdl_a);
+        }
+    }
+
+    // ── Bitmap-canvas seams (engine/gfx.h BitmapOps draws into the overlay) ──
+    //
+    // The canvas is the overlay framebuffer (8bpp; one byte per pixel = a palette
+    // index). All ops target back_fb() — single-buffer, so that is the visible
+    // page — and are synchronous (blitter rect fills) or direct (MEMAC pixel/row
+    // writes), each VBI-atomic via the NmiGuard in blit_rect / Memac.
+
+    static void overlay_bitmap_clear(u8 color) { blit_fill(canvas_fb(), color); }
+
+    static void overlay_bitmap_fill_rect(u16 x, u16 y, u16 w, u16 h, u8 color) {
+        const u32 dest = canvas_fb() + static_cast<u32>(y) * fb_stride + x;
+        blit_rect(dest, w, static_cast<u8>(h), color);
+    }
+
+    // Plot via the blitter (a 1x1 fill), NOT a per-pixel MEMAC write. The blitter
+    // addresses VRAM linearly (no MEMAC bank switching) and blit_rect is self-
+    // serialising (NmiGuard + wait-for-idle), so a per-pixel draw can't land in the
+    // wrong bank or race the async compositor copy of the master. (A per-pixel MEMAC
+    // write interleaved with the VBI compositor lands in a wrong bank — scattered
+    // pixels across VRAM.) 1-wide fills are proven by hline/vline.
+    static void overlay_bitmap_plot(u16 x, u16 y, u8 color) {
+        const u32 dest = canvas_fb() + static_cast<u32>(y) * fb_stride + x;
+        blit_rect(dest, 1, 1, color);
+    }
+
+    // Copy a w×h 8bpp source image (row-packed, stride == w) into the canvas. The
+    // source is CPU RAM, so this must go through the MEMAC window (the blitter reads
+    // VRAM only). One NmiGuard spans all rows (no VBI interleave), and we wait for
+    // the blitter to be idle first so we never upload to the master while the
+    // compositor copy is reading it.
+    static void overlay_bitmap_blit(u16 x, u16 y, const u8* src, u16 w, u16 h) {
+        NmiGuard cs;
+        wait_blitter_idle();
+        const u32 base = canvas_fb() + static_cast<u32>(y) * fb_stride + x;
+        for (u16 r = 0; r < h; ++r)
+            Memac::write(base + static_cast<u32>(r) * fb_stride,
+                         src + static_cast<u32>(r) * w, w);
+    }
+
+    // ── Overlay text-mode seams (Mode::Text_80; FX Core manual pp.9,14,16) ──
+    //
+    // In text mode the "framebuffer" at OVADR is a character map of char+attribute
+    // byte pairs (char first), one 8x8 glyph cell per pair; the row stride is
+    // 2*cols bytes and the hardware advances OVADR by that step every 8 scanlines.
+    // The font (256 glyphs x 8 bytes, 1bpp) lives at the 2K-aligned `fonts` region
+    // pointed to by CHBASE. Attribute: b0-b6 = foreground palette index (0..127);
+    // b7=1 gives an opaque background of index (attr&127)+128, b7=0 transparent.
+    // The map is fb_a (OVADR); all writes are VBI-atomic via Memac/NmiGuard.
+    static constexpr u16 text_cols      = static_cast<u16>(Config::fb_width / 2);
+    static constexpr u16 text_row_bytes = static_cast<u16>(Config::fb_width);
+    static constexpr u16 text_rows      = static_cast<u16>(fb_height / 8);
+
+    // Upload a 1bpp font (256 glyphs x 8 bytes = 2048) to the CHBASE font region.
+    static void overlay_text_font(const u8* glyphs, u16 bytes) {
+        Memac::write(Layout::fonts, glyphs, bytes);
+    }
+
+    // Fill the whole character map with one char+attribute cell.
+    static void overlay_text_clear(u8 ch, u8 attr) {
+        u8 row[text_row_bytes];
+        for (u16 c = 0; c < text_cols; ++c) {
+            row[c * 2]     = ch;
+            row[c * 2 + 1] = attr;
+        }
+        NmiGuard cs;
+        for (u16 r = 0; r < text_rows; ++r)
+            Memac::write(Layout::fb_a + static_cast<u32>(r) * text_row_bytes,
+                         row, text_row_bytes);
+    }
+
+    // Write one char+attribute cell at (col, row).
+    static void overlay_text_put(u16 col, u16 row, u8 ch, u8 attr) {
+        const u8 cell[2] = { ch, attr };
+        Memac::write(Layout::fb_a + static_cast<u32>(row) * text_row_bytes + col * 2,
+                     cell, 2);
+    }
+
+    // Write a NUL-terminated string at (col, row) with one attribute, clipped to
+    // the row width. The font is indexed by raw byte (PC code page) — no remap.
+    static void overlay_text_print(u16 col, u16 row, const char* s, u8 attr) {
+        u8 buf[text_row_bytes];
+        u16 n = 0;
+        for (; s[n] != '\0' && (col + n) < text_cols; ++n) {
+            buf[n * 2]     = static_cast<u8>(s[n]);
+            buf[n * 2 + 1] = attr;
+        }
+        if (n)
+            Memac::write(Layout::fb_a + static_cast<u32>(row) * text_row_bytes + col * 2,
+                         buf, static_cast<u16>(n * 2));
+    }
+};
+
+// Overlay seam for non-VBXE platforms: every operation is a no-op. The generic
+// engine only calls these inside `if constexpr (caps::has_blitter/...)`, but the
+// names exist so a HalBundle that inherits this always compiles.
+struct NullOverlay {
+    static void overlay_init() {}
+    static void overlay_submit() {}
+    static u8   overlay_collision() { return 0; }
+    static u8   overlay_blit_collision() { return 0; }
+    static void overlay_present() {}
+    static void overlay_register_shape(const u8*, u8, u8, engine::SpriteFormat) {}
+    static void overlay_frame_begin() {}
+    static void overlay_blit_sprite(const u8*, u8, u8, u8) {}
+    static void overlay_set_background(u8) {}
+    static void overlay_publish_background() {}
+    static void overlay_bitmap_clear(u8) {}
+    static void overlay_bitmap_fill_rect(u16, u16, u16, u16, u8) {}
+    static void overlay_bitmap_plot(u16, u16, u8) {}
+    static void overlay_bitmap_blit(u16, u16, const u8*, u16, u16) {}
+    static void overlay_text_font(const u8*, u16) {}
+    static void overlay_text_clear(u8, u8) {}
+    static void overlay_text_put(u16, u16, u8, u8) {}
+    static void overlay_text_print(u16, u16, const char*, u8) {}
+};
+
+} // namespace atari
+
+#endif // ENGINE_PLATFORM_ATARI_VBXE_OVERLAY_H

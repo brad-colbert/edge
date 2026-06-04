@@ -1,6 +1,6 @@
 # Hardware validation demo (`atari_hw_test.xex`)
 
-> **Applies to EDGE v0.1.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
+> **Applies to EDGE v0.2.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
 
 A minimal Atari 8-bit program that drives every engine subsystem at once, so
 the engine's live ANTIC path can be confirmed on real hardware / emulators
@@ -100,3 +100,76 @@ The `#` left-margin column is intentionally **not** visible — it lives in the
 left border (the HSCROLL fetch margin). See the ANTIC scroll quirks captured in
 the engine memory / [`engine/scroll.h`](../engine/scroll.h) and ADR-027 in
 [`docs/DECISIONS.md`](../docs/DECISIONS.md).
+
+# VBXE demos
+
+Four additional demos exercise the VBXE (`atari::gfx::VBXE<...>`) graphics path —
+the 256-colour overlay, the blitter-backed bitmap subsystem (`Game::gfx()`), the
+hardware 80-column text overlay, and the sprites-over-bitmap compositor. They
+build to independent `.xex` targets and need a VBXE-capable target.
+
+## Common setup (all four)
+
+- **Run with BASIC disabled.** The default MEMAC-A window is `$B000–$BFFF`; with
+  BASIC enabled that range is ROM and the CPU's framebuffer writes won't reach
+  VRAM. On Altirra: disable the BASIC ROM (or hold OPTION at boot).
+- **Altirra:** enable the VBXE device with the **FX core** (not the GTIA-emu core).
+- The engine default register base is `$D640`; a `$D740` board needs a `Config`
+  override (`gfx::VBXE<vbxe::Config<...RegBase::D740...>>`).
+
+## Build
+
+```sh
+cmake --build build --target atari_vbxe_bringup    # -> build/atari_vbxe_bringup.xex
+cmake --build build --target atari_vbxe_gfx        # -> build/atari_vbxe_gfx.xex
+cmake --build build --target atari_vbxe_text       # -> build/atari_vbxe_text.xex
+cmake --build build --target atari_vbxe_sprites    # -> build/atari_vbxe_sprites.xex
+```
+
+(Or configure with `-DEDGE_BUILD_DEMO=ON` against the Atari toolchain, as above.)
+
+## `atari_vbxe_bringup` (`vbxe_bringup.cpp`)
+
+Phase-4a overlay bring-up smoke test: brings the VBXE overlay up through the
+engine and paints a diagnostic pattern with the `atari::vbxe` power-user header.
+
+| Observation | Proves |
+|---|---|
+| Eight horizontal colour bars fill the screen | overlay compositing over ANTIC at top priority |
+| A normal ANTIC text screen instead | overlay isn't compositing (check setup) |
+| A black screen instead | framebuffer writes aren't reaching VRAM (BASIC/MEMAC) |
+
+## `atari_vbxe_gfx` (`vbxe_gfx.cpp`)
+
+Draws a static picture into the overlay framebuffer entirely through the portable
+`Game::gfx()` API (single-buffered; the picture is drawn once and persists).
+
+| Observation | Proves |
+|---|---|
+| Dark-blue field covering the screen | `gfx().clear()` (blitter fill) |
+| Eight colour-bar rectangles down the left | `fill_rect` via the blitter |
+| White frame around the inset edge | `hline` / `vline` |
+| Two crossing diagonals on the right | `line` (Bresenham via the MEMAC window) |
+| Small chequered 16×16 image | `blit` of an 8bpp source |
+
+## `atari_vbxe_text` (`vbxe_text.cpp`)
+
+Brings up the overlay in `Mode::Text_80`, uploads the PREPPIE font to VRAM, and
+prints through the portable `Game::overlay_*` text seam.
+
+| Observation | Proves |
+|---|---|
+| Dark-blue field with white/yellow text | hardware 80-column text overlay |
+| Title + body lines render in the PREPPIE font | `overlay_text_font` (font→CHBASE) + `overlay_print` |
+| A 16×16 block showing all 256 glyphs | `overlay_put_char` across the full font |
+
+## `atari_vbxe_sprites` (`vbxe_sprites_over_bitmap.cpp`)
+
+Double-buffered `Background::Bitmap`: the background is drawn once with
+`Game::gfx()` into the VRAM master, published, and two sprites slide over it.
+
+| Observation | Proves |
+|---|---|
+| The `vbxe_gfx` picture as a steady background | `gfx()` master canvas + `overlay_publish_background()` |
+| A red ball and a multi-colour pixel sprite slide across | `make_sprite` (Packed1bpp) + `make_pixel_sprite` (Pixel8bpp) |
+| The background stays intact under the moving sprites | per-frame footprint restore from the master (flicker-free) |

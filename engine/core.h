@@ -23,7 +23,9 @@
 
 #include "types.h"
 
+#include "config/capabilities.h"
 #include "display.h"
+#include "gfx.h"
 #include "hooks.h"
 #include "input.h"
 #include "interrupt.h"
@@ -48,6 +50,15 @@ struct initial_screen { using type = typename Screens::template screen_at<0>; };
 template <typename C, typename Screens>
 struct initial_screen<C, Screens, void_t<typename C::initial_screen>> {
     using type = typename C::initial_screen;
+};
+
+// gfx_region: GameConfig::bitmap_region if present, else void. Gives the bitmap
+// subsystem (engine/gfx.h) its baseline software-view type; void = blitter-only.
+template <typename C, typename = void>
+struct gfx_region { using type = void; };
+template <typename C>
+struct gfx_region<C, void_t<typename C::bitmap_region>> {
+    using type = typename C::bitmap_region;
 };
 
 // Scalar config fields with engine defaults when the game omits them.
@@ -120,6 +131,8 @@ public:
     using Scroll    = ScrollManager<Platform>;
     using Tiles     = TileManager<Platform>;
     using Interrupts = InterruptManager<Platform, kMaxRasterHooks, kMaxFrameHooks>;
+    using GfxRegion = typename cdetail::gfx_region<GameConfig>::type;
+    using Gfx       = BitmapOps<Platform, GfxRegion>;
 
     // ── Subsystem instances (static singletons) ──
     static inline Screen     screen{};
@@ -128,6 +141,7 @@ public:
     static inline Scroll     scroll{};
     static inline Tiles      tiles{};
     static inline Interrupts interrupts{};
+    static inline Gfx        gfx_{};
     static inline InputState<kPorts> input{};
     static inline Hooks      hooks{};
 
@@ -146,15 +160,30 @@ public:
     // charset base at its power-on default.
     template <typename Charset>
     static void init(const Charset& cs) {
-        setup_sprites();
+        using caps = engine::caps_of_t<Platform>;
+        if constexpr (caps::has_blitter) {
+            // VBXE overlay bring-up (MEMAC window + full-screen XDL + enable).
+            Platform::hal::overlay_init();
+        } else {
+            setup_sprites();
+        }
         set_screen<InitialScreen>([] {});
-        tiles.init_charset(cs, charset_buffer_);
-        tiles.bind_charset_page(page_of(charset_buffer_));
+        // The ANTIC charset buffer is only used by the baseline tile path; the
+        // VBXE overlay-font upload to VRAM lands with the 4b text path.
+        if constexpr (!caps::has_blitter) {
+            tiles.init_charset(cs, charset_buffer_);
+            tiles.bind_charset_page(page_of(charset_buffer_));
+        }
         interrupts.arm_dispatch();
         Platform::hal::install_frame_isr(&frame_service);
     }
     static void init() {
-        setup_sprites();
+        using caps = engine::caps_of_t<Platform>;
+        if constexpr (caps::has_blitter) {
+            Platform::hal::overlay_init();
+        } else {
+            setup_sprites();
+        }
         set_screen<InitialScreen>([] {});
         interrupts.arm_dispatch();
         Platform::hal::install_frame_isr(&frame_service);
@@ -175,6 +204,50 @@ public:
     // Sprite collision state latched at the last frame service.
     static const SpriteCollisionState& sprite_collisions() { return collisions_; }
 
+    // ── Overlay (extended-graphics) frame controls ──
+    //
+    // Double-buffered overlays present + flip automatically each frame service (the
+    // backend shows the page composed last frame, then composes the next); there is
+    // no explicit flip() — the engine owns the cadence.
+    //
+    // Set the overlay's opaque background colour (the field sprites are composed
+    // over and erased back to). 0 = transparent. No-op on platforms without an
+    // overlay. Call after init().
+    static void set_overlay_background(u8 color) {
+        Platform::hal::overlay_set_background(color);
+    }
+
+    // Publish the background bitmap drawn via gfx() to the live display page(s).
+    // For sprites-over-bitmap configs (Background::Bitmap): the game draws the
+    // background with gfx() (which targets the VRAM master canvas), then calls this
+    // to seed/refresh what is shown; sprite footprints are then restored from the
+    // master each frame. No-op on platforms without an overlay or in Flat mode.
+    static void overlay_publish_background() {
+        Platform::hal::overlay_publish_background();
+    }
+
+    // ── Overlay text mode (VBXE Text_80; no-op on platforms without it) ──
+    // A dedicated text surface separate from the baseline ANTIC TextRegion API.
+    // Chars are raw font indices (no screen-code remap); `attr` is the cell colour
+    // attribute (foreground index in b0-b6; b7=1 = opaque background). Call after
+    // init(), on a Text_80 overlay config.
+    static void overlay_text_font(const u8* glyphs, u16 bytes) {
+        Platform::hal::overlay_text_font(glyphs, bytes);
+    }
+    static void overlay_text_clear(u8 ch, u8 attr) {
+        Platform::hal::overlay_text_clear(ch, attr);
+    }
+    static void overlay_put_char(u8 col, u8 row, u8 ch, u8 attr) {
+        Platform::hal::overlay_text_put(col, row, ch, attr);
+    }
+    static void overlay_print(u8 col, u8 row, const char* s, u8 attr) {
+        Platform::hal::overlay_text_print(col, row, s, attr);
+    }
+    // Overlay collision latched at the last frame service (overlay vs PF/PMG, and
+    // the blitter's overlay-vs-overlay code). Zero on platforms without overlays.
+    static u8 overlay_collision()      { return overlay_collision_; }
+    static u8 overlay_blit_collision() { return overlay_blit_collision_; }
+
     // ── Text delegators (single-screen shorthand: region 0) ──
     static void print(u8 col, u8 row, const char* s) {
         screen.template region<0>().print(col, row, s);
@@ -192,6 +265,12 @@ public:
     template <typename S, u8 N>
     static auto& region() { return screen.template region<S, N>(); }
 
+    // ── Bitmap drawing ──
+    // The bitmap canvas: the VBXE overlay framebuffer on blitter platforms, else a
+    // BitmapRegion (GameConfig::bitmap_region) via its software view. Call after
+    // init(); on baseline the view is bound to the screen buffer by set_screen().
+    static Gfx& gfx() { return gfx_; }
+
     // ── Screen transition ──
     // Deactivate scroll on every transition; a scroll screen re-arms it via
     // scroll_map() once the game has bound its map buffer.
@@ -199,6 +278,15 @@ public:
     static void set_screen(Cb cb) {
         scroll.deactivate();
         screen.template set_screen<S>(cb);
+        // Baseline: bind the bitmap canvas to S's first bitmap region (if any), so
+        // Game::gfx() draws into the live screen buffer. Blitter platforms draw the
+        // VRAM overlay through the seams and ignore this.
+        if constexpr (!engine::caps_of_t<Platform>::has_blitter) {
+            using Layout = typename S::display;
+            constexpr u8 bidx = Layout::bitmap_region_index();
+            if constexpr (bidx < Layout::region_count)
+                gfx_.attach(screen.buffer() + Layout::offset(bidx));
+        }
     }
 
     // ── Scroll map binding ──
@@ -233,6 +321,8 @@ public:
     // ARCHITECTURE.md "Data Flow Per Frame" order. Non-capturing so its address is
     // a plain void(*)() for install_frame_isr().
     static void frame_service() {
+        using caps = engine::caps_of_t<Platform>;
+
         // 0. Suppress idle-dim (the backend would otherwise dim/cycle colours
         //    after a few minutes of no console/keyboard input).
         Platform::hal::suppress_idle_dim();
@@ -252,26 +342,54 @@ public:
         // 2. Sound envelopes.
         sound.tick();
 
-        // 3. Commit buffered sprite state (pre-commit hook first).
+        // 3. Commit buffered sprite state (pre-commit hook first). The path
+        //    diverges by backend: VBXE composes the overlay via the blitter and
+        //    has its own collision model; baseline writes P/M hardware sprites.
         if (hooks.pre_sprite_commit) hooks.pre_sprite_commit();
-        sprites.commit(pm_buffer_);
 
-        // 4. Latch this frame's collisions, then clear for the next.
-        for (u8 i = 0; i < 4; ++i) {
-            collisions_.s_bg[i] = Platform::hal::coll_player_playfield(i);
-            collisions_.s_s[i]  = Platform::hal::coll_player_player(i);
-            collisions_.p_bg[i] = Platform::hal::coll_missile_playfield(i);
-            collisions_.p_s[i]  = Platform::hal::coll_missile_player(i);
+        // Commit buffered sprites — self-dispatching by backend.
+        if constexpr (caps::has_blitter) {
+            // VBXE: present first — show the page composed last frame (which had a
+            // full frame's display time to finish) and flip so we now compose the
+            // hidden page. Then commit this frame's blits (commit_blitter clears the
+            // back page and queues a blit per active sprite) and start them async.
+            // The blit is deliberately NOT waited on here: a synchronous wait makes
+            // the VBI outrun a frame, letting the next VBI NMI re-enter this handler
+            // (stack overflow). The present's wait is for LAST frame's blit, already
+            // finished, so it returns at once. Single-buffer present is a no-op (it
+            // composes the visible page in place, dirty-rect).
+            Platform::hal::overlay_present();
+            sprites.commit(pm_buffer_);
+            Platform::hal::overlay_submit();
+
+            // 4. Latch overlay collisions (overlay↔PF/PMG and overlay↔overlay).
+            if constexpr (caps::has_overlay_collision) {
+                overlay_collision_      = Platform::hal::overlay_collision();
+                overlay_blit_collision_ = Platform::hal::overlay_blit_collision();
+            }
+        } else {
+            // Baseline P/M path: write P/M memory, then latch + clear collisions.
+            sprites.commit(pm_buffer_);
+            for (u8 i = 0; i < 4; ++i) {
+                collisions_.s_bg[i] = Platform::hal::coll_player_playfield(i);
+                collisions_.s_s[i]  = Platform::hal::coll_player_player(i);
+                collisions_.p_bg[i] = Platform::hal::coll_missile_playfield(i);
+                collisions_.p_s[i]  = Platform::hal::coll_missile_player(i);
+            }
+            Platform::hal::clear_collisions();
         }
-        Platform::hal::clear_collisions();
 
-        // 5. Recompute multiplex zones for the next commit.
+        // 5. Recompute multiplex zones for the next commit (harmless on VBXE,
+        //    where no sprites are committed yet — the Y-sort over zero active
+        //    sprites yields no zones).
         sprites.update_zones();
 
-        // 6. Rebuild the raster-hook chain (build_raster_hooks calls
-        //    begin_dynamic()), then complete delivery: prepare_chain arms the
-        //    backend's per-line raster delivery for the frame.
-        sprites.build_raster_hooks(interrupts);
+        // 6. Rebuild the raster-hook chain and arm per-line delivery. VBXE needs
+        //    no zone-boundary DLIs (no hardware players to reposition), so the
+        //    hook rebuild is baseline-only; prepare_chain still runs for both.
+        if constexpr (!caps::has_blitter) {
+            sprites.build_raster_hooks(interrupts);
+        }
         interrupts.prepare_chain(screen.active_dl(), screen.active_dl_size());
 
         // 7. User frame hooks.
@@ -320,6 +438,11 @@ private:
     alignas(256)  static inline u8 charset_buffer_[kCharsetBytes] = {};
 
     static inline SpriteCollisionState collisions_{};
+
+    // ── Overlay frame state (neutral; meaningful only on extended-graphics
+    //    platforms — a few bytes on baseline, never named with VBXE identity) ──
+    static inline u8   overlay_collision_      = 0;
+    static inline u8   overlay_blit_collision_ = 0;
 };
 
 } // namespace engine

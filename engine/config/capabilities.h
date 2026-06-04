@@ -28,6 +28,25 @@ enum class NetworkTransport : u8 {
     Serial,
 };
 
+struct Capabilities; // (defined below)
+
+namespace cap_detail {
+template <typename...> using void_t = void;
+}
+
+// caps_of<P>::type — a platform's capability profile if it has one, else the
+// reference Capabilities (every field defaulted to absent/zero). Lets minimal
+// platforms and test mocks omit the profile and degrade to baseline paths rather
+// than failing to compile. Used by the engine subsystems (core.h, sprites.h).
+template <typename P, typename = void>
+struct caps_of { using type = Capabilities; };
+template <typename P>
+struct caps_of<P, cap_detail::void_t<typename P::capabilities>> {
+    using type = typename P::capabilities;
+};
+template <typename P>
+using caps_of_t = typename caps_of<P>::type;
+
 struct Capabilities {
     // ── Graphics ──
     static constexpr bool has_hardware_sprites = false;
@@ -38,6 +57,20 @@ struct Capabilities {
     static constexpr bool has_blitter          = false;
     static constexpr bool has_display_list     = false;
     static constexpr bool has_raster_interrupt = false;   // shared with timing
+
+    // ── Extended graphics (VRAM / overlay / palette) ──
+    // Neutral feature flags for an extended graphics subsystem (e.g. the Atari
+    // VBXE). The engine queries these by feature; the platform-specific values
+    // live in the backend capability profile, never here.
+    static constexpr bool has_vram              = false;
+    static constexpr u32  vram_bytes            = 0;
+    static constexpr bool has_overlay           = false;
+    static constexpr u16  overlay_colors        = 0;
+    static constexpr bool has_overlay_text_mode = false;
+    static constexpr bool has_overlay_collision = false;
+    static constexpr bool has_palette           = false;
+    static constexpr u8   palette_count         = 0;
+    static constexpr u16  colors_per_palette    = 0;
 
     // ── Sound ──
     static constexpr bool has_dedicated_sound   = false;

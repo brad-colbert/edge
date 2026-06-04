@@ -16,6 +16,7 @@
 #include "../../audio_defs.h"
 #include "antic.h"
 #include "registers.h"
+#include "nmi.h"
 #include "os.h"
 #include "dli_dispatch.h"
 
@@ -187,8 +188,10 @@ struct Hal {
     // Arm/disarm the DLI NMI. NMIEN is write-only (reads return NMIST) so it can't
     // be RMW'd; the engine's VBI NMI is always armed once install_vbi ran, so the
     // correct absolute value is VBI|DLI to enable and VBI alone to disable.
-    static void enable_raster()  { *reg::NMIEN = nmien::VBI | nmien::DLI; }
-    static void disable_raster() { *reg::NMIEN = nmien::VBI; }
+    // Route NMIEN changes through nmien_set so the write-only register's shadow
+    // (nmi.h) stays accurate — the VBXE critical section restores from it.
+    static void enable_raster()  { nmien_set(nmien::VBI | nmien::DLI); }
+    static void disable_raster() { nmien_set(nmien::VBI); }
 
     // ── Player/Missile graphics ──
     //
@@ -350,10 +353,10 @@ struct Hal {
         // all NMIs while the two-byte os::VVBLKD vector is swapped to avoid a VBI
         // firing on a half-written vector, then re-enable the VBI NMI. The DLI
         // NMI (nmien::DLI) is armed separately by code that installs a DLI.
-        *reg::NMIEN = 0x00;
+        *reg::NMIEN = 0x00;                 // raw blank during the vector swap
         os::VVBLKD[0] = static_cast<uint8_t>(t & 0xFF);
         os::VVBLKD[1] = static_cast<uint8_t>(t >> 8);
-        *reg::NMIEN = nmien::VBI;
+        nmien_set(nmien::VBI);              // records the intended mask in the shadow
     }
 };
 

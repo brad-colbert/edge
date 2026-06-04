@@ -1,6 +1,6 @@
 # EDGE API Reference
 
-> **Applies to EDGE v0.1.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
+> **Applies to EDGE v0.2.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
 
 This reference is organized in two layers:
 
@@ -28,6 +28,7 @@ Or include individual headers as needed:
 - `<engine/scroll.h>`
 - `<engine/tiles.h>`
 - `<engine/interrupt.h>`
+- `<engine/gfx.h>`
 
 Backend headers, such as `<engine/platform/atari/platform.h>`, are only needed when selecting a concrete target platform.
 
@@ -109,6 +110,7 @@ These are available as static sub-objects on `Game`:
 - `Game::sprites`
 - `Game::multiplex`
 - `Game::hooks`
+- `Game::gfx()` — the bitmap-drawing subsystem (accessor, not a data member)
 
 `Game::multiplex` is an alias of the sprite manager exposed under a more intention-revealing name for multiplex queries.
 
@@ -137,6 +139,10 @@ Optional fields implemented today include:
 - `static constexpr engine::u8 max_raster_hooks = ...;`
 - `static constexpr engine::u8 max_frame_hooks = ...;`
 - `static constexpr engine::u8 user_zp_bytes = ...;`
+- `using bitmap_region = engine::BitmapRegion<...>;` — gives the bitmap subsystem
+  (`Game::gfx()`) its software-view type on baseline platforms. Omit it on
+  blitter-only platforms (then `Game::gfx()` is blitter-only and the software
+  path static-asserts if reached). See the Graphics / Bitmap API below.
 
 ### Platform
 
@@ -213,6 +219,73 @@ Methods:
 
 Pixel packing and row addressing are handled by the view.
 
+## Graphics / Bitmap API
+
+The bitmap subsystem (`engine/gfx.h`, type `engine::BitmapOps`) is a portable
+drawing surface over a bitmap *canvas*. Reach it through the accessor:
+
+```cpp
+auto& g = Game::gfx();
+g.clear(0);
+g.fill_rect(20, 20, 120, 40, 3);
+g.line(10, 10, 200, 150, 5);
+```
+
+Methods:
+
+- `clear(color)`
+- `plot(x, y, color)`
+- `hline(x1, x2, y, color)`
+- `vline(x, y1, y2, color)`
+- `fill_rect(x, y, w, h, color)`
+- `line(ax, ay, bx, by, color)` — integer Bresenham
+- `blit(x, y, src, w, h)`
+
+The key idea is portability through compile-time capability dispatch. The same
+calls compile to one of two backends, chosen by the platform's `has_blitter`
+capability:
+
+- **Blitter platforms** (e.g. Atari VBXE): the canvas is the overlay framebuffer
+  in VRAM. Rectangle fills go through the hardware blitter; single pixels go
+  through the memory window. No bitmap region is required — leave
+  `GameConfig::bitmap_region` unset.
+- **Baseline platforms**: the canvas is an ANTIC `BitmapRegion`, and operations
+  delegate to that region's `BitmapRegionView` (which owns the mode-dependent
+  pixel packing). Declare `using bitmap_region = engine::BitmapRegion<...>;` in
+  `GameConfig`; `set_screen()` binds the canvas to that region's screen-buffer
+  bytes automatically.
+
+Colours are palette indices interpreted by the active backend. On baseline the
+canvas coordinates are 8-bit; on blitter platforms they are 16-bit (the overlay
+is up to 320 px wide). The game code is identical either way.
+
+## Overlay API
+
+Some backends provide a *hardware overlay plane* composited above the normal
+display. EDGE exposes it through engine-neutral seams on `Game` (today these are
+backed by the Atari VBXE overlay; see the platform guide). They are no-ops on
+platforms without an overlay.
+
+Hardware text overlay:
+
+- `Game::overlay_text_font(glyphs, bytes)` — upload an 8×8 font to the overlay's
+  character memory
+- `Game::overlay_text_clear(ch, attr)` — fill the character map
+- `Game::overlay_put_char(col, row, ch, attr)`
+- `Game::overlay_print(col, row, const char*, attr)`
+
+Background / compositing (for sprites-over-bitmap):
+
+- `Game::set_overlay_background(color)` — set the flat opaque background colour
+- `Game::overlay_publish_background()` — publish the bitmap drawn via `Game::gfx()`
+  to the live display page(s); sprite footprints are then restored from it each
+  frame
+
+Overlay collision snapshots, latched at the frame service:
+
+- `Game::overlay_collision()`
+- `Game::overlay_blit_collision()`
+
 ## Input API
 
 Primary type:
@@ -255,13 +328,23 @@ General contract:
 
 ## Sprite API
 
-### Asset Builder
+### Asset Builders
 
 ```cpp
-constexpr auto shape = engine::make_sprite<8, 8>({ ... });
+constexpr auto shape = engine::make_sprite<8, 8>({ ... });        // 1 bit/pixel
+constexpr auto pic   = engine::make_pixel_sprite<8, 8>({ ... });  // 1 byte/pixel
 ```
 
-The returned type carries compile-time width and height metadata.
+Both return types carry compile-time width and height metadata. There are two
+shape formats:
+
+- `make_sprite<W, H>` — `Packed1bpp`, one bit per pixel (the P/M-style format),
+  coloured per instance with `sprite_color`. Works on any platform.
+- `make_pixel_sprite<W, H>` — `Pixel8bpp`, one byte per pixel of palette indices,
+  for richer multi-colour art. Requires a blitter platform (e.g. VBXE); using one
+  on a baseline platform is a compile-time error.
+
+Both shape types pass through the same `Game::sprite(slot, shape, x, y)` call.
 
 ### Runtime Methods
 
@@ -336,6 +419,29 @@ hardware (the Atari mapping to POKEY distortion is covered in the backend guide)
 
 ## Scroll API
 
+### Declaring a scrolling region
+
+Wrap any region in `engine::ScrollRegion<Inner, MapW, MapH>` inside a
+`DisplayLayout`, then bind a game-held `engine::TileMap` as its source:
+
+```cpp
+struct PlayScreen {
+    using display = engine::DisplayLayout<
+        engine::TextRegion<ModeA, 2>,                              // fixed HUD
+        engine::ScrollRegion<engine::TextRegion<ModeA, 22>, 64, 32> // 64×32 map
+    >;
+};
+
+static engine::TileMap<64, 32> world = engine::make_map<64, 32>({ ... });
+
+Game::scroll_map(world);   // bind, after set_screen / init
+```
+
+The map width and height must match the `ScrollRegion`'s declared `MapW`/`MapH`
+(checked at compile time).
+
+### Driving the scroll
+
 On `Game::scroll`:
 
 - `set(x, y)`
@@ -344,18 +450,19 @@ On `Game::scroll`:
 - `y()`
 - `suspend()`
 - `resume()`
-
-Advanced, engine-facing methods:
-
-- `activate(bytes_per_line, scanlines_per_line, fine_scroll_range)`
-- `deactivate()`
-- `apply(display_program, load_pos, screen_base, map_width_bytes)`
+- `active()`
+- `suspended()`
 
 General contract:
 
 - scroll position is stored as logical viewport state
-- fine and coarse scrolling are split internally
+- the frame service splits the position into fine (sub-tile) and coarse (per-line
+  load address) scroll, clamps it at the map edges, and keeps the tile viewport
+  (`Game::tiles`) in sync — the game loop only calls `move`/`set`
 - suspended scroll stops hardware writes without discarding the tracked position
+
+Activation and the per-line load-address patching are driven by the engine from
+the `ScrollRegion` declaration; games do not call them directly.
 
 ## Tiles API
 
@@ -553,4 +660,6 @@ For the full backend-specific guide, see [Atari Platform Guide](./PLATFORM_ATARI
 1. Call `Game::init()` before using rendering, sound, or loop services.
 2. Treat the frame callback as logical frame work, not direct hardware commit time.
 3. Prefer engine subsystems first and reach for low-level hooks only when needed.
-4. `engine/gfx.h` and `engine/net.h` are placeholders and are not yet usable as public subsystems.
+4. `engine/net.h` is still a placeholder and is not yet usable as a public
+   subsystem. (The `Network`/Fujinet capability axis on the Atari platform exists;
+   only the portable net API is unimplemented.)

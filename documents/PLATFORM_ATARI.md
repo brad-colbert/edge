@@ -1,6 +1,6 @@
 # EDGE Atari Platform Guide
 
-> **Applies to EDGE v0.1.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
+> **Applies to EDGE v0.2.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
 
 This document describes the first concrete EDGE backend: the Atari 8-bit family.
 
@@ -47,28 +47,32 @@ The concrete target is chosen with a compile-time platform type:
 using Platform = atari::Platform<
     atari::Machine::XL,
     atari::RAM::Baseline,
-    atari::Graphics::Baseline,
+    atari::gfx::Baseline,     // graphics is a TYPE axis (see below)
     atari::Sound::Mono,
-    atari::TV::NTSC,
-    atari::Network::None
+    atari::TV::NTSC           // required; Network defaults to None
 >;
 ```
 
-Axes:
+Axes (in template order):
 
-- `atari::Machine`: `A400`, `A800`, `XL`, `XE`
-- `atari::RAM`: `Baseline`, `XE128`, `Rambo256`, `U1MB`
-- `atari::Graphics`: `Baseline`, `VBXE`
-- `atari::Sound`: `Mono`, `Stereo`, `PokeyMax`
-- `atari::TV`: `NTSC`, `PAL`
-- `atari::Network`: `None`, `Fujinet`
+- `atari::Machine`: `A400`, `A800`, `XL`, `XE` *(enum)*
+- `atari::RAM`: `Baseline`, `XE128`, `Rambo256`, `U1MB` *(enum)*
+- graphics — a **type**, not an enum: `atari::gfx::Baseline` (stock ANTIC/GTIA) or
+  `atari::gfx::VBXE<Config>` (the VBXE overlay; `Config` defaults to a standard
+  setup). This is what lets the bitmap subsystem pick the blitter path at compile
+  time. See "VBXE / Graphics" below.
+- `atari::Sound`: `Mono`, `Stereo`, `PokeyMax` *(enum)*
+- `atari::TV`: `NTSC`, `PAL` *(enum, required — PAL/NTSC are separate binaries)*
+- `atari::Network`: `None`, `Fujinet` *(enum, trailing, defaults to `None`)*
 
 Common aliases:
 
-- `atari::StockXL_NTSC`
-- `atari::StockXL_PAL`
-- `atari::ExpandedXE`
-- `atari::FullUpgrade`
+- `atari::StockXL_NTSC` — `XL, Baseline, gfx::Baseline, Mono, NTSC`
+- `atari::StockXL_PAL` — the PAL counterpart
+- `atari::ExpandedXE` — `XE, XE128, gfx::Baseline, Mono, NTSC`
+- `atari::FullUpgrade` — `XL, U1MB, gfx::VBXE<>, PokeyMax, NTSC, Fujinet`
+
+For a PAL build of any alias, spell the platform out with `atari::TV::PAL`.
 
 Capability queries come from `Platform::capabilities`.
 
@@ -129,6 +133,9 @@ Atari-specific behavior behind those calls:
 - additional logical sprites are multiplexed across vertical zones
 - buffered sprite state is committed during the frame service (the Atari deferred VBI) to avoid tearing
 - collision data comes from GTIA collision registers latched once per frame
+- `make_sprite` shapes (`Packed1bpp`) render as P/M graphics; `make_pixel_sprite`
+  shapes (`Pixel8bpp`, full colour) require the VBXE path and render through the
+  overlay blitter (see "VBXE / Graphics" below)
 
 Useful multiplex queries:
 
@@ -145,6 +152,97 @@ The sprite system supports:
 - `engine::SpriteVerticalResolution::DoubleLine`
 
 Single-line gives finer vertical precision and uses more sprite (P/M) memory.
+
+## VBXE / Graphics
+
+The graphics axis selects the backend that powers the portable bitmap subsystem
+(`Game::gfx()`) and the overlay seams (`Game::overlay_*`):
+
+- `atari::gfx::Baseline` — stock ANTIC/GTIA. `Game::gfx()` draws into an ANTIC
+  `BitmapRegion` in software (the game declares `GameConfig::bitmap_region`).
+- `atari::gfx::VBXE<Config>` — the VBXE FX accelerator. `Game::gfx()` draws into a
+  256-colour overlay framebuffer in VRAM: rectangle fills use the hardware
+  blitter, single pixels go through the MEMAC memory window. `make_pixel_sprite`
+  and the hardware text overlay become available.
+
+### Configuring the overlay
+
+```cpp
+namespace V = atari::vbxe;
+using Cfg = V::Config<V::Mode::SR_320, V::Buffers::Double, V::RegBase::D640,
+                      V::MEMAC_A, 0x00000, V::Background::Bitmap>;
+using Platform = atari::Platform<
+    atari::Machine::XL, atari::RAM::Baseline,
+    atari::gfx::VBXE<Cfg>, atari::Sound::Mono, atari::TV::NTSC>;
+```
+
+`atari::vbxe::Config` knobs:
+
+- `Mode`: `SR_320` (320 px, 256 colours), `HR_640`, `LR_160`, `Text_80`
+  (80-column hardware text)
+- `Buffers`: `Single` or `Double` (double-buffered gives flicker-free sprites —
+  render the hidden page, then flip)
+- `RegBase`: `D640` (engine default) or `D740` — match your VBXE board
+- the MEMAC window placement (`MEMAC_A`, base page) and VRAM address
+- `Background`: `Flat` (sprites composed over a solid colour) or `Bitmap`
+  (sprites composed over a drawn bitmap; see below)
+
+Palette entries are uploaded with the power-user helper
+`atari::vbxe::set_color<Cfg>(palette, index, r, g, b)` from
+`<engine/platform/atari/vbxe.h>`.
+
+### Hardware text overlay (`Mode::Text_80`)
+
+In `Text_80` mode the overlay is an 80×30 character map of char + attribute
+pairs in VRAM, with an 8×8 font at CHBASE. Drive it through the portable seams:
+
+```cpp
+Game::overlay_text_font(&Font[0][0], FontByteCount);  // font -> VRAM
+Game::overlay_text_clear(0x20, attr);                 // blank field
+Game::overlay_print(2, 1, "EDGE ENGINE", attr);
+```
+
+The attribute byte selects the foreground colour from the overlay palette; with
+bit 7 set the background is taken from index `fg + 128`.
+
+### Sprites over a bitmap (`Background::Bitmap`)
+
+With `Background::Bitmap`, sprites are composited over a drawn background instead
+of a flat colour. The pattern:
+
+```cpp
+Game::init();
+draw_background();                    // draw with Game::gfx() into the VRAM master
+Game::overlay_publish_background();    // seed both display pages from the master
+Game::run([](const auto&) { /* move sprites; background persists */ });
+```
+
+Each frame the compositor restores every sprite's footprint from the master
+canvas, so the drawn background survives under moving sprites with no flicker.
+`Game::set_overlay_background(color)` sets the flat-mode background for
+`Background::Flat` configs.
+
+### Setup notes (hardware / Altirra)
+
+- Run with **BASIC disabled** — the default MEMAC-A window is `$B000–$BFFF`, which
+  is ROM when BASIC is enabled, so framebuffer writes wouldn't reach VRAM.
+- On Altirra, enable the VBXE device with the **FX core** (not the GTIA-emu core).
+- A `$D740` board needs `RegBase::D740` in the `Config`.
+
+## Scrolling on Atari
+
+Hardware scroll (declared with `engine::ScrollRegion` and driven by
+`Game::scroll`) maps onto ANTIC's fine and coarse scroll:
+
+- fine scroll within a tile uses the HSCROL / VSCROL registers
+- coarse scroll repoints each display-list line's load address (per-line LMS)
+- the engine clamps the position to the map's fetch width at the edges
+
+One ANTIC quirk to know: horizontal fine scroll widens the playfield fetch, so
+the leftmost map column lives in the left border (the HSCROLL fetch margin) and is
+not visible. Reserve a margin column in your map. This is intentional hardware
+behaviour, captured in ADR-027 of [`docs/DECISIONS.md`](../docs/DECISIONS.md) and
+demonstrated by `atari_scroll_test`.
 
 ## Sound on Atari
 
@@ -280,8 +378,10 @@ Everything else is part of the general EDGE authoring model.
 
 ## Current Limits
 
-- `engine/gfx.h` is still a placeholder
-- `engine/net.h` is still a placeholder
+- `engine/net.h` (the networking *subsystem*) is still a placeholder. The
+  `Network`/Fujinet *capability axis* is real — `capabilities::has_network`,
+  `network_transport`, `network_max_payload` are all set — but the portable net
+  API on top of it is not built yet.
 - display layouts still use the Atari mode enum (`atari::Mode`) as the concrete backend token, supplied
   through the `engine::display::traits` seam; a second backend would add its own mode type and traits
 - the first backend is Atari, so some examples necessarily use Atari terminology
