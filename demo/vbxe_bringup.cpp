@@ -39,12 +39,28 @@ using engine::u32;
 namespace M = atari;
 namespace V = atari::vbxe;
 
+// Diagnostic mode: 0 = colour bars, 1 = solid fill, 2 = VRAM round-trip probe,
+// 3 = two animated sprites (blitter). Override at configure time with
+// `cmake -DEDGE_VBXE_BRINGUP_MODE=N` (passes -DVBXE_BRINGUP_MODE=N); default 0.
+// Defined here (before the Config typedef) because it selects the buffer policy.
+#ifndef VBXE_BRINGUP_MODE
+#define VBXE_BRINGUP_MODE 0
+#endif
+
 // ── Platform + game configuration ────────────────────────────────────────
 //
-// VBXE config: SR_320, DOUBLE-buffered, $D640, MEMAC-A $B000/4K. Double-buffering
-// gives MODE 3 flicker-free sprites (render the hidden page, then flip). The
-// static modes (0/1/2) just paint fb_a and never flip, so they're unaffected.
-using Cfg = V::Config<V::Mode::SR_320, V::Buffers::Double>;
+// VBXE config: SR_320, $D640, MEMAC-A $B000/4K. The buffer policy tracks the
+// diagnostic mode. MODE 3 (sprites) is DOUBLE-buffered for flicker-free animation
+// (render the hidden page, then flip). The static modes (0/1/2) MUST be
+// SINGLE-buffered: the engine's frame service flips pages every VBI in
+// double-buffer mode, and since those modes only paint fb_a once, a flip would
+// show the unpainted (transparent, index 0) back page — the ANTIC playfield reads
+// through and the painted content appears to vanish.
+#if VBXE_BRINGUP_MODE == 3
+using Cfg = V::Config<V::Mode::SR_320, V::Buffers::Double>;   // sprite demo: flip pages
+#else
+using Cfg = V::Config<V::Mode::SR_320, V::Buffers::Single>;   // static paint: no flip
+#endif
 using Platform = M::Platform<
     M::Machine::XL,
     M::RAM::Baseline,
@@ -162,13 +178,6 @@ static void load_test_palette() {
     Game::print(0, 11, (bad == 0) ? "RESULT: CLEAN - VBI ATOMIC"
                                   : "RESULT: STILL CORRUPT");
 }
-
-// Diagnostic mode: 0 = colour bars, 1 = solid fill, 2 = VRAM round-trip probe,
-// 3 = two animated sprites (blitter). Override at configure time with
-// `cmake -DEDGE_VBXE_BRINGUP_MODE=N` (passes -DVBXE_BRINGUP_MODE=N); default 0.
-#ifndef VBXE_BRINGUP_MODE
-#define VBXE_BRINGUP_MODE 0
-#endif
 
 int main() {
     // Bring up the overlay: MEMAC window, cleared (transparent) framebuffer,
