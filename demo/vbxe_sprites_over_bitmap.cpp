@@ -119,13 +119,22 @@ int main() {
     draw_background();               // draw into the VRAM master canvas
     Game::overlay_publish_background();  // seed both display pages from the master
 
+    // The overlay is opaque, so the ANTIC text playfield behind it is invisible —
+    // but its per-scanline VRAM-bus DMA would otherwise starve the blitter's
+    // master->framebuffer restore copies and throttle the game loop to ~8 Hz.
+    // Dropping the (hidden) playfield fetch frees the bus for full 60 Hz motion.
+    Game::antic_playfield(false);
+
     Game::sprite_color(0, 1);        // kBall coloured palette-1 index 1 (red)
 
     // Two sprites sliding horizontally over the (unchanging) background.
     Game::run([](const auto&) {
         static u16 t = 0; ++t;
-        const u8 x0 = static_cast<u8>(40 + (t % 220));
-        const u8 x1 = static_cast<u8>(40 + ((t + 110) % 220));
+        // Slide both 8px shapes across the screen, offset by half a period. Range
+        // 40..239 keeps the sprite (x + 8) within the u8 x coordinate, so the
+        // position never wraps past 255 and jumps to the far left.
+        const u8 x0 = static_cast<u8>(40 + (t % 200));
+        const u8 x1 = static_cast<u8>(40 + ((t + 100) % 200));
         Game::sprite(0, kBall, x0, 120);
         Game::sprite(1, kPix,  x1, 150);
     });

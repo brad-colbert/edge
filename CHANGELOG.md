@@ -11,6 +11,24 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
 
 ## [Unreleased]
 
+### Added
+- `Game::antic_playfield(bool)` (Atari, opt-in): enable/disable the ANTIC
+  playfield (character/bitmap) DMA, preserving display-list and P/M DMA. Under an
+  opaque VBXE overlay the ANTIC playfield is invisible, but its per-scanline VRAM
+  DMA starves the blitter's restore copies; calling `antic_playfield(false)` after
+  init frees the bus.
+
+### Fixed
+- VBXE `Background::Bitmap` overlay ran the game loop at ~8 Hz instead of 60 on
+  real hardware: the hidden ANTIC text playfield's DMA contended the VRAM bus and
+  stalled the blitter's per-frame VRAM→VRAM restore copies, overrunning the VBI.
+  The `atari_vbxe_sprites` demo now calls `Game::antic_playfield(false)`, restoring
+  full-rate motion. (Regression was masked because the dirty-rect restore was
+  host-validated on `mos-sim`, which doesn't model VBXE/ANTIC bus timing.)
+- `atari_vbxe_sprites`: sprite X position was computed as `u8` over a 40..259
+  range, wrapping past 255 and briefly jumping the shape to the far left; the
+  slide now stays within the valid u8 coordinate range.
+
 ## [0.2.0] - 2026-06-03
 
 ### Added

@@ -167,9 +167,13 @@ prints through the portable `Game::overlay_*` text seam.
 
 Double-buffered `Background::Bitmap`: the background is drawn once with
 `Game::gfx()` into the VRAM master, published, and two sprites slide over it.
+Because the overlay is opaque, the demo calls `Game::antic_playfield(false)` after
+setup: the hidden ANTIC text playfield's DMA would otherwise contend the VRAM bus
+and stall the blitter's per-frame restore copies, throttling motion to ~8 Hz.
 
 | Observation | Proves |
 |---|---|
 | The `vbxe_gfx` picture as a steady background | `gfx()` master canvas + `overlay_publish_background()` |
 | A red ball and a multi-colour pixel sprite slide across | `make_sprite` (Packed1bpp) + `make_pixel_sprite` (Pixel8bpp) |
 | The background stays intact under the moving sprites | per-frame footprint restore from the master (flicker-free) |
+| The sprites move at full speed (~60 px/s) | `Game::antic_playfield(false)` frees the VRAM bus for the blitter |

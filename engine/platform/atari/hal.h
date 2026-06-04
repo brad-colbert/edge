@@ -131,6 +131,18 @@ struct Hal {
         *os::SDMCTL = static_cast<uint8_t>((*os::SDMCTL & dmactl::PM_DMA_MASK) |
                                            dmactl::DL_ENABLE | mode_bits);
     }
+    // Toggle ONLY the ANTIC playfield fetch (the character/bitmap DMA), preserving
+    // the DL-enable and P/M bits. Under an opaque VBXE overlay the ANTIC playfield
+    // is fully hidden, yet its per-scanline VRAM-bus DMA starves the blitter's
+    // VRAM-read restore copies — collapsing the overlay compositor's per-frame
+    // budget (sprites-over-bitmap ran the game loop at ~8 Hz instead of 60).
+    // Dropping the playfield fetch frees the bus; the overlay still drives the
+    // display via its XDL, and DL/P-M DMA keep running. `on` restores normal width.
+    static void set_antic_playfield_dma(bool on) {
+        *os::SDMCTL = static_cast<uint8_t>(
+            (*os::SDMCTL & static_cast<uint8_t>(~dmactl::PLAYFIELD_MASK)) |
+            (on ? dmactl::PLAYFIELD_NORMAL : 0u));
+    }
     static void set_display_program(const uint8_t* dl) {
         const uint16_t a = static_cast<uint16_t>(reinterpret_cast<uintptr_t>(dl));
         *os::SDLSTL = static_cast<uint8_t>(a & 0xFF);
