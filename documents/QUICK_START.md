@@ -1,6 +1,6 @@
 # Quick Start
 
-> **Applies to EDGE v0.1.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
+> **Applies to EDGE v0.2.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
 
 This guide introduces EDGE from the engine author's point of view first, then shows the current concrete setup using the Atari backend.
 
@@ -23,10 +23,11 @@ In normal gameplay code, these are the main concepts you work with regardless of
 - `engine::Core<Platform, GameConfig>`
 - `engine::Input`
 - `engine::SlotPool` and `engine::PackedPool`
-- `engine::make_sprite`, `engine::make_sound`, `engine::make_charset`, `engine::make_map`
+- `engine::make_sprite`, `engine::make_pixel_sprite`, `engine::make_sound`,
+  `engine::make_charset`, `engine::make_map`
 - `engine::audio::Waveform` (note timbre portably; the backend maps it to its sound hardware)
 - `Game::run`, `Game::run_until`, `Game::set_screen`
-- `Game::sound`, `Game::scroll`, `Game::tiles`, `Game::interrupts`
+- `Game::sound`, `Game::scroll`, `Game::tiles`, `Game::interrupts`, `Game::gfx()`
 
 Today, the platform type and display mode names are still provided by the Atari backend because that is the first implemented target.
 
@@ -174,5 +175,22 @@ After the minimal example works, the usual next steps are:
 3. Add tile and charset assets with `engine::make_charset` and `engine::make_map`.
 4. Use `Game::sprite_collisions()` and multiplex queries if your game uses many sprites.
 5. Add raster or frame hooks only after the basic game loop is stable.
+
+### Drawing bitmaps
+
+For pixel drawing, use the bitmap subsystem through `Game::gfx()`. It offers a
+small portable API — `clear`, `plot`, `hline`, `vline`, `fill_rect`, `line`,
+`blit` — and the same calls compile to a hardware blitter on capable platforms
+(Atari VBXE) or to a software path on baseline. The software path needs a bitmap
+region: declare `using bitmap_region = engine::BitmapRegion<...>;` in your
+`GameConfig`. See the [API Reference](./API_REFERENCE.md) "Graphics / Bitmap API".
+
+### Scrolling
+
+For a scrolling playfield, wrap a region in `engine::ScrollRegion<Inner, MapW,
+MapH>` inside its `DisplayLayout`, bind a `engine::TileMap` with
+`Game::scroll_map(map)`, and drive it with `Game::scroll.move()` /
+`Game::scroll.set()`. The engine splits the position into fine and coarse scroll
+and keeps the tile viewport in sync each frame.
 
 From here, read [API Reference](./API_REFERENCE.md) for the portable subsystem contracts, then [Atari Platform Guide](./PLATFORM_ATARI.md) for the backend-specific details currently exposed by the first implementation.

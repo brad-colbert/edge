@@ -1,6 +1,6 @@
 # EDGE Engine Documentation
 
-> **Applies to EDGE v0.1.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
+> **Applies to EDGE v0.2.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
 
 EDGE is a C++ engine for building games and interactive applications on constrained 6502-class systems.
 
@@ -32,8 +32,15 @@ Mostly engine-level and intended to remain portable:
 - `engine::SlotPool` and `engine::PackedPool`
 - input snapshot model
 - sound, sprite, tile, scroll, interrupt, and hook subsystems
+- the bitmap-drawing subsystem `Game::gfx()` (`engine::BitmapOps`, `engine/gfx.h`)
 - fixed-point math and lookup tables
 - compile-time capability queries
+
+The bitmap subsystem is the clearest example of the portability model in action:
+`Game::gfx()` exposes one drawing API and dispatches at compile time on the
+platform's `has_blitter` capability — to a hardware blitter where one exists and
+to a software path otherwise — without the game code changing. The same pattern
+(capability query → backend seam) is how additional backends will plug in.
 
 Currently backend-specific in the public surface because Atari is the first implementation:
 
@@ -50,5 +57,6 @@ These documents describe the API that is currently implemented in `engine/`, cro
 
 Subsystems present only as placeholders today:
 
-- `engine/gfx.h`
-- `engine/net.h`
+- `engine/net.h` — the networking *subsystem* is unimplemented. (The `Network` /
+  Fujinet *capability axis* on the Atari platform is real; only the portable net
+  API is still scaffolding.)

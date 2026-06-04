@@ -11,7 +11,38 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-03
+
 ### Added
+- Portable bitmap-drawing subsystem (`engine/gfx.h`): `engine::BitmapOps`, reached
+  via `Game::gfx()`, with `clear` / `plot` / `hline` / `vline` / `fill_rect` /
+  `line` / `blit`. It dispatches at compile time on the platform's `has_blitter`
+  capability — the VBXE blitter + MEMAC window on overlay platforms, the ANTIC
+  `BitmapRegionView` software path on baseline (selected by an optional
+  `GameConfig::bitmap_region` typedef). The generic engine never names a VBXE type.
+- VBXE graphics backend, exposed as a *type* axis: `atari::gfx::Baseline` (stock
+  ANTIC/GTIA) and `atari::gfx::VBXE<Config>`. Configure the overlay with
+  `atari::vbxe::Config<Mode, Buffers, RegBase, MEMAC, addr, Background>`
+  (`Mode::{SR_320,HR_640,LR_160,Text_80}`, `Buffers::{Single,Double}`,
+  `Background::{Flat,Bitmap}`) and upload palette entries with
+  `atari::vbxe::set_color<Cfg>(...)`.
+- VBXE 256-colour overlay plane composited over ANTIC at top priority, brought up
+  automatically by `Game::init()` on a `gfx::VBXE<...>` platform.
+- VBXE hardware text mode (`Mode::Text_80`) behind a portable overlay-text seam on
+  `Game`: `overlay_text_font` (font→VRAM/CHBASE), `overlay_text_clear`,
+  `overlay_put_char`, `overlay_print` (char + attribute pairs).
+- Sprites-over-bitmap path: `Background::Bitmap` composes sprites over a drawn
+  background. The game draws into a VRAM master canvas with `Game::gfx()`, seeds
+  the display pages with `Game::overlay_publish_background()`, and the frame
+  service restores each sprite's footprint from the master (flicker-free,
+  double-buffered). `Game::set_overlay_background()` sets the flat-mode background.
+- Full-colour sprite shapes: `engine::make_pixel_sprite<W,H>` (`Pixel8bpp`, one
+  byte/pixel palette indices) alongside the P/M-style `engine::make_sprite<W,H>`
+  (`Packed1bpp`). Pixel sprites require a blitter platform.
+- Overlay collision snapshots latched at the frame service:
+  `Game::overlay_collision()` and `Game::overlay_blit_collision()`.
+- Four VBXE validation demos building to independent `.xex` targets:
+  `atari_vbxe_bringup`, `atari_vbxe_gfx`, `atari_vbxe_text`, `atari_vbxe_sprites`.
 - Hardware scrolling, wired live end-to-end. Declare a scrolling region by wrapping
   any region in `engine::ScrollRegion<Inner, MapW, MapH>` inside a `DisplayLayout`,
   bind a game-held `engine::TileMap` as its source with `Game::scroll_map(map)`, and
@@ -46,4 +77,5 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
   CMake, surfaced in the demo HUD, and stamped across the documentation.
 
 [Unreleased]: https://github.com/
+[0.2.0]: https://github.com/
 [0.1.0]: https://github.com/
