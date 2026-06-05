@@ -163,6 +163,9 @@ public:
         using caps = engine::caps_of_t<Platform>;
         if constexpr (caps::has_blitter) {
             // VBXE overlay bring-up (MEMAC window + full-screen XDL + enable).
+            // A pure-overlay InitialScreen no longer needs a manual
+            // antic_playfield(false): set_screen keeps ANTIC DMA off for it, so
+            // the playfield never contends the VRAM bus (see screen.h).
             Platform::hal::overlay_init();
         } else {
             setup_sprites();
@@ -180,6 +183,8 @@ public:
     static void init() {
         using caps = engine::caps_of_t<Platform>;
         if constexpr (caps::has_blitter) {
+            // Pure-overlay layouts no longer need a manual antic_playfield(false):
+            // set_screen keeps ANTIC DMA off for them (see screen.h).
             Platform::hal::overlay_init();
         } else {
             setup_sprites();
@@ -226,13 +231,17 @@ public:
         Platform::hal::overlay_publish_background();
     }
 
-    // Enable/disable the ANTIC playfield (character/bitmap) DMA. When an opaque
-    // VBXE overlay covers the screen the ANTIC playfield is invisible, but its
-    // per-scanline VRAM-bus DMA starves the blitter's restore copies and collapses
-    // the overlay compositor's per-frame budget. Call antic_playfield(false) once
-    // after init (and after any set_screen, which re-enables it) to free the bus;
-    // the overlay keeps driving the display. Leave it enabled for transparent
-    // overlays that show ANTIC through. Atari-only; opt-in (see API_REFERENCE.md).
+    // Enable/disable the ANTIC playfield (character/bitmap) DMA. The common
+    // opaque VBXE-only case is now automatic: a pure-overlay screen
+    // (is_pure_overlay) keeps ANTIC DMA off through set_screen, so no manual call
+    // is needed. This remains as an escape hatch for the cases the engine can't
+    // infer: a transparent overlay that shows ANTIC through (leave it enabled),
+    // or a mixed overlay+ANTIC layout where you want the playfield fetch off to
+    // free the VRAM bus even though ANTIC regions are present. When an opaque
+    // overlay covers the screen the ANTIC playfield is invisible, but its
+    // per-scanline VRAM-bus DMA starves the blitter's restore copies and
+    // collapses the overlay compositor's per-frame budget. Re-enabled by any
+    // set_screen on a non-pure-overlay layout. Atari-only (see API_REFERENCE.md).
     static void antic_playfield(bool enable) {
         Platform::hal::set_antic_playfield_dma(enable);
     }
@@ -287,6 +296,26 @@ public:
     // scroll_map() once the game has bound its map buffer.
     template <typename S, typename Cb>
     static void set_screen(Cb cb) {
+        // Config agreement: if this screen declares a VBXE overlay region, its
+        // mode and height must match the VBXE Config the graphics axis was built
+        // with — otherwise the ANTIC display list reserves overlay scanlines that
+        // disagree with the live overlay framebuffer (silent corruption). Checked
+        // here (not in the generic ScreenManager) because the VBXE Config is only
+        // reachable through Platform::graphics, and this runs for every screen.
+        if constexpr (engine::caps_of_t<Platform>::has_blitter) {
+            using Layout = typename S::display;
+            if constexpr (Layout::has_overlay) {
+                using OvRegion =
+                    typename Layout::template region_at<Layout::overlay_region_index()>;
+                using Cfg = typename Platform::graphics::config;  // gfx::VBXE<Cfg>::config
+                static_assert(OvRegion::height <= Cfg::fb_height,
+                    "OverlayRegion height exceeds the VBXE framebuffer height");
+                static_assert(OvRegion::mode == Cfg::overlay_mode,
+                    "OverlayRegion mode does not match the VBXE Config overlay_mode "
+                    "(e.g. OverlayRegion<VBXE_SR> under a Config<VBXE_HR>)");
+            }
+        }
+
         scroll.deactivate();
         screen.template set_screen<S>(cb);
         // Baseline: bind the bitmap canvas to S's first bitmap region (if any), so
