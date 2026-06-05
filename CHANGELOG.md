@@ -11,20 +11,39 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-04
+
 ### Added
-- `Game::antic_playfield(bool)` (Atari, opt-in): enable/disable the ANTIC
-  playfield (character/bitmap) DMA, preserving display-list and P/M DMA. Under an
-  opaque VBXE overlay the ANTIC playfield is invisible, but its per-scanline VRAM
-  DMA starves the blitter's restore copies; calling `antic_playfield(false)` after
-  init frees the bus.
+- `engine::OverlayRegion<Mode, Height>` — a VRAM-backed VBXE overlay region usable
+  inside a `DisplayLayout` alongside ANTIC `TextRegion`/`BitmapRegion`s. It costs
+  zero screen-buffer RAM (its pixels live in VBXE VRAM), and region order sets the
+  overlay's vertical position. New overlay-aware `DisplayLayout` queries:
+  `has_overlay`, `is_pure_overlay`, `overlay_region_index()`.
+- Automatic ANTIC DMA control in `set_screen<S>()`: a **pure-overlay** screen
+  (every region is an `OverlayRegion`) keeps ANTIC DMA off — its display list
+  collapses to a 3-byte JVB stub and the VBXE overlay drives the display via its
+  XDL — which frees the VRAM bus for the blitter. ANTIC-only and mixed
+  overlay+ANTIC screens enable DMA as before. This makes the previous manual
+  `antic_playfield(false)` workaround unnecessary for the common opaque case.
+- `Game::antic_playfield(bool)` (Atari, opt-in) — retained as a manual escape
+  hatch for the cases the engine cannot infer: a transparent overlay that shows
+  ANTIC through (leave it enabled), or a mixed overlay+ANTIC layout that wants the
+  playfield fetch off. Toggles only the playfield DMA, preserving display-list and
+  P/M DMA.
+- Compile-time config-agreement check: `Core::set_screen` `static_assert`s that an
+  `OverlayRegion`'s mode and height match the platform's VBXE `Config`
+  (`overlay_mode`, `fb_height`) — e.g. `OverlayRegion<VBXE_HR>` under a
+  `Config<VBXE_SR>` is a build error instead of silent corruption.
 
 ### Fixed
 - VBXE `Background::Bitmap` overlay ran the game loop at ~8 Hz instead of 60 on
   real hardware: the hidden ANTIC text playfield's DMA contended the VRAM bus and
   stalled the blitter's per-frame VRAM→VRAM restore copies, overrunning the VBI.
-  The `atari_vbxe_sprites` demo now calls `Game::antic_playfield(false)`, restoring
-  full-rate motion. (Regression was masked because the dirty-rect restore was
-  host-validated on `mos-sim`, which doesn't model VBXE/ANTIC bus timing.)
+  The `atari_vbxe_sprites` demo now uses a pure-overlay
+  `DisplayLayout<OverlayRegion<VBXE_SR, 240>>`, so `set_screen` keeps ANTIC DMA off
+  automatically, restoring full-rate motion. (Regression was masked because the
+  dirty-rect restore was host-validated on `mos-sim`, which doesn't model
+  VBXE/ANTIC bus timing.)
 - `atari_vbxe_sprites`: sprite X position was computed as `u8` over a 40..259
   range, wrapping past 255 and briefly jumping the shape to the far left; the
   slide now stays within the valid u8 coordinate range.
