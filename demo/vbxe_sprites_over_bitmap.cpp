@@ -40,7 +40,7 @@ namespace V = atari::vbxe;
 //
 // Double-buffered VBXE (SR_320) with Background::Bitmap: gfx() draws into the
 // VRAM master canvas, and the sprite compositor restores footprints from it.
-using Cfg = V::Config<V::Mode::SR_320, V::Buffers::Double, V::RegBase::D640,
+using Cfg = V::Config<M::Mode::VBXE_SR, V::Buffers::Double, V::RegBase::D640,
                       V::MEMAC_A, 0x00000, V::Background::Bitmap>;
 using Platform = M::Platform<
     M::Machine::XL,

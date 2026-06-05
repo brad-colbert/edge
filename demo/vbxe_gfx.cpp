@@ -34,7 +34,7 @@ namespace V = atari::vbxe;
 //
 // Single-buffered VBXE (SR_320). No bitmap_region in GameConfig, so the gfx
 // canvas is the overlay framebuffer (Region == void, the blitter path).
-using Cfg = V::Config<V::Mode::SR_320, V::Buffers::Single>;
+using Cfg = V::Config<M::Mode::VBXE_SR, V::Buffers::Single>;
 using Platform = M::Platform<
     M::Machine::XL,
     M::RAM::Baseline,

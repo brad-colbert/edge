@@ -21,18 +21,19 @@
 #include <engine/platform/atari/vbxe_xdl.h>
 
 namespace v = atari::vbxe;
+namespace M = atari;
 
 // ── Config fixtures ──────────────────────────────────────────────────
-using CfgDefault = v::Config<>;                          // D640, SR_320, single, MEMAC-A 4K
-using CfgD740    = v::Config<v::Mode::SR_320, v::Buffers::Single, v::RegBase::D740>;
-using Cfg8K      = v::Config<v::Mode::SR_320, v::Buffers::Single, v::RegBase::D640,
+using CfgDefault = v::Config<>;                          // D640, VBXE_SR, single, MEMAC-A 4K
+using CfgD740    = v::Config<M::Mode::VBXE_SR, v::Buffers::Single, v::RegBase::D740>;
+using Cfg8K      = v::Config<M::Mode::VBXE_SR, v::Buffers::Single, v::RegBase::D640,
                              v::MEMAC_A_Cfg<0xB0, v::WindowSize::_8K>>;
-using CfgB       = v::Config<v::Mode::SR_320, v::Buffers::Single, v::RegBase::D640, v::MEMAC_B>;
-using CfgDouble  = v::Config<v::Mode::SR_320, v::Buffers::Double>;
+using CfgB       = v::Config<M::Mode::VBXE_SR, v::Buffers::Single, v::RegBase::D640, v::MEMAC_B>;
+using CfgDouble  = v::Config<M::Mode::VBXE_SR, v::Buffers::Double>;
 // sprites-over-bitmap: Background::Bitmap adds a master canvas (one framebuffer).
-using CfgBmp     = v::Config<v::Mode::SR_320, v::Buffers::Single, v::RegBase::D640,
+using CfgBmp     = v::Config<M::Mode::VBXE_SR, v::Buffers::Single, v::RegBase::D640,
                              v::MEMAC_A, 0x00000, v::Background::Bitmap>;
-using CfgBmpDbl  = v::Config<v::Mode::SR_320, v::Buffers::Double, v::RegBase::D640,
+using CfgBmpDbl  = v::Config<M::Mode::VBXE_SR, v::Buffers::Double, v::RegBase::D640,
                              v::MEMAC_A, 0x00000, v::Background::Bitmap>;
 
 // ── 1. Register addressing off reg_base ──────────────────────────────
@@ -198,7 +199,7 @@ static_assert(kXdl.buf[9] == 0xFF,   "ATT priority 255");
 // ── 6b. XDL byte layout (full-screen Text_80) ────────────────────────
 // Text mode adds TMON + CHBASE; the hardware advances OVADR by OVSTEP every 8
 // scanlines (one record covers all rows). FX Core manual pp.9,14.
-using CfgText = v::Config<v::Mode::Text_80>;
+using CfgText = v::Config<M::Mode::VBXE_T80>;
 struct XdlTextResult { v::u8 buf[24]; v::u8 len; };
 constexpr XdlTextResult build_text_xdl() {
     XdlTextResult r{};

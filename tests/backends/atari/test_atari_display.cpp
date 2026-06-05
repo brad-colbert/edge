@@ -77,6 +77,21 @@ static_assert(M::bytes_per_line(M::Mode::MODE_2) == 40,   "Mode 2 = 40 cols");
 static_assert(M::bytes_per_line(M::Mode::BITMAP_E) == 40, "Mode E = 40 bytes/line");
 static_assert(M::bits_per_pixel(M::Mode::BITMAP_E) == 2,  "Mode E is 2bpp");
 
+// ── VBXE overlay mode geometry (unified into atari::Mode, see modes.h) ──
+
+static_assert(M::is_vbxe(M::Mode::VBXE_T80),              "VBXE_T80 is a VBXE mode");
+static_assert(!M::is_vbxe(M::Mode::MODE_2),              "MODE_2 is not a VBXE mode");
+static_assert(M::bytes_per_line(M::Mode::VBXE_SR) == 320, "VBXE_SR = 320 bytes/line");
+static_assert(M::bytes_per_line(M::Mode::VBXE_HR) == 320, "VBXE_HR = 320 bytes/line (640px 4bpp)");
+static_assert(M::bytes_per_line(M::Mode::VBXE_LR) == 160, "VBXE_LR = 160 bytes/line");
+static_assert(M::bytes_per_line(M::Mode::VBXE_T80) == 160,"VBXE_T80 = 160 bytes/line (80 char+attr)");
+static_assert(M::bits_per_pixel(M::Mode::VBXE_SR) == 8,   "VBXE_SR is 8bpp");
+static_assert(M::bits_per_pixel(M::Mode::VBXE_HR) == 4,   "VBXE_HR is 4bpp");
+static_assert(M::is_text(M::Mode::VBXE_T80),              "VBXE_T80 is text");
+static_assert(!M::is_text(M::Mode::VBXE_SR),             "VBXE_SR is not text");
+static_assert(M::scanlines_per_line(M::Mode::VBXE_SR) == 1, "VBXE modes are 1 scanline/line");
+static_assert(M::dl_mode_byte(M::Mode::VBXE_SR) == 0,    "VBXE modes have no ANTIC DL byte");
+
 // ── Runtime harness ────────────────────────────────────────────────────
 
 static unsigned g_failures = 0;

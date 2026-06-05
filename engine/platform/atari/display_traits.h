@@ -22,7 +22,8 @@ namespace display {
 template <>
 struct traits<atari::Mode> {
     static constexpr bool is_text(atari::Mode m) { return atari::is_text(m); }
-    static constexpr engine::u8 bytes_per_line(atari::Mode m) {
+    static constexpr bool is_vbxe(atari::Mode m) { return atari::is_vbxe(m); }
+    static constexpr engine::u16 bytes_per_line(atari::Mode m) {
         return atari::bytes_per_line(m);
     }
     static constexpr engine::u8 bits_per_pixel(atari::Mode m) {
@@ -37,7 +38,7 @@ struct traits<atari::Mode> {
     static constexpr engine::u8 fine_scroll_range(atari::Mode m) {
         return atari::fine_scroll_range(m);
     }
-    static constexpr engine::u8 scroll_fetch_width(atari::Mode m) {
+    static constexpr engine::u16 scroll_fetch_width(atari::Mode m) {
         return atari::scroll_fetch_width(m);
     }
     // ANTIC register conventions: raising HSCROL moves the picture opposite to the

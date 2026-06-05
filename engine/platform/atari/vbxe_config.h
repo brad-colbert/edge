@@ -19,18 +19,20 @@
 
 #include <stdint.h>
 
+#include "modes.h"
+
 namespace atari::vbxe {
 
 // Register decode base. The VBXE answers at $D640 or $D740 depending on how the
 // board is jumpered / which slot it occupies (the manual's "Dx40" with x = 6/7).
 enum class RegBase : uint16_t { D640 = 0xD640, D740 = 0xD740 };
 
-// Overlay display mode (the VBXE overlay plane drawn over/under ANTIC output):
-//   SR_320  — Standard Resolution, 320 px, 256 colours (1 byte/pixel)
-//   HR_640  — High Resolution,     640 px, 16 colours  (1 nibble/pixel)
-//   LR_160  — Low Resolution,      160 px, 256 colours
-//   Text_80 — 80-column text mode  (char + attribute pairs)
-enum class Mode : uint8_t { SR_320, HR_640, LR_160, Text_80 };
+// The overlay display mode (the VBXE overlay plane drawn over/under ANTIC output)
+// is one of the VBXE members of the unified atari::Mode enum (modes.h):
+//   atari::Mode::VBXE_SR  — Standard Resolution, 320 px, 256 colours (1 byte/pixel)
+//   atari::Mode::VBXE_HR  — High Resolution,     640 px, 16 colours  (1 nibble/pixel)
+//   atari::Mode::VBXE_LR  — Low Resolution,      160 px, 256 colours
+//   atari::Mode::VBXE_T80 — 80-column text mode  (char + attribute pairs)
 
 // Framebuffer double-buffering policy.
 enum class Buffers : uint8_t { Single, Double };
@@ -59,7 +61,7 @@ struct MEMAC_B {};
 
 // Full VBXE configuration carried by gfx::VBXE<Config>.
 template <
-    Mode       OverlayMode = Mode::SR_320,
+    atari::Mode OverlayMode = atari::Mode::VBXE_SR,
     Buffers    BufferPolicy = Buffers::Single,
     RegBase    Base = RegBase::D640,
     typename   MemacCfg = MEMAC_A,
@@ -67,19 +69,19 @@ template <
     Background Bg = Background::Flat
 >
 struct Config {
-    static constexpr Mode    overlay_mode  = OverlayMode;
+    static_assert(atari::is_vbxe(OverlayMode),
+                  "VBXE Config overlay_mode must be a VBXE mode (atari::Mode >= 0x80)");
+
+    static constexpr atari::Mode overlay_mode  = OverlayMode;
     static constexpr Buffers buffer_policy = BufferPolicy;
     static constexpr RegBase reg_base      = Base;
     using memac = MemacCfg;
     static constexpr uint32_t vram_offset  = VRAMOffset;
     static constexpr Background background  = Bg;
 
-    // Derived: framebuffer size in bytes
-    static constexpr uint32_t fb_width =
-        (OverlayMode == Mode::SR_320) ? 320 :
-        (OverlayMode == Mode::HR_640) ? 320 :  // 640 pixels but 4bpp = 320 bytes/line
-        (OverlayMode == Mode::LR_160) ? 160 :
-        160;  // Text_80: 160 bytes/line (80 chars x 2 bytes)
+    // Derived: framebuffer size in bytes. Width comes from the single source of
+    // truth in modes.h (SR/HR = 320 bytes/line, LR/T80 = 160).
+    static constexpr uint32_t fb_width  = atari::bytes_per_line(OverlayMode);
     static constexpr uint32_t fb_height = 240;
     static constexpr uint32_t fb_bytes = fb_width * fb_height;
 };
