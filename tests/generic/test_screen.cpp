@@ -27,6 +27,7 @@ using engine::u16;
 using engine::DisplayLayout;
 using engine::TextRegion;
 using engine::BitmapRegion;
+using engine::OverlayRegion;
 using engine::TextRegionView;
 using engine::BitmapRegionView;
 using engine::ScreenSet;
@@ -40,13 +41,17 @@ namespace M = atari;
 struct MockHal {
     static const u8* last_program;
     static bool      dma_enabled;
+    static unsigned  enable_calls;
+    static unsigned  disable_calls;
 
-    static void display_dma_disable() { dma_enabled = false; }
-    static void display_dma_enable()  { dma_enabled = true; }
+    static void display_dma_disable() { dma_enabled = false; ++disable_calls; }
+    static void display_dma_enable()  { dma_enabled = true;  ++enable_calls; }
     static void set_display_program(const u8* p) { last_program = p; }
 };
-const u8* MockHal::last_program = nullptr;
-bool      MockHal::dma_enabled  = false;
+const u8* MockHal::last_program  = nullptr;
+bool      MockHal::dma_enabled   = false;
+unsigned  MockHal::enable_calls  = 0;
+unsigned  MockHal::disable_calls = 0;
 
 struct MockPlatform {
     using hal = MockHal;
@@ -72,6 +77,29 @@ struct GameConfig {
     using screens = ScreenSet<ScreenText, ScreenMixed>;
 };
 
+// Overlay screens for the DMA-dispatch tests. Kept in a SEPARATE config/manager
+// so the existing GameConfig/g_sm and their geometry static_asserts are untouched.
+struct ScreenOverlay {        // pure overlay: ANTIC fully disabled
+    using display = DisplayLayout<OverlayRegion<M::Mode::VBXE_SR, 240>>;
+};
+struct ScreenMixedOverlay {   // overlay + ANTIC text: has_overlay, not pure
+    using display = DisplayLayout<
+        OverlayRegion<M::Mode::VBXE_SR, 200>,
+        TextRegion<M::Mode::MODE_2, 3>>;
+};
+struct OverlayConfig {
+    using screens = ScreenSet<ScreenOverlay, ScreenMixedOverlay>;
+};
+
+// A pure-overlay-ONLY config has max_screen_ram == 0; ScreenManager must clamp
+// the buffer to at least 1 byte so screen_buffer_ is never a zero-length array.
+struct PureOverlayOnlyConfig {
+    using screens = ScreenSet<ScreenOverlay>;
+};
+static_assert(
+    engine::ScreenManager<MockPlatform, PureOverlayOnlyConfig>::buffer_size == 1,
+    "pure-overlay-only ScreenSet clamps the screen buffer to 1 byte");
+
 // ── Compile-time checks: DisplayLayout geometry ───────────────────────
 
 // 1. Single full-screen text region: 40 cols x 24 rows = 960 bytes, 1 region.
@@ -91,6 +119,49 @@ static_assert(MixedLayout::offset(2) == 7240, "region 2 after header + bitmap");
 using Screens = GameConfig::screens;
 static_assert(Screens::screen_count == 2,      "two screens");
 static_assert(Screens::max_screen_ram == 7280, "max(960, 7280) == 7280");
+
+// ── Compile-time checks: OverlayRegion + overlay-aware DisplayLayout ────
+//
+// VBXE overlay regions are VRAM-backed (ram_bytes == 0), carry the wide (u16)
+// 320-byte VBXE_SR line, and flip the layout's overlay queries. None of these
+// touch the screen buffer.
+
+// 4. OverlayRegion geometry: VRAM-backed, 320 bytes/line (u16, not truncated).
+using OverlaySR = OverlayRegion<M::Mode::VBXE_SR, 240>;
+static_assert(OverlaySR::ram_bytes      == 0,    "overlay is VRAM-backed, 0 screen RAM");
+static_assert(OverlaySR::is_overlay     == true, "OverlayRegion::is_overlay");
+static_assert(OverlaySR::bytes_per_line == 320,  "VBXE_SR = 320 bytes/line (u16)");
+static_assert(OverlaySR::height         == 240,  "overlay height passes through");
+
+// 5. Pure-overlay layout: ANTIC can be fully disabled, costs 0 screen RAM.
+using PureOverlay = DisplayLayout<OverlayRegion<M::Mode::VBXE_SR, 240>>;
+static_assert(PureOverlay::is_pure_overlay    == true,  "single overlay is pure");
+static_assert(PureOverlay::has_overlay        == true,  "pure overlay has an overlay");
+static_assert(PureOverlay::antic_region_count == 0,     "no ANTIC regions");
+static_assert(PureOverlay::total_ram          == 0,     "overlay-only = 0 screen RAM");
+
+// 6. Mixed layout: overlay over a 3-row text region. Only the text costs RAM.
+using MixedOverlay = DisplayLayout<
+    OverlayRegion<M::Mode::VBXE_SR, 200>,
+    TextRegion<M::Mode::MODE_2, 3>
+>;
+static_assert(MixedOverlay::is_pure_overlay    == false, "a text region breaks purity");
+static_assert(MixedOverlay::has_overlay        == true,  "still has an overlay");
+static_assert(MixedOverlay::antic_region_count == 1,     "one ANTIC (text) region");
+static_assert(MixedOverlay::total_ram          == 120,   "40x3 text only; overlay = 0");
+static_assert(MixedOverlay::overlay_region_index() == 0, "overlay is region 0");
+
+// 7. Traditional layout: zero overlays. is_pure_overlay must NOT be vacuously true.
+static_assert(TextLayout::has_overlay     == false, "no overlay in a pure-text layout");
+static_assert(TextLayout::is_pure_overlay == false, "no overlay => not pure overlay");
+static_assert(TextLayout::antic_region_count == 1,  "the text region is an ANTIC region");
+static_assert(TextLayout::overlay_region_index() == TextLayout::region_count,
+              "no overlay => index past the end");
+
+// NOTE (negative test, kept disabled): instantiating OverlayRegion on a non-VBXE
+// mode must fail the is_vbxe static_assert. Verified manually, e.g.
+//   using BadOverlay = OverlayRegion<M::Mode::MODE_2, 24>;  // static_assert fires
+// Left commented out so the suite still builds.
 
 // ── Runtime harness ────────────────────────────────────────────────────
 
@@ -183,10 +254,42 @@ static void test_set_screen() {
     CHECK(g_sm.buffer()[40] == 0xC0);
 }
 
+// ── set_screen drives ANTIC DMA from the layout's overlay properties ───
+
+static engine::ScreenManager<MockPlatform, OverlayConfig> g_sm_overlay;
+
+// A pure-overlay screen disables ANTIC DMA and never re-enables it: the program
+// (the 3-byte JVB stub) is still installed as a DLISTL safety pointer.
+static void test_pure_overlay_no_dma_enable() {
+    MockHal::enable_calls  = 0;
+    MockHal::disable_calls = 0;
+    g_sm_overlay.set_screen<ScreenOverlay>([]() {});
+
+    CHECK(MockHal::disable_calls == 1);
+    CHECK(MockHal::enable_calls  == 0);   // ANTIC stays off for a pure overlay
+    CHECK(!MockHal::dma_enabled);
+    CHECK(MockHal::last_program == g_sm_overlay.active_dl());
+    CHECK(g_sm_overlay.active_dl_size() == 3);   // JVB stub
+}
+
+// A mixed overlay+ANTIC screen DOES re-enable DMA (the ANTIC text region needs
+// the playfield fetch); the overlay blank lines just cost DL DMA.
+static void test_mixed_overlay_enables_dma() {
+    MockHal::enable_calls  = 0;
+    MockHal::disable_calls = 0;
+    g_sm_overlay.set_screen<ScreenMixedOverlay>([]() {});
+
+    CHECK(MockHal::disable_calls == 1);
+    CHECK(MockHal::enable_calls  == 1);   // ANTIC region present => enabled
+    CHECK(MockHal::dma_enabled);
+}
+
 int main() {
     test_text_view_put_char();
     test_bitmap_view_plot();
     test_set_screen();
+    test_pure_overlay_no_dma_enable();
+    test_mixed_overlay_enables_dma();
 
     if (g_failures == 0) {
         printf("ALL TESTS PASSED\n");

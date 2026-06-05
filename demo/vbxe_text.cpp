@@ -1,6 +1,6 @@
 // demo/vbxe_text.cpp — Edge engine VBXE 80-column text-mode demo.
 //
-// Brings up the VBXE overlay in hardware text mode (Mode::Text_80), uploads the
+// Brings up the VBXE overlay in hardware text mode (Mode::VBXE_T80), uploads the
 // supplied PREPPIE font to VBXE VRAM (CHBASE), and prints text into the character
 // map through the portable engine API (Game::overlay_*). Produces a loadable .xex
 // (mos-atari8-dos target; see CMakeLists.txt). Run on Altirra (or hardware) with a
@@ -30,7 +30,7 @@ namespace V = atari::vbxe;
 // ── Platform + game configuration ────────────────────────────────────────
 //
 // 80-column text overlay, single-buffered. No sprites — the picture persists.
-using Cfg = V::Config<V::Mode::Text_80, V::Buffers::Single>;
+using Cfg = V::Config<M::Mode::VBXE_T80, V::Buffers::Single>;
 using Platform = M::Platform<
     M::Machine::XL,
     M::RAM::Baseline,

@@ -1,6 +1,6 @@
 # EDGE API Reference
 
-> **Applies to EDGE v0.2.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
+> **Applies to EDGE v0.3.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
 
 This reference is organized in two layers:
 
@@ -157,10 +157,17 @@ The current concrete platform implementation is Atari and is described later in 
 
 ### Region Descriptors
 
-The engine exposes two display-region kinds:
+The engine exposes three display-region kinds:
 
 - `engine::TextRegion<Mode, Height>`
 - `engine::BitmapRegion<Mode, Height>`
+- `engine::OverlayRegion<Mode, Height>` — a VBXE overlay region whose pixels live
+  in VBXE VRAM (zero screen-buffer RAM). `Mode` is a VBXE overlay mode
+  (`atari::Mode::VBXE_SR`/`VBXE_HR`/`VBXE_LR`/`VBXE_T80`). Region order sets the
+  overlay's vertical position. A layout of only `OverlayRegion`s is a *pure
+  overlay*: `set_screen` keeps ANTIC DMA off for it automatically (no
+  `antic_playfield(false)` needed), and its `OverlayRegion` mode/height are checked
+  against the platform's VBXE `Config` at compile time.
 
 These are composed into a screen layout:
 
@@ -281,13 +288,17 @@ Background / compositing (for sprites-over-bitmap):
   to the live display page(s); sprite footprints are then restored from it each
   frame
 - `Game::antic_playfield(bool enable)` — enable/disable the ANTIC playfield
-  (character/bitmap) DMA. **Atari-only, opt-in.** When an opaque VBXE overlay
-  covers the screen the ANTIC playfield is invisible, but its per-scanline VRAM
-  DMA starves the blitter's restore copies and can collapse the compositor's
-  per-frame budget (e.g. `Background::Bitmap` ran the loop at ~8 Hz instead of
-  60). Call `antic_playfield(false)` once after init — and after any
-  `set_screen`, which re-enables it — to free the bus; the overlay keeps driving
-  the display. Leave it enabled for transparent overlays that show ANTIC through.
+  (character/bitmap) DMA. **Atari-only, opt-in escape hatch.** The common case is
+  now automatic: a *pure-overlay* screen (`DisplayLayout` of only
+  `OverlayRegion`s) keeps ANTIC DMA off through `set_screen`, so you do **not**
+  need to call this. When an opaque VBXE overlay covers the screen the ANTIC
+  playfield is invisible, but its per-scanline VRAM DMA starves the blitter's
+  restore copies and can collapse the compositor's per-frame budget (e.g.
+  `Background::Bitmap` ran the loop at ~8 Hz instead of 60). Use this only for the
+  cases the engine can't infer: a transparent overlay that shows ANTIC through
+  (leave it enabled), or a mixed overlay+ANTIC layout where you want the playfield
+  fetch off anyway. It toggles only the playfield bits; any `set_screen` on a
+  non-pure-overlay layout re-enables them.
 
 Overlay collision snapshots, latched at the frame service:
 

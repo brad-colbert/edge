@@ -39,9 +39,14 @@ template <typename Layout>
 constexpr u16 display_list_base_size() {
     u16 s = 3 + 3;
     for (u8 i = 0; i < Layout::region_count; ++i) {
-        s += Layout::region_is_scroll[i]
-                 ? static_cast<u16>(3 * Layout::region_height[i])
-                 : static_cast<u16>(Layout::region_height[i]) + 2;
+        if (Layout::region_is_overlay[i]) {
+            // Overlay region: ceil(H/8) blank instructions, no mode lines / LMS.
+            s += static_cast<u16>((Layout::region_height[i] + 7) / 8);
+        } else if (Layout::region_is_scroll[i]) {
+            s += static_cast<u16>(3 * Layout::region_height[i]);
+        } else {
+            s += static_cast<u16>(Layout::region_height[i]) + 2;
+        }
     }
     return s;
 }
@@ -57,6 +62,8 @@ constexpr u16 lms_crossings_max(u16 b) {
 // crossing LMS (a 1-byte mode line becomes a 3-byte LMS).
 template <typename Layout>
 constexpr u16 display_list_capacity() {
+    // A pure-overlay layout is just the 3-byte self-looping JVB stub.
+    if constexpr (Layout::is_pure_overlay) return 3;
     u16 s = display_list_base_size<Layout>();
     for (u8 i = 0; i < Layout::region_count; ++i) {
         s += static_cast<u16>(2 * lms_crossings_max(Layout::region_ram[i]));
@@ -70,11 +77,13 @@ template <typename Layout>
 constexpr u16 max_lms_count() {
     u16 n = 0;
     for (u8 i = 0; i < Layout::region_count; ++i) {
+        if (Layout::region_is_overlay[i]) continue;   // overlays emit no LMS
         n += Layout::region_is_scroll[i]
                  ? static_cast<u16>(Layout::region_height[i])
                  : static_cast<u16>(1 + lms_crossings_max(Layout::region_ram[i]));
     }
-    return n;
+    // Min 1 so a pure-overlay layout never declares a zero-length lms_pos[] array.
+    return n < 1 ? 1 : n;
 }
 
 // Total scroll LMS (one per visible line of every scroll region). Sized at least
@@ -130,6 +139,18 @@ struct DisplayProgram {
         lms_count = 0;
         scroll_lms_count = 0;
 
+        // Pure-overlay layout: ANTIC DMA is disabled entirely by the screen
+        // manager, so the list need only satisfy the DLISTL pointer requirement.
+        // Emit a 3-byte self-looping JVB and nothing else.
+        if constexpr (Layout::is_pure_overlay) {
+            bytes[0] = DL_JVB;
+            jvb_pos  = 1;
+            bytes[1] = lo(dl_base);
+            bytes[2] = hi(dl_base);
+            size     = 3;
+            return;
+        }
+
         // Three 8-blank-line instructions (24 scanlines) to centre vertically.
         bytes[p++] = dl_blank(8);
         bytes[p++] = dl_blank(8);
@@ -137,6 +158,21 @@ struct DisplayProgram {
 
         for (u8 r = 0; r < region_count; ++r) {
             const u8  mode = Layout::region_mode_byte[r];
+
+            if (Layout::region_is_overlay[r]) {
+                // Overlay region: its pixels live in VBXE VRAM, not the ANTIC
+                // screen buffer, so reserve its scanlines with blank-line
+                // instructions (ceil(H/8)) instead of mode lines / LMS. Region
+                // order thus controls the overlay's vertical position.
+                u16 blanks = Layout::region_height[r];
+                while (blanks > 0) {
+                    u8 n = blanks > 8 ? static_cast<u8>(8) : static_cast<u8>(blanks);
+                    bytes[p++] = dl_blank(n);
+                    blanks = static_cast<u16>(blanks - n);
+                }
+                region_lms_pos[r] = 0;   // sentinel: no LMS for overlay regions
+                continue;
+            }
 
             if (Layout::region_is_scroll[r]) {
                 // Scroll region: every visible line gets its own LMS (with the

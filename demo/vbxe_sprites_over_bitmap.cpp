@@ -24,6 +24,8 @@
 //  * VBXE register base $D640 (engine default); a $D740 board needs a Config
 //    override. Run with BASIC DISABLED (MEMAC-A window is $B000-$BFFF). Altirra:
 //    enable the VBXE device with the FX core.
+//  * The screen is a single OverlayRegion (pure overlay), so the engine keeps
+//    ANTIC DMA off automatically — no manual antic_playfield(false) call.
 
 #include <stdint.h>
 
@@ -40,7 +42,7 @@ namespace V = atari::vbxe;
 //
 // Double-buffered VBXE (SR_320) with Background::Bitmap: gfx() draws into the
 // VRAM master canvas, and the sprite compositor restores footprints from it.
-using Cfg = V::Config<V::Mode::SR_320, V::Buffers::Double, V::RegBase::D640,
+using Cfg = V::Config<M::Mode::VBXE_SR, V::Buffers::Double, V::RegBase::D640,
                       V::MEMAC_A, 0x00000, V::Background::Bitmap>;
 using Platform = M::Platform<
     M::Machine::XL,
@@ -49,11 +51,16 @@ using Platform = M::Platform<
     M::Sound::Mono,
     M::TV::NTSC>;
 
-struct ScreenText {
-    using display = engine::DisplayLayout<engine::TextRegion<M::Mode::MODE_2, 24>>;
+// A pure-overlay screen: one VBXE overlay region, no ANTIC content. set_screen
+// keeps ANTIC DMA off for it automatically (freeing the VRAM bus), and the
+// OverlayRegion's mode/height are checked against the Config above at compile
+// time (VBXE_SR, 240 == Cfg::fb_height).
+struct GameScreen {
+    using display =
+        engine::DisplayLayout<engine::OverlayRegion<M::Mode::VBXE_SR, 240>>;
 };
 struct GameConfig {
-    using screens = engine::ScreenSet<ScreenText>;
+    using screens = engine::ScreenSet<GameScreen>;
     static constexpr u8 max_sprites    = 2;
     static constexpr u8 sound_channels = 1;
 };
@@ -119,11 +126,10 @@ int main() {
     draw_background();               // draw into the VRAM master canvas
     Game::overlay_publish_background();  // seed both display pages from the master
 
-    // The overlay is opaque, so the ANTIC text playfield behind it is invisible —
-    // but its per-scanline VRAM-bus DMA would otherwise starve the blitter's
-    // master->framebuffer restore copies and throttle the game loop to ~8 Hz.
-    // Dropping the (hidden) playfield fetch frees the bus for full 60 Hz motion.
-    Game::antic_playfield(false);
+    // (ANTIC DMA is already off: GameScreen is a pure-overlay layout, so
+    // set_screen never enabled the playfield — the VRAM bus stays free for the
+    // blitter's restore copies and the loop runs at full 60 Hz. No manual
+    // antic_playfield(false) needed.)
 
     Game::sprite_color(0, 1);        // kBall coloured palette-1 index 1 (red)
 

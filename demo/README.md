@@ -1,6 +1,6 @@
 # Hardware validation demo (`atari_hw_test.xex`)
 
-> **Applies to EDGE v0.2.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
+> **Applies to EDGE v0.3.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
 
 A minimal Atari 8-bit program that drives every engine subsystem at once, so
 the engine's live ANTIC path can be confirmed on real hardware / emulators
@@ -167,13 +167,15 @@ prints through the portable `Game::overlay_*` text seam.
 
 Double-buffered `Background::Bitmap`: the background is drawn once with
 `Game::gfx()` into the VRAM master, published, and two sprites slide over it.
-Because the overlay is opaque, the demo calls `Game::antic_playfield(false)` after
-setup: the hidden ANTIC text playfield's DMA would otherwise contend the VRAM bus
-and stall the blitter's per-frame restore copies, throttling motion to ~8 Hz.
+The screen is a pure-overlay `DisplayLayout<OverlayRegion<VBXE_SR, 240>>`, so
+`set_screen` keeps ANTIC DMA off automatically — without that, the hidden ANTIC
+playfield's DMA would contend the VRAM bus and stall the blitter's per-frame
+restore copies, throttling motion to ~8 Hz. (Earlier versions of this demo
+achieved the same with a manual `Game::antic_playfield(false)` call.)
 
 | Observation | Proves |
 |---|---|
 | The `vbxe_gfx` picture as a steady background | `gfx()` master canvas + `overlay_publish_background()` |
 | A red ball and a multi-colour pixel sprite slide across | `make_sprite` (Packed1bpp) + `make_pixel_sprite` (Pixel8bpp) |
 | The background stays intact under the moving sprites | per-frame footprint restore from the master (flicker-free) |
-| The sprites move at full speed (~60 px/s) | `Game::antic_playfield(false)` frees the VRAM bus for the blitter |
+| The sprites move at full speed (~60 px/s) | pure-overlay layout keeps ANTIC DMA off, freeing the VRAM bus for the blitter |

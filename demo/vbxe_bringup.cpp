@@ -57,9 +57,9 @@ namespace V = atari::vbxe;
 // show the unpainted (transparent, index 0) back page — the ANTIC playfield reads
 // through and the painted content appears to vanish.
 #if VBXE_BRINGUP_MODE == 3
-using Cfg = V::Config<V::Mode::SR_320, V::Buffers::Double>;   // sprite demo: flip pages
+using Cfg = V::Config<M::Mode::VBXE_SR, V::Buffers::Double>;   // sprite demo: flip pages
 #else
-using Cfg = V::Config<V::Mode::SR_320, V::Buffers::Single>;   // static paint: no flip
+using Cfg = V::Config<M::Mode::VBXE_SR, V::Buffers::Single>;   // static paint: no flip
 #endif
 using Platform = M::Platform<
     M::Machine::XL,

@@ -1,6 +1,6 @@
 # EDGE Atari Platform Guide
 
-> **Applies to EDGE v0.2.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
+> **Applies to EDGE v0.3.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
 
 This document describes the first concrete EDGE backend: the Atari 8-bit family.
 

@@ -2,7 +2,7 @@
 
 # EDGE (Eight-bit Damned! Game Engine)
 
-> **Applies to EDGE v0.2.0** — see [CHANGELOG](./CHANGELOG.md) for version history.
+> **Applies to EDGE v0.3.0** — see [CHANGELOG](./CHANGELOG.md) for version history.
 
 EDGE is a C++20 game engine for constrained 6502-class systems, built around a small, deterministic, compile-time configured API instead of a heavy runtime.
 The project is Atari-first today, but its architecture is intended to support additional 6502-family platforms over time. Game code is written against portable engine subsystems while hardware details live behind a platform HAL and compile-time capability profiles.
@@ -50,7 +50,9 @@ Implemented today:
 - fixed-size slot and packed pools
 - fixed-point math and lookup helpers
 - Atari VBXE backend: 256-colour overlay, hardware 80-column text mode, blitter,
-  and a sprites-over-bitmap compositor
+  and a sprites-over-bitmap compositor. The overlay is a first-class
+  `engine::OverlayRegion` in a screen's `DisplayLayout`; a pure-overlay screen
+  turns ANTIC DMA off automatically
 
 Planned or intentionally deferred:
 

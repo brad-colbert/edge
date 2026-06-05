@@ -41,7 +41,7 @@ using VbxePlatform = M::Platform<
 // VBXE in 80-column text mode (exercises the overlay-text seam path).
 using VbxeTextPlatform = M::Platform<
     M::Machine::XL, M::RAM::U1MB,
-    M::gfx::VBXE<atari::vbxe::Config<atari::vbxe::Mode::Text_80>>,
+    M::gfx::VBXE<atari::vbxe::Config<atari::Mode::VBXE_T80>>,
     M::Sound::Mono, M::TV::NTSC>;
 
 // VBXE in sprites-over-bitmap mode (double-buffered, Background::Bitmap):
@@ -49,7 +49,7 @@ using VbxeTextPlatform = M::Platform<
 using VbxeBmpPlatform = M::Platform<
     M::Machine::XL, M::RAM::U1MB,
     M::gfx::VBXE<atari::vbxe::Config<
-        atari::vbxe::Mode::SR_320, atari::vbxe::Buffers::Double,
+        atari::Mode::VBXE_SR, atari::vbxe::Buffers::Double,
         atari::vbxe::RegBase::D640, atari::vbxe::MEMAC_A, 0x00000,
         atari::vbxe::Background::Bitmap>>,
     M::Sound::Mono, M::TV::NTSC>;

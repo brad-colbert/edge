@@ -64,20 +64,20 @@ inline constexpr u8 ATT_OV_PALETTE = 1;
 // (<= 22). `fb_addr` is the 19-bit VRAM framebuffer address; `fb_stride` the
 // per-line byte step (added after each scanline in pixel modes); `height` the
 // number of scanlines. Graphic modes use GMON (+ HR/LR per Config::overlay_mode);
-// Text_80 uses TMON + CHBASE (font page from the VRAM layout).
+// VBXE_T80 uses TMON + CHBASE (font page from the VRAM layout).
 template <typename Config>
 constexpr u8 build_fullscreen_xdl(u8* buf, u32 fb_addr, u16 fb_stride, u8 height) {
-    constexpr Mode mode = Config::overlay_mode;
-    constexpr bool is_text = (mode == Mode::Text_80);
+    constexpr atari::Mode mode = Config::overlay_mode;
+    constexpr bool is_text = (mode == atari::Mode::VBXE_T80);
 
     u16 ctrl = xdlc::RPTL | xdlc::OVADR | xdlc::ATT | xdlc::END;
     if constexpr (is_text) {
         ctrl |= xdlc::TMON | xdlc::CHBASE;
     } else {
         ctrl |= xdlc::GMON;
-        if constexpr (mode == Mode::HR_640) ctrl |= xdlc::HR;
-        else if constexpr (mode == Mode::LR_160) ctrl |= xdlc::LR;
-        // SR_320: neither HR nor LR.
+        if constexpr (mode == atari::Mode::VBXE_HR) ctrl |= xdlc::HR;
+        else if constexpr (mode == atari::Mode::VBXE_LR) ctrl |= xdlc::LR;
+        // VBXE_SR: neither HR nor LR.
     }
 
     u8 p = 0;

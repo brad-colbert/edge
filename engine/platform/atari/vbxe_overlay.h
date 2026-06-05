@@ -378,7 +378,7 @@ struct OverlayHal {
                          src + static_cast<u32>(r) * w, w);
     }
 
-    // ── Overlay text-mode seams (Mode::Text_80; FX Core manual pp.9,14,16) ──
+    // ── Overlay text-mode seams (Mode::VBXE_T80; FX Core manual pp.9,14,16) ──
     //
     // In text mode the "framebuffer" at OVADR is a character map of char+attribute
     // byte pairs (char first), one 8x8 glyph cell per pair; the row stride is

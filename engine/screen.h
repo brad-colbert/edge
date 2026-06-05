@@ -129,7 +129,12 @@ class ScreenManager {
 public:
     using screens = typename GameConfig::screens;
 
-    static constexpr u16 buffer_size = screens::max_screen_ram;
+    // Clamp to at least 1 byte: a pure-overlay-only ScreenSet contributes no
+    // screen RAM (overlay pixels live in VBXE VRAM, ram_bytes == 0), which would
+    // otherwise make screen_buffer_ a zero-length array (ill-formed). The 1-byte
+    // buffer is never read — set_base only computes buf + offset(0).
+    static constexpr u16 buffer_size =
+        screens::max_screen_ram > 0 ? screens::max_screen_ram : 1;
 
     // Switch to screen S: build its display program against the real buffer base
     // (the backend builder inserts any backend-specific reload instructions),
@@ -148,10 +153,20 @@ public:
         // Rebind this screen's region views to their buffer slices.
         views_.template for_screen<S>().set_base(screen_buffer_);
 
-        // Program the display: blank DMA, install the program, re-enable DMA.
+        // Program the display. Blank DMA and install the program in all cases.
         Platform::hal::display_dma_disable();
         Platform::hal::set_display_program(dl.bytes);
-        Platform::hal::display_dma_enable();
+        if constexpr (!S::display::is_pure_overlay) {
+            // ANTIC content present (ANTIC-only or mixed overlay+ANTIC):
+            // re-enable playfield DMA. Mixed layouts cost only the DL DMA that
+            // reads blank instructions (~1 cycle/line), not screen fetches.
+            Platform::hal::display_dma_enable();
+        }
+        // Pure overlay: ANTIC stays off. The VBXE overlay (brought up by
+        // Core::init through the graphics axis) drives the display via its XDL;
+        // the 3-byte JVB stub is only a safety pointer for DLISTL. Leaving ANTIC
+        // DMA off frees the VRAM bus for the blitter/MEMAC — the bus-contention
+        // fix (formerly a manual antic_playfield(false)), now automatic.
 
         active_dl_      = dl.bytes;
         active_dl_size_ = dl.size;
