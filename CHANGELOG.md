@@ -11,6 +11,8 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-05
+
 ### Added
 - P/M sprite multiplexer now runs on real hardware. New lean raw zone-boundary
   DLI `edge_multiplex_dli` (platform/atari/dli_dispatch.h): it copies a zone's
