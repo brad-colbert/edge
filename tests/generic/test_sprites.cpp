@@ -46,6 +46,9 @@ struct MockHal {
     }
     static u16 sprite_strip_size(u8 res) { return (res == 0) ? 256 : 128; }
 
+    // Single shared missile strip below the player strips (768 single-line).
+    static u16 missile_strip_offset(u8 res) { return (res == 0) ? 768 : 384; }
+
     // The raw multiplex DLI is hardware-only; build_raster_hooks just needs a
     // valid handler pointer for the slot (never entered under the simulator).
     static void mux_noop() {}
@@ -271,6 +274,37 @@ static void test_raster_hook_registration() {
     CHECK(im.slot(0).scanline == mgr.zone(1).boundary_scanline);
 }
 
+// ── Missiles: shared strip render, 2-bit field per missile, hide clears ────
+
+static void test_missile_render_and_hide() {
+    static SM mgr;
+    static u8 buf[2048] = {};
+    constexpr u16 mb = 768;                // single-line missile strip base
+
+    // Missile 1 at Y=40, height 4: sets bits 2..3 (0x0C) across [40,44).
+    mgr.missile(1, 100, 40, 4);
+    mgr.update_zones();
+    mgr.commit(buf);
+    for (u8 r = 0; r < 4; ++r) CHECK(buf[mb + 40 + r] == 0x0C);
+    CHECK(buf[mb + 39] == 0);              // just outside the range
+    CHECK(buf[mb + 44] == 0);
+    CHECK(MockHal::hposm[1] == 100);       // horizontal position reached the HAL
+
+    // Missile 2 shares scanline 41 (bits 4..5 = 0x30): both fields coexist in the
+    // same byte, neither stomps the other.
+    mgr.missile(2, 120, 41, 2);
+    mgr.commit(buf);
+    CHECK(buf[mb + 41] == (0x0C | 0x30));  // missile 1 + missile 2 in one byte
+    CHECK(buf[mb + 40] == 0x0C);           // missile 1 only
+
+    // Hide missile 1: its 2 bits clear everywhere, missile 2's remain.
+    mgr.missile_hide(1);
+    mgr.commit(buf);
+    for (u8 r = 0; r < 4; ++r) CHECK((buf[mb + 40 + r] & 0x0C) == 0);
+    CHECK(buf[mb + 41] == 0x30);           // missile 2 untouched
+    CHECK(buf[mb + 42] == 0x30);
+}
+
 int main() {
     test_five_sprites_two_zones();
     test_four_sprites_one_zone();
@@ -279,6 +313,7 @@ int main() {
     test_sprite_hide();
     test_sprite_color_follows_sprite();
     test_raster_hook_registration();
+    test_missile_render_and_hide();
 
     if (g_failures == 0) {
         printf("ALL TESTS PASSED\n");

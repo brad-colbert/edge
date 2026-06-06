@@ -75,6 +75,7 @@ struct MockHal {
         return static_cast<uint16_t>(sprite * 256);
     }
     static uint16_t sprite_strip_size(u8) { return 256; }
+    static uint16_t missile_strip_offset(u8) { return 768; }
 
     // Raster dispatcher addresses + delivery (prepare_chain drives these).
     static uint16_t raster_dispatch_addr() { return 0xD15A; }

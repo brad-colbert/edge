@@ -204,6 +204,7 @@ public:
     static void missile(u8 index, u8 x, u8 y, u8 height) {
         sprites.missile(index, x, y, height);
     }
+    static void missile_hide(u8 index) { sprites.missile_hide(index); }
     static void sprite_hide(u8 slot) { sprites.sprite_hide(slot); }
     static void sprite_hide_all()    { sprites.sprite_hide_all(); }
     static void sprite_color(u8 slot, u8 color) { sprites.sprite_color(slot, color); }

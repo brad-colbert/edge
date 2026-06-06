@@ -266,6 +266,15 @@ struct Hal {
         return atari::pm_strip_size(res == 0);
     }
 
+    // Byte offset of the single shared missile strip from the P/M base. Unlike
+    // players (one strip each), all four missiles live in one strip: each scanline
+    // byte packs the four missiles two bits apiece (missile m in bits 2m..2m+1).
+    // The commit phase adds the (resolution-scaled) scanline within the strip, then
+    // read-modify-writes that 2-bit field. `res` matches sprite_strip_offset.
+    static uint16_t missile_strip_offset(uint8_t res) {
+        return atari::pm_missile_base(res == 0);
+    }
+
     // ── POKEY sound ──
     //
     // POKEY voice registers interleave AUDFn/AUDCn from $D200 (AUDF1=$D200,

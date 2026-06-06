@@ -188,6 +188,10 @@ public:
         missile_height_[index] = height;
     }
 
+    // Hide a missile: clearing its height stops the commit from drawing it (and the
+    // tracked-range clear erases last frame's strip footprint next commit).
+    void missile_hide(u8 index) { missile_height_[index] = 0; }
+
     void sprite_hide(u8 slot) { sprites_[slot].flags = 0; }
     void sprite_hide_all() {
         for (u8 i = 0; i < MaxSprites; ++i) sprites_[i].flags = 0;
@@ -358,8 +362,32 @@ public:
                 Platform::hal::set_color_pm(p, zones_[0].color[p]);
             }
         }
-        // Missiles are direct, not multiplexed (ADR-025).
+        // Missiles are direct, not multiplexed (ADR-025). All four share ONE strip
+        // (missile_strip_offset): each scanline byte packs the four missiles two bits
+        // apiece (missile m in bits 2m..2m+1), so draws/clears are read-modify-writes
+        // of that 2-bit field — missiles sharing a scanline must not stomp each other.
+        const u16 mbase = Platform::hal::missile_strip_offset(res);
+        // 1. Erase each missile's exact footprint from last frame (its 2 bits only).
         for (u8 m = 0; m < kMissiles; ++m) {
+            const u8 mask = static_cast<u8>(0x03 << (m * 2));
+            const u16 off = static_cast<u16>(mbase + missile_prev_y_[m]);
+            for (u8 r = 0; r < missile_prev_height_[m]; ++r)
+                sprite_base[off + r] &= static_cast<u8>(~mask);
+            missile_prev_height_[m] = 0;
+        }
+        // 2. Draw each shown missile (height > 0) and record its footprint, then push
+        //    its horizontal position (no OS shadow for HPOSM).
+        for (u8 m = 0; m < kMissiles; ++m) {
+            const u8 h = missile_height_[m];
+            if (h > 0) {
+                const u8 mask = static_cast<u8>(0x03 << (m * 2));
+                const u8 yb = (res_ == SpriteVerticalResolution::SingleLine)
+                                  ? missile_y_[m] : static_cast<u8>(missile_y_[m] >> 1);
+                const u16 off = static_cast<u16>(mbase + yb);
+                for (u8 r = 0; r < h; ++r) sprite_base[off + r] |= mask;
+                missile_prev_y_[m]      = yb;
+                missile_prev_height_[m] = h;
+            }
             Platform::hal::set_projectile_x(m, missile_x_[m]);
         }
     }
@@ -475,6 +503,12 @@ private:
     u8 missile_x_[kMissiles]      = {};
     u8 missile_y_[kMissiles]      = {};
     u8 missile_height_[kMissiles] = {};
+
+    // Per-missile footprint from last commit, for the exact-extent 2-bit-field erase
+    // in the shared missile strip (mirrors prev_y_/prev_height_ for players).
+    // missile_prev_height_ inits to 0 so the first commit erases nothing.
+    u8 missile_prev_y_[kMissiles]      = {};
+    u8 missile_prev_height_[kMissiles] = {};
 
     // Sorted active-sprite indices, rebuilt each update_zones().
     u8 order_[MaxSprites] = {};
