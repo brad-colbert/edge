@@ -11,6 +11,42 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
 
 ## [Unreleased]
 
+### Added
+- P/M sprite multiplexer now runs on real hardware. New lean raw zone-boundary
+  DLI `edge_multiplex_dli` (platform/atari/dli_dispatch.h): it copies a zone's
+  eight pre-baked bytes (HPOSP0-3 + COLPM0-3) from a flat table to GTIA and shares
+  the C++ dispatcher's chain tail, staying under one mode line so closely-spaced
+  boundaries don't re-enter. Backed by `SpriteManager::arm_multiplex_dli()` and the
+  new HAL seam `hal::multiplex_dli()` / `hal::install_multiplex_dli()`.
+
+### Changed
+- **HAL contract (breaking for custom platforms):** the sprite commit now requires
+  `hal::set_color_pm()` (zone 0's colour moved from a direct COLPM write to the OS
+  PCOLR shadow), and a baseline HAL must now provide `hal::multiplex_dli()` and
+  `hal::install_multiplex_dli()`. No game-author-facing API changed.
+- P/M commit clears each sprite's **exact footprint** instead of a per-player
+  min/max range, which degenerated to the whole strip under multiplexing
+  (DECISIONS.md ADR-022 revision).
+- Zone-boundary raster hooks are registered RAW again (dynamic hooks route through
+  `edge_multiplex_dli`, not the C++ dispatcher).
+
+### Fixed
+- **Multiplexer crash on hardware (~15 s in, garbled screen + JAM):** the
+  un-guarded deferred VBI could overrun a frame; the next VBI NMI re-entered the
+  trampoline and corrupted the saved llvm-mos soft-stack pointer on unwind, drifting
+  it down into `.text` until stack writes overwrote code. Added an `edge_vbi_busy`
+  re-entry guard (DECISIONS.md ADR-028). The service also gates DLI NMIs off while
+  it rebuilds the raster chain.
+- **Top-zone sprites rendered black:** zone 0's colour was written straight to
+  COLPM during the VBI, then zeroed by the OS PCOLR→COLPM copy that runs after it.
+  Routed zone 0 through the PCOLR shadow; the boundary DLIs still write COLPM
+  directly (they run after the copy).
+- **VBI overrun / stutter with 9 sprites:** the wide per-player clear (above) was
+  the cause; the per-sprite exact-extent clear pulls the commit back under one frame.
+- **Ghost / split sprites at zone seams:** the boundary scanline is biased up by one
+  mode line (`kBoundaryBias`) so the player switch lands in the inter-zone gap,
+  since the DLI fires at the end of its mode line.
+
 ## [0.3.0] - 2026-06-04
 
 ### Added

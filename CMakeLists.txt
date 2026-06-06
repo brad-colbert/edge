@@ -117,6 +117,15 @@ if(EDGE_BUILD_DEMO)
     set_target_properties(atari_vbxe_sprites PROPERTIES OUTPUT_NAME "atari_vbxe_sprites.xex")
     target_link_options(atari_vbxe_sprites PRIVATE
         "LINKER:--Map=$<TARGET_FILE_DIR:atari_vbxe_sprites>/atari_vbxe_sprites.map")
+
+    # P/M multiplexer demo — independent .xex (no charset header; OS ROM font).
+    add_executable(multiplex_demo demo/multiplex_demo.cpp)
+    target_compile_options(multiplex_demo PRIVATE
+        -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra)
+    target_include_directories(multiplex_demo PRIVATE ${CMAKE_SOURCE_DIR})
+    set_target_properties(multiplex_demo PROPERTIES OUTPUT_NAME "multiplex_demo.xex")
+    target_link_options(multiplex_demo PRIVATE
+        "LINKER:--Map=$<TARGET_FILE_DIR:multiplex_demo>/multiplex_demo.map")
     return()
 endif()
 

@@ -41,6 +41,18 @@ namespace atari {
 //
 // Mirrors dli_dispatch.h: a naked routine whose JSR operand is self-modified by
 // install_vbi() to point at the service. Never executed under mos-sim (no NMI).
+//
+// RE-ENTRY GUARD (edge_vbi_busy): the deferred VBI is an NMI, and a heavy service
+// (e.g. the 9-sprite sprite multiplexer) can overrun a frame. The next frame's VBI
+// NMI would then re-enter this trampoline *while it is still running* — and the
+// inner save loop would overwrite edge_vbi_zp_save with the outer call's
+// already-allocated $80-$9F. On unwind the main thread's llvm-mos soft-stack
+// pointer (__rc0/__rc1 at $80/$81) comes back one service frame lower than it went
+// in; that drift accumulates every overrun until the pointer walks down into the
+// code and the next service's stack writes corrupt it → crash. The guard makes a
+// re-entrant VBI a no-op (straight to XITVBV): one frame's service is skipped (a
+// cosmetic hiccup) instead of corrupting the soft stack. A in-service flag, not a
+// disable of NMIs, because the VBI NMI itself must keep being delivered.
 extern "C" {
 [[gnu::naked]] void edge_vbi_trampoline();
 extern uint8_t edge_vbi_jsr;   // first byte of the JSR; operand begins at +1
@@ -50,6 +62,9 @@ asm(R"(
     .globl edge_vbi_trampoline
     .globl edge_vbi_jsr
 edge_vbi_trampoline:
+    lda edge_vbi_busy
+    bne .Ledge_vbi_skip        ; already mid-service → don't re-enter; just exit
+    inc edge_vbi_busy
     ldx #31
 .Ledge_vbi_save:
     lda $80,x
@@ -64,7 +79,11 @@ edge_vbi_jsr:
     sta $80,x
     dex
     bpl .Ledge_vbi_restore
+    dec edge_vbi_busy
+.Ledge_vbi_skip:
     jmp $e462                  ; XITVBV
+edge_vbi_busy:
+    .byte 0
 edge_vbi_zp_save:
     .fill 32
 )");
@@ -109,6 +128,14 @@ struct Hal {
                                      uint16_t handler_lo, uint16_t handler_hi,
                                      uint16_t next_lo, uint16_t next_hi) {
         install_dispatch(cur, handler_lo, handler_hi, next_lo, next_hi);
+    }
+
+    // The raw zone-boundary handler the sprite multiplexer registers as its
+    // dynamic raster hook (engine/sprites.h), and the patch step that binds it to
+    // the multiplexer's flat position/colour table. Defined in dli_dispatch.h.
+    static void (*multiplex_dli())() { return &edge_multiplex_dli; }
+    static void install_multiplex_dli(uint16_t table, uint16_t index) {
+        install_multiplex(table, index);
     }
 
     // ── Display list / ANTIC DMA ──

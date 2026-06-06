@@ -144,6 +144,11 @@ public:
     static constexpr u8 kPlayers  = 4;
     static constexpr u8 kMissiles = 4;
 
+    // Zone-boundary DLIs fire at the end of an 8-scanline mode line; bias the
+    // boundary up by ~one mode line so the player-position switch lands in the gap
+    // between zones (see update_zones). Layout-tunable; one MODE_2 line.
+    static constexpr u8 kBoundaryBias = 8;
+
     using caps = engine::caps_of_t<Platform>;
 
     // ── Logical sprite state (buffered; committed during the frame service) ──
@@ -247,15 +252,26 @@ public:
                     zi.color[p]             = 0;
                 }
             }
-            // Boundary: zone 0 from the top; later zones at the midpoint of the
-            // gap between adjacent groups.
+            // Boundary: zone 0 from the top; later zones in the gap between
+            // adjacent groups. boundary_scanline is consumed by the HAL as a
+            // display-list-relative scanline (program_raster_lines), while sprite
+            // Y is the P/M strip offset; on the standard layout the two track ~1:1.
+            // The DLI fires at the END of its 8-scanline mode line, i.e. a few
+            // lines BELOW the value here, so bias the switch up by kBoundaryBias so
+            // it lands in the inter-zone gap rather than partway through the lower
+            // zone's first sprite (which reads as a split "ghost" sprite). Never
+            // raise it above the previous zone's last sprite. Tune kBoundaryBias on
+            // hardware if the seams sit visibly off the sprites.
             if (z == 0) {
                 zi.boundary_scanline = 0;
             } else {
                 const u8 prev_last  = sprites_[order_[first - 1]].y;
                 const u8 this_first = sprites_[order_[first]].y;
-                zi.boundary_scanline =
-                    static_cast<u8>((prev_last + this_first) / 2);
+                const u8 mid = static_cast<u8>((prev_last + this_first) / 2);
+                u8 b = (mid > kBoundaryBias) ? static_cast<u8>(mid - kBoundaryBias)
+                                             : static_cast<u8>(0);
+                if (b < prev_last) b = prev_last;
+                zi.boundary_scanline = b;
             }
         }
     }
@@ -292,22 +308,25 @@ public:
     void commit_pm(u8* sprite_base) {
         const u8 res = static_cast<u8>(res_);
 
-        // 1. Clear last frame's dirty range for each player.
-        for (u8 p = 0; p < kPlayers; ++p) {
-            if (dirty_min_y_[p] <= dirty_max_y_[p]) {
-                const u16 base = Platform::hal::sprite_strip_offset(res, p);
-                for (u16 y = dirty_min_y_[p]; y <= dirty_max_y_[p]; ++y) {
-                    sprite_base[base + y] = 0;
-                }
-            }
+        // 1. Erase each sprite's exact strip footprint from last frame — only the
+        //    bytes it actually wrote, not the whole inter-sprite span. A player
+        //    multiplexes several sprites at different Y, so the old per-player
+        //    [min,max] clear zeroed the (mostly empty) gaps between them too; with
+        //    9 sprites spread down the screen that pushed the commit past one frame.
+        //    Clearing exact extents (≤ MaxSprites × height bytes) keeps it inside
+        //    the VBI. prev_player_ == kNotDrawn means the sprite wasn't drawn (and
+        //    prev_height_ is 0 on the very first commit, so nothing is cleared).
+        for (u8 i = 0; i < MaxSprites; ++i) {
+            if (prev_player_[i] == kNotDrawn) continue;
+            const u16 off = static_cast<u16>(
+                Platform::hal::sprite_strip_offset(res, prev_player_[i]) +
+                prev_y_[i]);
+            for (u8 r = 0; r < prev_height_[i]; ++r) sprite_base[off + r] = 0;
+            prev_player_[i] = kNotDrawn;
         }
 
-        // 2. Reset working dirty range.
-        u8 new_min[kPlayers];
-        u8 new_max[kPlayers];
-        for (u8 p = 0; p < kPlayers; ++p) { new_min[p] = 0xFF; new_max[p] = 0; }
-
-        // 3. Copy each active sprite's shape into its assigned player's strip.
+        // 2. Copy each active sprite's shape into its assigned player's strip and
+        //    record the exact footprint for next frame's erase.
         for (u8 z = 0; z < zone_count_; ++z) {
             const ZoneInfo& zi = zones_[z];
             for (u8 p = 0; p < kPlayers; ++p) {
@@ -317,63 +336,75 @@ public:
                 const u16 base = Platform::hal::sprite_strip_offset(res, p);
                 const u8 yb = (res_ == SpriteVerticalResolution::SingleLine)
                                   ? s.y : static_cast<u8>(s.y >> 1);
-                for (u8 r = 0; r < s.height; ++r) {
-                    sprite_base[base + yb + r] = s.shape[r];
-                }
-                const u8 lo_y = yb;
-                const u8 hi_y = static_cast<u8>(yb + s.height - 1);
-                if (lo_y < new_min[p]) new_min[p] = lo_y;
-                if (hi_y > new_max[p]) new_max[p] = hi_y;
+                const u16 off = static_cast<u16>(base + yb);
+                for (u8 r = 0; r < s.height; ++r) sprite_base[off + r] = s.shape[r];
+                prev_player_[li] = p;
+                prev_y_[li]      = yb;
+                prev_height_[li] = s.height;
             }
         }
 
-        // 4. Write zone-0 sprite positions + colours (the frame service sets the first
-        //    zone; later zones are armed by the boundary raster hooks). The colour register is the
-        //    hardware register, written after the OS shadow→hardware copy so it
-        //    holds for the frame and gives this zone's sprites their colours.
+        // 3. Write zone-0 sprite positions + colours (the frame service sets the
+        //    first zone from the top; later zones are armed by the boundary raster
+        //    hooks). Position goes straight to HPOSP (no OS shadow exists for it),
+        //    but the COLOUR must go through the OS PCOLR shadow: this runs in the
+        //    VBI, *before* the OS copies PCOLR→COLPM, so a direct COLPM write here
+        //    would be overwritten (zeroed) by that copy and zone 0 would show black.
+        //    The boundary DLIs, by contrast, run during the visible frame *after*
+        //    the copy, so they write COLPM directly (set_sprite_color).
         if (zone_count_ > 0) {
             for (u8 p = 0; p < kPlayers; ++p) {
                 Platform::hal::set_sprite_x(p, zones_[0].hpos[p]);
-                Platform::hal::set_sprite_color(p, zones_[0].color[p]);
+                Platform::hal::set_color_pm(p, zones_[0].color[p]);
             }
         }
         // Missiles are direct, not multiplexed (ADR-025).
         for (u8 m = 0; m < kMissiles; ++m) {
             Platform::hal::set_projectile_x(m, missile_x_[m]);
         }
-
-        // 5. Record this frame's dirty ranges for next frame's clear.
-        for (u8 p = 0; p < kPlayers; ++p) {
-            dirty_min_y_[p] = new_min[p];
-            dirty_max_y_[p] = new_max[p];
-        }
     }
 
     // ── Raster-hook construction ──
     //
-    // Register a raw boundary raster hook for each zone after the first (zone 0's
-    // positions are set by the frame-service commit). The handler walks per-frame static
-    // state: s_hook_zone_ is reset here and advanced by each hook, which writes
-    // the corresponding zone's sprite positions through the HAL.
+    // Register a boundary raster hook for each zone after the first (zone 0's
+    // positions are set by the frame-service commit), and pre-bake that zone's four
+    // HPOSP + four COLPM bytes into mux_table_ in fire order. The raw DLI
+    // (Platform::hal::multiplex_dli, edge_multiplex_dli on Atari) reads row
+    // mux_index_, copies the eight bytes straight to the GTIA registers, and bumps
+    // the index — no per-DLI work, so it stays well under a scanline (see the
+    // re-entrancy note in interrupt.h::add_dynamic_raster_hook). mux_index_ is reset
+    // here, in the VBI, before the frame's first boundary DLI fires.
     //
-    // This implements the position-write logic and the per-frame registration. The
-    // production raw handler also needs the backend prologue/epilogue (chain the
-    // next raster vector via InterruptManager::next_raster_addr()); that platform
-    // glue is added with the live hardware path — it is never executed under the
-    // simulator (no hardware raster), consistent with the backend dispatcher.
+    // Under the simulator there is no hardware raster, so the hook is registered
+    // (and the table built) but never entered.
     template <typename IM>
     void build_raster_hooks(IM& im) {
+        im.begin_dynamic();
         // A blitter backend has no hardware players to reposition mid-frame, so no
         // zone-boundary DLIs are needed — just clear any stale dynamic hooks.
-        if constexpr (caps::has_blitter) {
-            im.begin_dynamic();
-            return;
-        }
-        s_active_   = this;
-        s_hook_zone_ = 0;
-        im.begin_dynamic();
+        if constexpr (caps::has_blitter) return;
+
+        mux_index_ = 0;
+        void (*const h)() = Platform::hal::multiplex_dli();
         for (u8 z = 1; z < zone_count_; ++z) {
-            im.add_dynamic_raster_hook(zones_[z].boundary_scanline, &zone_boundary_hook);
+            const ZoneInfo& zi = zones_[z];
+            u8* row = &mux_table_[static_cast<u8>((z - 1) * kMuxRow)];
+            for (u8 p = 0; p < kPlayers; ++p) {
+                row[p]            = zi.hpos[p];
+                row[p + kPlayers] = zi.color[p];
+            }
+            im.add_dynamic_raster_hook(zi.boundary_scanline, h);
+        }
+    }
+
+    // One-time setup: bind the raw multiplex DLI to this manager's flat table and
+    // fire index (the single instance never moves). engine::Core::init calls this on
+    // baseline backends; discarded on blitter backends, which have no boundary DLIs.
+    void arm_multiplex_dli() {
+        if constexpr (!caps::has_blitter) {
+            Platform::hal::install_multiplex_dli(
+                static_cast<u16>(reinterpret_cast<uintptr_t>(mux_table_)),
+                static_cast<u16>(reinterpret_cast<uintptr_t>(&mux_index_)));
         }
     }
 
@@ -426,27 +457,19 @@ private:
                (LogicalSprite::FLAG_ACTIVE | LogicalSprite::FLAG_VISIBLE);
     }
 
-    // Raw boundary raster hook: advance to the next zone and write its sprite positions
-    // and colours (so each zone's sprites show their own colour, not the slot's).
-    static void zone_boundary_hook() {
-        SpriteManager* m = s_active_;
-        const u8 z = static_cast<u8>(++s_hook_zone_);
-        const ZoneInfo& zi = m->zones_[z];
-        for (u8 p = 0; p < kPlayers; ++p) {
-            Platform::hal::set_sprite_x(p, zi.hpos[p]);
-            Platform::hal::set_sprite_color(p, zi.color[p]);
-        }
-    }
-
     LogicalSprite sprites_[MaxSprites] = {};
     ZoneInfo      zones_[MaxZones]     = {};
     u8            zone_count_          = 0;
     u8            active_count_        = 0;
 
-    // Tracked dirty Y range per player (ADR-022). Init empty (min>max) so the
-    // first commit clears nothing.
-    u8 dirty_min_y_[kPlayers] = {0xFF, 0xFF, 0xFF, 0xFF};
-    u8 dirty_max_y_[kPlayers] = {0, 0, 0, 0};
+    // Per-sprite footprint from last commit, for the exact-extent erase (ADR-022).
+    // prev_player_[i] is the hardware player logical sprite i was drawn on, or
+    // kNotDrawn if it wasn't; prev_y_/prev_height_ are its strip offset and height.
+    // prev_height_ inits to 0 so the very first commit erases nothing.
+    static constexpr u8 kNotDrawn = 0xFF;
+    u8 prev_player_[MaxSprites] = {};
+    u8 prev_y_[MaxSprites]      = {};
+    u8 prev_height_[MaxSprites] = {};
 
     // Buffered missile positions (no multiplexing, ADR-025).
     u8 missile_x_[kMissiles]      = {};
@@ -458,17 +481,15 @@ private:
 
     SpriteVerticalResolution res_ = SpriteVerticalResolution::SingleLine;
 
-    // Per-frame raster-hook walker state (one set per template instantiation).
-    static SpriteManager* s_active_;
-    static u8             s_hook_zone_;
+    // Flat per-boundary register table the raw multiplex DLI walks: one kMuxRow-byte
+    // row per zone after the first, [HPOSP0..3, COLPM0..3], in fire (scanline)
+    // order. mux_index_ is the row the next boundary DLI will consume; reset to 0
+    // each frame by build_raster_hooks and bumped by the DLI (engine HAL +
+    // platform/atari/dli_dispatch.h own the hardware side).
+    static constexpr u8 kMuxRow = kPlayers * 2;   // 4 HPOSP + 4 COLPM
+    u8 mux_table_[MaxZones * kMuxRow] = {};
+    u8 mux_index_ = 0;
 };
-
-template <typename Platform, u8 MaxSprites, u8 MaxZones>
-SpriteManager<Platform, MaxSprites, MaxZones>*
-    SpriteManager<Platform, MaxSprites, MaxZones>::s_active_ = nullptr;
-
-template <typename Platform, u8 MaxSprites, u8 MaxZones>
-u8 SpriteManager<Platform, MaxSprites, MaxZones>::s_hook_zone_ = 0;
 
 } // namespace engine
 
