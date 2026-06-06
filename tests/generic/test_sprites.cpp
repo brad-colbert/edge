@@ -33,6 +33,10 @@ struct MockHal {
     static void set_sprite_x(u8 player,  u8 x) { hposp[player]  = x; }
     static void set_projectile_x(u8 missile, u8 x) { hposm[missile] = x; }
     static void set_sprite_color(u8 player,  u8 c) { colpm[player]  = c; }
+    // Zone-0 colour now goes through the PCOLR shadow; the mock treats it as the
+    // player's effective colour (no OS copy to model), so the color-follows test
+    // keeps checking colpm[].
+    static void set_color_pm(u8 player, u8 c) { colpm[player] = c; }
 
     static u16 sprite_strip_offset(u8 res, u8 player) {
         const bool single = (res == 0);
@@ -41,6 +45,11 @@ struct MockHal {
         return static_cast<u16>(base + player * stride);
     }
     static u16 sprite_strip_size(u8 res) { return (res == 0) ? 256 : 128; }
+
+    // The raw multiplex DLI is hardware-only; build_raster_hooks just needs a
+    // valid handler pointer for the slot (never entered under the simulator).
+    static void mux_noop() {}
+    static void (*multiplex_dli())() { return &mux_noop; }
 };
 u8 MockHal::hposp[4] = {};
 u8 MockHal::hposm[4] = {};
@@ -99,9 +108,11 @@ static void test_five_sprites_two_zones() {
     CHECK(mgr.logical(z1.player_assignment[0]).y == 90);
     CHECK(z1.player_assignment[1] == ZoneInfo::UNUSED);
 
-    // The boundary falls between zone 0's last sprite (70) and zone 1's (90).
-    CHECK(z1.boundary_scanline > 70 && z1.boundary_scanline < 90);
-    CHECK(z1.boundary_scanline == 80);     // midpoint
+    // The boundary falls between zone 0's last sprite (70) and zone 1's (90),
+    // biased up by one mode line (kBoundaryBias = 8) so the DLI — which fires at
+    // the end of its mode line — switches players in the gap, not mid-sprite.
+    CHECK(z1.boundary_scanline >= 70 && z1.boundary_scanline < 90);
+    CHECK(z1.boundary_scanline == 72);     // midpoint 80 - kBoundaryBias 8
     CHECK(z0.boundary_scanline == 0);      // zone 0 is active from the top
 }
 

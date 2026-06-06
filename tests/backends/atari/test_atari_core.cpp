@@ -64,6 +64,7 @@ struct MockHal {
     static void set_sprite_x(u8, u8) {}
     static void set_projectile_x(u8, u8) {}
     static void set_sprite_color(u8, u8) {}
+    static void set_color_pm(u8, u8) {}
     static uint16_t sprite_strip_offset(u8, u8 s) { return static_cast<uint16_t>(s * 256); }
     static uint16_t sprite_strip_size(u8) { return 256; }
     static uint16_t raster_dispatch_addr() { return 0xD15A; }
@@ -73,6 +74,9 @@ struct MockHal {
     static void enable_raster()  {}
     static void disable_raster() {}
     static void install_raster_dispatch(u16, u16, u16, u16, u16) {}
+    static void mux_noop() {}
+    static void (*multiplex_dli())() { return &mux_noop; }
+    static void install_multiplex_dli(u16, u16) {}
     static u8   read_joystick(u8) { return 0; }
     static u8   read_keyboard()   { return 0; }
     static u8   coll_player_playfield(u8) { return 0; }

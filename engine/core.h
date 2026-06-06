@@ -178,6 +178,7 @@ public:
             tiles.bind_charset_page(page_of(charset_buffer_));
         }
         interrupts.arm_dispatch();
+        sprites.arm_multiplex_dli();   // bind the raw zone-boundary DLI (baseline)
         Platform::hal::install_frame_isr(&frame_service);
     }
     static void init() {
@@ -191,6 +192,7 @@ public:
         }
         set_screen<InitialScreen>([] {});
         interrupts.arm_dispatch();
+        sprites.arm_multiplex_dli();   // bind the raw zone-boundary DLI (baseline)
         Platform::hal::install_frame_isr(&frame_service);
     }
 
@@ -366,6 +368,19 @@ public:
         // 0. Suppress idle-dim (the backend would otherwise dim/cycle colours
         //    after a few minutes of no console/keyboard input).
         Platform::hal::suppress_idle_dim();
+
+        // 0a. Gate raster (DLI) NMIs off for the duration of this service. The
+        //     deferred VBI rewrites the raster-hook chain state below
+        //     (VDSLST/current_ and the multiplexer's mux_index_/mux_table_), and
+        //     a heavy service (e.g. the 9-sprite multiplexer) can still be running
+        //     when it overruns vertical blank into the visible region — where a
+        //     zone-boundary DLI would otherwise fire mid-rewrite and corrupt the
+        //     chain (raw DLIs are not re-entrant against the builder). prepare_chain
+        //     re-arms NMIEN at the end once the chain is consistent, so any boundary
+        //     line the beam has not yet reached still fires this frame; one the
+        //     overrun already passed is simply skipped for the frame (a cosmetic
+        //     seam, not a crash). Backends with no raster hooks just stay disabled.
+        Platform::hal::disable_raster();
 
         // 1. Input capture.
         u8 joy[kPorts];
