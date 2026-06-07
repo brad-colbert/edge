@@ -408,6 +408,11 @@ struct Hal {
     }
 };
 
+// Enable or disable playfield DMA. Call this on an opaque overlay screen to
+// prevent ANTIC bus contention with the blitter. Any set_screen() on a
+// non-pure-overlay layout re-enables it automatically.
+inline void set_playfield_dma(bool enable) { Hal::set_antic_playfield_dma(enable); }
+
 } // namespace atari
 
 #endif // ENGINE_PLATFORM_ATARI_HAL_H

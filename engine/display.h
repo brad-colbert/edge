@@ -320,10 +320,6 @@ struct DisplayLayout {
     // >= 1 is asserted, so a layout with no overlay regions is correctly false.)
     static constexpr bool is_pure_overlay = (Regions::is_overlay && ... && true);
 
-    // Count of non-overlay (playfield) regions.
-    static constexpr u8 antic_region_count =
-        static_cast<u8>(((!Regions::is_overlay ? 1 : 0) + ... + 0));
-
     // Index of the first scrolling region, or region_count if none.
     static constexpr u8 scroll_region_index() {
         for (u8 i = 0; i < region_count; ++i)

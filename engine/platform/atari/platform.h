@@ -148,6 +148,7 @@ struct AtariCaps : engine::Capabilities {
     static constexpr u32  extended_ram_bytes = detail::ext_ram_bytes(R);
     static constexpr u16  extended_bank_size = (R == RAM::Baseline) ? 0u : 16384u;
     static constexpr u8   zp_available       = 128;              // after OS
+    static constexpr u16  screen_buffer_alignment = 4096;
 
     // ── Input ──
     // XL/XE expose 2 joystick ports; 400/800 expose 4.

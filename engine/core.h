@@ -164,7 +164,7 @@ public:
         if constexpr (caps::has_blitter) {
             // Overlay bring-up (HAL sets up its memory window, display list, and
             // enable). A pure-overlay InitialScreen no longer needs a manual
-            // antic_playfield(false): set_screen keeps playfield DMA off for it, so
+            // playfield-DMA disable: set_screen keeps playfield DMA off for it, so
             // the playfield never contends the VRAM bus (see screen.h).
             Platform::hal::overlay_init();
         }
@@ -190,7 +190,7 @@ public:
     static void init() {
         using caps = engine::caps_of_t<Platform>;
         if constexpr (caps::has_blitter) {
-            // Pure-overlay layouts no longer need a manual antic_playfield(false):
+            // Pure-overlay layouts no longer need a manual playfield-DMA disable:
             // set_screen keeps playfield DMA off for them (see screen.h).
             Platform::hal::overlay_init();
         }
@@ -239,25 +239,6 @@ public:
     // master each frame. No-op on platforms without an overlay or in Flat mode.
     static void overlay_publish_background() {
         Platform::hal::overlay_publish_background();
-    }
-
-    // Enable/disable the playfield (character/bitmap) DMA. The common opaque
-    // overlay-only case is now automatic: a pure-overlay screen (is_pure_overlay)
-    // keeps playfield DMA off through set_screen, so no manual call is needed. This
-    // remains as an escape hatch for the cases the engine can't infer: a transparent
-    // overlay that shows the playfield through (leave it enabled), or a mixed
-    // overlay+playfield layout where you want the playfield fetch off to free the
-    // VRAM bus even though playfield regions are present. When an opaque overlay
-    // covers the screen the playfield is invisible, but its per-scanline VRAM-bus
-    // DMA starves the blitter's restore copies and collapses the overlay
-    // compositor's per-frame budget. Re-enabled by any set_screen on a
-    // non-pure-overlay layout. Backends without a separate playfield layer treat
-    // this as a no-op (see API_REFERENCE.md).
-    // FIXME[HAL]: the public name antic_playfield() and the seam
-    // set_antic_playfield_dma() embed the ANTIC chip name; rename to a neutral
-    // playfield-DMA seam (e.g. set_playfield_dma) once the HAL is generalized.
-    static void antic_playfield(bool enable) {
-        Platform::hal::set_antic_playfield_dma(enable);
     }
 
     // ── Overlay text mode (80-column overlay text; no-op on platforms without it) ──
