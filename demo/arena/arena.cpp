@@ -76,7 +76,8 @@ struct GameConfig {
     static constexpr u8 sound_channels   = 2;
     // Static + dynamic raster hooks share this one budget (interrupt.h). At 4 sprites
     // the multiplexer is a single zone -> zero boundary DLIs, so the play screen needs
-    // only its 1 static colour-split hook; 2 leaves a slot of headroom.
+    // only its 1 static colour-split hook; 2 leaves a slot of headroom. (The title
+    // animates via the COLPF0 shadow, not a DLI, so it needs no hooks.)
     static constexpr u8 max_raster_hooks = 2;
 };
 
@@ -223,10 +224,16 @@ static void set_hud_palette() {
     Platform::hal::set_color_pf(3, 0x34);   // COLPF3 : red
 }
 
+// Play-area background colour, driven into COLBK by the play-area DLI every frame.
+// Normally black; the death-flash (play_step) raises it to kFlashColor for a few frames.
+// A one-shot register write wouldn't survive — this DLI overwrites COLBK each frame — so
+// the flash flows through the same rendering path as the rest of the play palette.
+static u8 g_play_bg = 0x00;
+
 // Play-area palette, applied mid-frame by the raster hook below.
 static void play_palette_split() {
     engine::RasterContext<Platform> ctx{};
-    ctx.set_background_color(0x00);     // COLBK  : black
+    ctx.set_background_color(g_play_bg); // COLBK  : black (flashes white on a hit)
     ctx.set_playfield_color<0>(0x96);   // COLPF0 : medium blue
     ctx.set_playfield_color<1>(0x2A);   // COLPF1 : orange
     ctx.set_playfield_color<2>(0x24);   // COLPF2 : brown
@@ -515,7 +522,24 @@ static constexpr u8 kExplosionTile   = 0x04;
 
 // Round state, visible to the game-over screen.
 static u16  g_score     = 0;
-static bool g_game_over = false;
+
+// ── Polish state (Prompt 5): high score, level, pacing pauses ──
+static u16  g_high_score = 0;     // best score so far; persists across rounds
+static bool g_new_high   = false; // this round beat the high score (game-over banner)
+static u8   g_level      = 1;     // wave / difficulty indicator shown in the HUD
+static u8   g_kills      = 0;     // kills this round; drives g_level
+static u8   g_get_ready  = 0;     // "GET READY" countdown at play start (0 = playing)
+static u8   g_death_timer= 0;     // freeze frames before the game-over screen (0 = alive)
+
+static constexpr u8  kGetReadyFrames  = 90;    // ~1.5 s orientation pause at play start
+static constexpr u8  kDeathPause      = 60;    // ~1 s frozen-room beat before game-over
+static constexpr u8  kKillsPerLevel   = 8;     // kills between level (difficulty) ticks
+static constexpr u8  kFlashColor      = 0x0E;  // white play-area flash on player damage
+// "GET READY" is 9 chars (the charset has no '!' glyph — '!' maps to the wall tile),
+// centred at col 15 (cols 15..23), on row 9 so it clears the player at centre row 11.
+static constexpr u8  kGetReadyRow     = 9;
+static constexpr u8  kGetReadyCol     = 15;    // centre(9)
+static constexpr u16 kGetReadyClearEnd= kGetReadyCol + 9; // 24 (one past the last glyph)
 
 // ── Sound effects (constexpr ROM tables, engine/sound.h) ──
 // AUDF is inverse pitch: a low value is a high note. Shoot is a short bright tone
@@ -548,6 +572,12 @@ static void hud_draw_lives() {
     for (u8 c = 36; c <= 38; ++c) hud.put_char(c, 0, 0x00);
     for (u8 i = 0; i < player.lives; ++i)
         hud.put_char(static_cast<u8>(36 + i), 0, 0x05);
+}
+// Level/wave readout in the HUD gap between SCORE (cols 0..11) and the hearts
+// (cols 36..38). Event-driven like the score — redrawn only when the level ticks.
+static constexpr u8 kHudLevelCol = 18;   // "LV:" label; digits start at +3
+static void hud_draw_level() {
+    Game::region<PlayScreen, 0>().print_num(kHudLevelCol + 3, 0, g_level, 2);
 }
 
 // Stamp a text-mode explosion at the play-area cell under a sprite coordinate.
@@ -590,10 +620,38 @@ static bool fire_edge(const engine::Input& in) {
     return edge;
 }
 
+// ── Title screen colour (Prompt 5) ─────────────────────────────────────────
+//
+// Every printed glyph is a Mode-4 value-1 pixel → COLPF0, so ONE register drives ALL
+// title text. Animate it by rotating COLPF0 itself each frame — written to the OS colour
+// shadow (set_color_pf), which the VBI copies to the hardware register every frame, the
+// same path set_hud_palette() uses. The whole title cycles together (no per-row colours:
+// that needs a mid-screen DLI, and a multi-hook C++ DLI chain didn't deliver on the title
+// screen — out of scope to fix in engine code here). PRESS FIRE still blinks independently
+// (print/erase). COLPF0 is restored to white on exit (main) so the HUD/game-over text,
+// which share the register, stay readable.
+static constexpr u8 kTitleRowEdge  = 10;   // EDGE ARENA
+static constexpr u8 kTitleRowPress = 14;   // PRESS FIRE (blinks)
+static constexpr u8 kTitleRowInstr = 16;   // instruction line
+static constexpr u8 kTitleRowBest  = 18;   // BEST: nnnnn
+static constexpr u8 kTitleTextColor = 0x0E; // white — title default and HUD/game-over text
+
+// Bright hues against the dark-blue (0x92) title background: white, cyan, green,
+// yellow, orange, red. Advanced every kTitleColorPeriod frames by title_step.
+static constexpr u8 kTitleHues[]      = {0x0E, 0x9A, 0xCA, 0x1A, 0x2A, 0x4A};
+static constexpr u8 kTitleHueCount    = sizeof(kTitleHues);
+static constexpr u8 kTitleColorPeriod = 8;   // frames between hue steps (slow cycle)
+
 static void title_enter() {
     auto& v = Game::region<TitleScreen, 0>();
     fill_region(v, 0x00);
-    v.print(centre(10), 10, "EDGE ARENA");
+    v.print(centre(10), kTitleRowEdge, "EDGE ARENA");
+    v.print(centre(31), kTitleRowInstr, "JOYSTICK TO MOVE  FIRE TO SHOOT");
+    // Show the best score below it once one exists (skip on first boot).
+    if (g_high_score > 0) {
+        v.print(centre(11), kTitleRowBest, "BEST: 00000");
+        v.print_num(static_cast<u8>(centre(11) + 6), kTitleRowBest, g_high_score, 5);
+    }
     g_title_frames = 0;
     arm_fire();
 }
@@ -602,8 +660,11 @@ static bool title_step(const engine::Input& in) {
     auto& v = Game::region<TitleScreen, 0>();
     // Blink "PRESS FIRE" on row 14 every 30 frames.
     const bool show = ((g_title_frames / 30) & 1) == 0;
-    if (show) v.print(centre(10), 14, "PRESS FIRE");
-    else      v.print(centre(10), 14, "          ");
+    if (show) v.print(centre(10), kTitleRowPress, "PRESS FIRE");
+    else      v.print(centre(10), kTitleRowPress, "          ");
+    // Animate the whole title: rotate COLPF0 through the hue table every period. The VBI
+    // copies this shadow to the hardware register, so all title text changes colour.
+    Platform::hal::set_color_pf(0, kTitleHues[(g_title_frames / kTitleColorPeriod) % kTitleHueCount]);
     ++g_title_frames;
     return fire_edge(in);
 }
@@ -619,16 +680,22 @@ static void play_enter() {
         for (u8 x = 0; x < 40; ++x)
             play.put_char(x, y, kRoom.t[y][x]);
 
-    // HUD: score label + three life hearts (raw tile index 0x05).
+    // HUD: score label, level readout, and three life hearts (raw tile index 0x05).
     hud.print(0, 0, "SCORE: 00000");
+    hud.print(kHudLevelCol, 0, "LV:01");
     hud.put_char(36, 0, 0x05);
     hud.put_char(37, 0, 0x05);
     hud.put_char(38, 0, 0x05);
 
-    // Colour split for the play area (removed again when we leave the screen).
+    // Colour split for the play area (removed again when we leave the screen). g_play_bg
+    // is black now; the death-flash raises it briefly mid-round.
+    g_play_bg = 0x00;
     Game::interrupts.add_raster_hook(kSplitScanline, &play_palette_split);
 
     player_init();
+    // Draw the player up front so it's visible during the GET READY pause (player_update
+    // is what normally renders it, and that's blocked while the countdown runs).
+    Game::sprite(0, player_shape, player.x, player.y);
 
     // Enemies: empty the pool, colour slots 1..8, arm the spawn clock, and reset the
     // difficulty ramp so each round starts slow again.
@@ -637,17 +704,47 @@ static void play_enter() {
     spawn_timer    = kSpawnInterval;
     g_spawn_level  = 0;
 
-    // Combat: fresh bullets/explosions, zeroed score, clear game-over.
+    // Combat: fresh bullets/explosions, zeroed score, cleared timers.
     bullets.clear();
     explosions.clear();
-    g_score     = 0;
-    g_game_over = false;
+    g_score      = 0;
+    g_level      = 1;
+    g_kills      = 0;
+    g_death_timer= 0;
+    g_new_high   = false;
+
+    // GET READY orientation pause: hold the room/player a beat before action starts.
+    play.print(kGetReadyCol, kGetReadyRow, "GET READY");
+    g_get_ready = kGetReadyFrames;
 
     arm_fire();
 }
 
 static bool play_step(const engine::Input& in) {
+    auto& play = Game::region<PlayScreen, 1>();
+
+    // Death pause: lives just hit 0. Freeze every entity (skip all updates so sprites
+    // hold their last-committed positions) while the room stays on screen, then signal
+    // game-over when the beat expires. Checked first so we can't re-enter GET READY.
+    if (g_death_timer > 0) {
+        g_play_bg = 0x00;                  // clear any lingering damage flash
+        return (--g_death_timer == 0);     // transition only when the freeze ends
+    }
+
+    // GET READY countdown: hold before action starts. Blocks spawns/movement/fire; on
+    // the final frame, erase "GET READY" back to the baked room tiles (cols 15..23).
+    if (g_get_ready > 0) {
+        if (--g_get_ready == 0)
+            for (u16 c = kGetReadyCol; c < kGetReadyClearEnd; ++c)
+                play.put_char(static_cast<u8>(c), kGetReadyRow, kRoom.t[kGetReadyRow][c]);
+        return false;
+    }
+
     player_update(in);
+
+    // Damage flash: white play-area background for the first 4 frames of invincibility.
+    // The play DLI reads g_play_bg every frame, so the flash needs no extra timer.
+    g_play_bg = (player.iframe >= kIFrames - 4) ? kFlashColor : 0x00;
 
     // Fire: launch a bullet in the last-moved direction (missile index == pool slot).
     if (fire_edge(in) && !bullets.full()) {
@@ -709,7 +806,6 @@ static bool play_step(const engine::Input& in) {
 
     // Explosions: tick timers, restore the baked room tile when each expires.
     // release() swaps the last element into i, so don't advance on a release.
-    auto& play = Game::region<PlayScreen, 1>();
     for (u8 i = 0; i < explosions.count();) {
         Explosion& ex = explosions[i];
         if (--ex.timer == 0) {
@@ -744,6 +840,10 @@ static bool play_step(const engine::Input& in) {
                 bullets.release(idx);
                 g_score = static_cast<u16>(g_score + kScorePerKill);
                 hud_draw_score();
+                // Level ticks every kKillsPerLevel kills — a visible difficulty cue.
+                ++g_kills;
+                const u8 lv = static_cast<u8>(1 + g_kills / kKillsPerLevel);
+                if (lv != g_level) { g_level = lv; hud_draw_level(); }
                 Game::sound.play(kExplosionSfx, 1);
                 break;   // bullet consumed
             }
@@ -763,21 +863,34 @@ static bool play_step(const engine::Input& in) {
             player.iframe = kIFrames;
             hud_draw_lives();
             Game::sound.play(kDamageSfx, 0);
-            if (player.lives == 0) g_game_over = true;
+            if (player.lives == 0) {
+                // Record the high score now, then start the frozen-room death beat.
+                // The next play_step takes the death-pause branch and signals game-over
+                // only when the beat expires.
+                g_new_high = (g_score > g_high_score);
+                if (g_new_high) g_high_score = g_score;
+                g_death_timer = kDeathPause;
+            }
         }
     }
 
-    return g_game_over;
+    return false;
 }
 
 static void gameover_enter() {
     auto& v = Game::region<GameOverScreen, 0>();
     fill_region(v, 0x00);
-    v.print(centre(9), 10, "GAME OVER");
+    v.print(centre(9), 8, "GAME OVER");
+    // Prominent banner when this round set a new record (positioned, not recoloured —
+    // all text shares COLPF0; no '!' — the charset has no glyph for it).
+    if (g_new_high) v.print(centre(14), 10, "NEW HIGH SCORE");
+    // Final score and best, on their own rows. Labels "SCORE: " / "BEST:  " are 7 chars,
+    // so the 5-digit number starts at +7; pad "BEST:" to 7 so the digits line up.
     v.print(centre(12), 12, "SCORE: 00000");
-    // Overwrite the "00000" placeholder with the final score ("SCORE: " is 7 chars).
     v.print_num(static_cast<u8>(centre(12) + 7), 12, g_score, 5);
-    v.print(centre(10), 14, "PRESS FIRE");
+    v.print(centre(12), 13, "BEST:  00000");
+    v.print_num(static_cast<u8>(centre(12) + 7), 13, g_high_score, 5);
+    v.print(centre(10), 16, "PRESS FIRE");
     arm_fire();
 }
 
@@ -799,6 +912,9 @@ int main() {
     for (;;) {
         Game::set_screen<TitleScreen>(&title_enter);
         Game::run_until(title_step);
+        // The title animation left COLPF0 on some hue; restore white so the HUD score and
+        // the game-over text (all COLPF0, no DLI) render readable.
+        Platform::hal::set_color_pf(0, kTitleTextColor);
 
         Game::set_screen<PlayScreen>(&play_enter);
         Game::run_until(play_step);
