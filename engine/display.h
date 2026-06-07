@@ -213,7 +213,7 @@ struct ScrollRegion {
     static constexpr u8        height         = Inner::height;   // visible rows / lines
     static constexpr bool      is_text        = Inner::is_text;
     static constexpr bool      is_scroll      = true;
-    static constexpr bool      is_overlay     = false;   // overlays never ANTIC-scroll
+    static constexpr bool      is_overlay     = false;   // overlays never hardware-scroll
     static constexpr u8        bytes_per_line = Inner::bytes_per_line;
     static constexpr u16       ram_bytes      = 0;               // backed by the map buffer
     static constexpr u16       map_width      = MapW;
@@ -224,16 +224,15 @@ struct ScrollRegion {
 
 // ── OverlayRegion ─────────────────────────────────────────────────────
 //
-// A region drawn into the VBXE overlay plane rather than the shared ANTIC screen
-// buffer. Its pixels live in VBXE VRAM, so `ram_bytes` is 0 (like ScrollRegion it
-// contributes nothing to the screen buffer or to following regions' offsets), and
-// it is *not* an ANTIC display-list mode line — the backend builder reads
-// `is_overlay` to skip it. Drawing goes through Game::gfx() (the blitter/MEMAC
-// path), not the view below.
+// A region drawn into the overlay plane rather than the shared screen buffer. Its
+// pixels live in VRAM, so `ram_bytes` is 0 (like ScrollRegion it contributes
+// nothing to the screen buffer or to following regions' offsets), and it is *not* a
+// display-list mode line — the backend builder reads `is_overlay` to skip it.
+// Drawing goes through Game::gfx() (the blitter path), not the view below.
 //
-// `bytes_per_line` and `map_width` are u16 here because VBXE_SR reaches 320
-// bytes/line — wider than any ANTIC mode (so the existing TextRegion/BitmapRegion
-// keep their u8). The mode must be one of the VBXE overlay modes.
+// `bytes_per_line` and `map_width` are u16 here because an overlay mode can reach
+// 320 bytes/line — wider than any baseline mode (so the existing TextRegion/
+// BitmapRegion keep their u8). The mode must be one of the overlay modes.
 template <auto M, u8 Height>
 struct OverlayRegion {
     using mode_type = decltype(M);
@@ -243,19 +242,23 @@ struct OverlayRegion {
         engine::display::traits<mode_type>::is_text(M);
     static constexpr bool      is_scroll      = false;
     static constexpr bool      is_overlay     = true;
-    static constexpr u16       bytes_per_line =          // u16: VBXE reaches 320
+    static constexpr u16       bytes_per_line =          // u16: overlay modes reach 320
         engine::display::traits<mode_type>::bytes_per_line(M);
     static constexpr u16       ram_bytes      = 0;        // VRAM-backed, not screen buffer
     static constexpr u16       map_width      = bytes_per_line;
     static constexpr u16       map_height     = Height;
 
+    // FIXME[HAL]: the display-traits seam is_vbxe() embeds the VBXE product name;
+    // rename it to a neutral predicate (e.g. is_overlay_mode) across
+    // display_traits.h and the backend's traits specialization. The assert message
+    // likewise names concrete VBXE mode tokens and moves with that rename.
     static_assert(engine::display::traits<mode_type>::is_vbxe(M),
                   "OverlayRegion requires a VBXE mode (VBXE_SR, VBXE_HR, VBXE_LR, VBXE_T80)");
 
     // Placeholder view: a typed metadata handle, not a drawing surface. Overlay
     // pixels live in VRAM, so the view's `ptr` is nullptr at runtime and must not
     // be dereferenced — drawing goes through Game::gfx(), which dispatches to the
-    // blitter/MEMAC path. (For VBXE_T80 this will later become an OverlayTextView.)
+    // blitter path. (For the overlay text mode this will later become an OverlayTextView.)
     using view = BitmapRegionView<M, Height>;
 };
 
@@ -297,9 +300,9 @@ struct DisplayLayout {
     static constexpr u8  region_mode_byte[region_count]      =
         { engine::display::traits<typename Regions::mode_type>::mode_opcode(
               Regions::mode)... };
-    // u16: VBXE overlay regions reach 320 bytes/line (wider than any ANTIC mode).
-    // The ANTIC display-list builder skips overlay regions (region_is_overlay), so
-    // ANTIC entries still hold their familiar small (<=40) values.
+    // u16: overlay regions reach 320 bytes/line (wider than any baseline mode).
+    // The display-list builder skips overlay regions (region_is_overlay), so
+    // baseline entries still hold their familiar small (<=40) values.
     static constexpr u16 region_bytes_per_line[region_count] =
         { Regions::bytes_per_line... };
     static constexpr bool region_is_text[region_count]       = { Regions::is_text... };
@@ -307,8 +310,8 @@ struct DisplayLayout {
     static constexpr bool region_is_scroll[region_count]     = { Regions::is_scroll... };
     static constexpr u16 region_map_width[region_count]      = { Regions::map_width... };
     static constexpr u16 region_map_height[region_count]     = { Regions::map_height... };
-    // Overlay metadata: which regions draw into the VBXE overlay plane (VRAM) rather
-    // than the ANTIC screen buffer. The backend builder skips these mode lines.
+    // Overlay metadata: which regions draw into the overlay plane (VRAM) rather
+    // than the screen buffer. The backend builder skips these mode lines.
     static constexpr bool region_is_overlay[region_count]    = { Regions::is_overlay... };
 
     // True if any region in this layout scrolls.
@@ -317,11 +320,11 @@ struct DisplayLayout {
     // True if any region is an overlay.
     static constexpr bool has_overlay = (Regions::is_overlay || ... || false);
 
-    // True if ALL regions are overlay — ANTIC can be fully disabled. (region_count
+    // True if ALL regions are overlay — playfield DMA can be fully disabled. (region_count
     // >= 1 is asserted, so a layout with no overlay regions is correctly false.)
     static constexpr bool is_pure_overlay = (Regions::is_overlay && ... && true);
 
-    // Count of non-overlay (ANTIC) regions.
+    // Count of non-overlay (playfield) regions.
     static constexpr u8 antic_region_count =
         static_cast<u8>(((!Regions::is_overlay ? 1 : 0) + ... + 0));
 

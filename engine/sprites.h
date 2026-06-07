@@ -31,11 +31,11 @@ namespace engine {
 // ── Sprite pixel formats ──────────────────────────────────────────────
 //
 // How a shape's pixels are packed. Neutral (describes packing, not a backend):
-//   Packed1bpp — 1 bit/pixel, 1 byte/row (the Atari P/M format). Renders on any
-//                backend; on a blitter platform it is expanded to 8bpp in VRAM
+//   Packed1bpp — 1 bit/pixel, 1 byte/row (the hardware-sprite format). Renders on
+//                any backend; on a blitter platform it is expanded to 8bpp in VRAM
 //                and coloured per-instance.
 //   Pixel8bpp  — 1 byte/pixel colour indices (W*H bytes). Richer art for blitter
-//                platforms; not representable in hardware P/M, so it requires a
+//                platforms; not representable in hardware sprites, so it requires a
 //                blitter (a static_assert enforces this in sprite()).
 enum class SpriteFormat : u8 { Packed1bpp, Pixel8bpp };
 
@@ -144,7 +144,7 @@ public:
     static constexpr u8 kPlayers  = 4;
     static constexpr u8 kMissiles = 4;
 
-    // Zone-boundary DLIs fire at the end of an 8-scanline mode line; bias the
+    // Zone-boundary raster hooks fire at the end of an 8-scanline mode line; bias the
     // boundary up by ~one mode line so the player-position switch lands in the gap
     // between zones (see update_zones). Layout-tunable; one MODE_2 line.
     static constexpr u8 kBoundaryBias = 8;
@@ -171,7 +171,7 @@ public:
                 shape.data, Shape::width, Shape::height, Shape::format);
         } else {
             static_assert(Shape::format == SpriteFormat::Packed1bpp,
-                "Pixel8bpp sprites require a blitter platform (e.g. VBXE)");
+                "Pixel8bpp sprites require a blitter platform");
         }
     }
 
@@ -259,8 +259,9 @@ public:
             // Boundary: zone 0 from the top; later zones in the gap between
             // adjacent groups. boundary_scanline is consumed by the HAL as a
             // display-list-relative scanline (program_raster_lines), while sprite
-            // Y is the P/M strip offset; on the standard layout the two track ~1:1.
-            // The DLI fires at the END of its 8-scanline mode line, i.e. a few
+            // Y is the hardware-sprite strip offset; on the standard layout the two
+            // track ~1:1. The boundary raster hook fires at the END of its
+            // 8-scanline mode line, i.e. a few
             // lines BELOW the value here, so bias the switch up by kBoundaryBias so
             // it lands in the inter-zone gap rather than partway through the lower
             // zone's first sprite (which reads as a split "ghost" sprite). Never
@@ -288,7 +289,7 @@ public:
     // positions, and record this frame's dirty ranges for the next clear.
     // `sprite_base` points at the sprite base (a real address on hardware, a test buffer
     // under the simulator). On a blitter backend it is ignored — sprites are
-    // composed in VRAM via the overlay seams instead of P/M memory.
+    // composed in VRAM via the overlay seams instead of hardware-sprite memory.
     void commit(u8* sprite_base) {
         if constexpr (caps::has_blitter) {
             commit_blitter(sprite_base);
@@ -299,11 +300,12 @@ public:
 
     // Blitter commit: clear the back buffer, then blit each active sprite (sorted
     // back-to-front by update_zones) into it via the overlay seams. Sprites live in
-    // VRAM (no P/M memory, no tracked-range clear, no zone-0 register writes), but
-    // missiles ARE still the four P/M hardware projectiles on this backend (ADR-025),
-    // so they go through the shared commit_missiles() path into `sprite_base` (the
-    // P/M strip), rendering on the P/M layer below the overlay. The frame service
-    // runs the queued blits afterwards (overlay_submit).
+    // VRAM (no hardware-sprite memory, no tracked-range clear, no zone-0 register
+    // writes), but missiles ARE still the four hardware projectiles on this backend
+    // (ADR-025), so they go through the shared commit_missiles() path into
+    // `sprite_base` (the projectile strip), rendering on the hardware-sprite layer
+    // below the overlay. The frame service runs the queued blits afterwards
+    // (overlay_submit).
     void commit_blitter(u8* sprite_base) {
         Platform::hal::overlay_frame_begin();
         for (u8 i = 0; i < active_count_; ++i) {
@@ -322,7 +324,7 @@ public:
         //    [min,max] clear zeroed the (mostly empty) gaps between them too; with
         //    9 sprites spread down the screen that pushed the commit past one frame.
         //    Clearing exact extents (≤ MaxSprites × height bytes) keeps it inside
-        //    the VBI. prev_player_ == kNotDrawn means the sprite wasn't drawn (and
+        //    the frame service. prev_player_ == kNotDrawn means the sprite wasn't drawn (and
         //    prev_height_ is 0 on the very first commit, so nothing is cleared).
         for (u8 i = 0; i < MaxSprites; ++i) {
             if (prev_player_[i] == kNotDrawn) continue;
@@ -354,12 +356,14 @@ public:
 
         // 3. Write zone-0 sprite positions + colours (the frame service sets the
         //    first zone from the top; later zones are armed by the boundary raster
-        //    hooks). Position goes straight to HPOSP (no OS shadow exists for it),
-        //    but the COLOUR must go through the OS PCOLR shadow: this runs in the
-        //    VBI, *before* the OS copies PCOLR→COLPM, so a direct COLPM write here
-        //    would be overwritten (zeroed) by that copy and zone 0 would show black.
-        //    The boundary DLIs, by contrast, run during the visible frame *after*
-        //    the copy, so they write COLPM directly (set_sprite_color).
+        //    hooks). Position goes straight to the position register (no shadow
+        //    exists for it), but the COLOUR must go through the HAL's shadowed
+        //    colour seam (set_color_pm): this runs in the frame service, *before*
+        //    the backend copies its colour shadows to the live registers, so a
+        //    direct write here would be overwritten (zeroed) by that copy and zone 0
+        //    would show black. The boundary raster hooks, by contrast, run during
+        //    the visible frame *after* the copy, so they write the live colour
+        //    register directly (set_sprite_color).
         if (zone_count_ > 0) {
             for (u8 p = 0; p < kPlayers; ++p) {
                 Platform::hal::set_sprite_x(p, zones_[0].hpos[p]);
@@ -369,14 +373,14 @@ public:
         commit_missiles(sprite_base);
     }
 
-    // Commit the four P/M hardware projectiles into `sprite_base`. Missiles are
-    // direct, not multiplexed (ADR-025), and are used identically on both backends:
-    // the baseline P/M path and the blitter path (where players composite in VRAM
-    // but missiles remain the GTIA projectiles, rendering below the VBXE overlay).
-    // All four share ONE strip (missile_strip_offset): each scanline byte packs the
-    // four missiles two bits apiece (missile m in bits 2m..2m+1), so draws/clears
-    // are read-modify-writes of that 2-bit field — missiles sharing a scanline must
-    // not stomp each other.
+    // Commit the four hardware projectiles into `sprite_base`. Missiles are direct,
+    // not multiplexed (ADR-025), and are used identically on both backends: the
+    // baseline path and the blitter path (where players composite in VRAM but
+    // missiles remain hardware projectiles, rendering below the overlay). All four
+    // share ONE strip (missile_strip_offset): each scanline byte packs the four
+    // missiles two bits apiece (missile m in bits 2m..2m+1), so draws/clears are
+    // read-modify-writes of that 2-bit field — missiles sharing a scanline must not
+    // stomp each other.
     void commit_missiles(u8* sprite_base) {
         const u8  res   = static_cast<u8>(res_);
         const u16 mbase = Platform::hal::missile_strip_offset(res);
@@ -389,7 +393,7 @@ public:
             missile_prev_height_[m] = 0;
         }
         // 2. Draw each shown missile (height > 0) and record its footprint, then push
-        //    its horizontal position (no OS shadow for HPOSM).
+        //    its horizontal position (no shadow for the projectile position register).
         for (u8 m = 0; m < kMissiles; ++m) {
             const u8 h = missile_height_[m];
             if (h > 0) {
@@ -409,12 +413,12 @@ public:
     //
     // Register a boundary raster hook for each zone after the first (zone 0's
     // positions are set by the frame-service commit), and pre-bake that zone's four
-    // HPOSP + four COLPM bytes into mux_table_ in fire order. The raw DLI
-    // (Platform::hal::multiplex_dli, edge_multiplex_dli on Atari) reads row
-    // mux_index_, copies the eight bytes straight to the GTIA registers, and bumps
-    // the index — no per-DLI work, so it stays well under a scanline (see the
-    // re-entrancy note in interrupt.h::add_dynamic_raster_hook). mux_index_ is reset
-    // here, in the VBI, before the frame's first boundary DLI fires.
+    // position + four colour bytes into mux_table_ in fire order. The raw raster
+    // hook (Platform::hal::multiplex_dli) reads row mux_index_, copies the eight
+    // bytes straight to the sprite hardware registers, and bumps the index — no
+    // per-hook work, so it stays well under a scanline (see the re-entrancy note in
+    // interrupt.h::add_dynamic_raster_hook). mux_index_ is reset here, in the frame
+    // service, before the frame's first boundary hook fires.
     //
     // Under the simulator there is no hardware raster, so the hook is registered
     // (and the table built) but never entered.
@@ -422,7 +426,7 @@ public:
     void build_raster_hooks(IM& im) {
         im.begin_dynamic();
         // A blitter backend has no hardware players to reposition mid-frame, so no
-        // zone-boundary DLIs are needed — just clear any stale dynamic hooks.
+        // zone-boundary raster hooks are needed — just clear any stale dynamic hooks.
         if constexpr (caps::has_blitter) return;
 
         mux_index_ = 0;
@@ -438,9 +442,9 @@ public:
         }
     }
 
-    // One-time setup: bind the raw multiplex DLI to this manager's flat table and
+    // One-time setup: bind the raw multiplex raster hook to this manager's flat table and
     // fire index (the single instance never moves). engine::Core::init calls this on
-    // baseline backends; discarded on blitter backends, which have no boundary DLIs.
+    // baseline backends; discarded on blitter backends, which have no boundary raster hooks.
     void arm_multiplex_dli() {
         if constexpr (!caps::has_blitter) {
             Platform::hal::install_multiplex_dli(
@@ -528,12 +532,12 @@ private:
 
     SpriteVerticalResolution res_ = SpriteVerticalResolution::SingleLine;
 
-    // Flat per-boundary register table the raw multiplex DLI walks: one kMuxRow-byte
-    // row per zone after the first, [HPOSP0..3, COLPM0..3], in fire (scanline)
-    // order. mux_index_ is the row the next boundary DLI will consume; reset to 0
-    // each frame by build_raster_hooks and bumped by the DLI (engine HAL +
-    // platform/atari/dli_dispatch.h own the hardware side).
-    static constexpr u8 kMuxRow = kPlayers * 2;   // 4 HPOSP + 4 COLPM
+    // Flat per-boundary register table the raw multiplex hook walks: one kMuxRow-byte
+    // row per zone after the first, [position 0..3, colour 0..3], in fire (scanline)
+    // order. mux_index_ is the row the next boundary hook will consume; reset to 0
+    // each frame by build_raster_hooks and bumped by the hook (the engine HAL and the
+    // backend's raster-dispatch code own the hardware side).
+    static constexpr u8 kMuxRow = kPlayers * 2;   // 4 position + 4 colour
     u8 mux_table_[MaxZones * kMuxRow] = {};
     u8 mux_index_ = 0;
 };

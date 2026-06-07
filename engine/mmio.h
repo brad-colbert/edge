@@ -5,7 +5,7 @@
 //
 // Platform-neutral building blocks for reaching hardware at fixed absolute
 // addresses. This header carries NO hardware constants of its own — a backend
-// (e.g. the Atari VBXE register/MEMAC code) specializes these templates with
+// (e.g. an extended-graphics register/memory-window backend) specializes these with
 // concrete addresses. Generic engine subsystems do not use these directly; they
 // reach hardware through Platform::hal (ARCHITECTURE.md Dependency Rule 2). The
 // types live in the engine layer only so every backend HAL can reuse them
@@ -18,10 +18,10 @@
 //
 // CAUTION: the banked-window bulk helpers select a bank and then access the
 // window; the bank-select register is shared hardware state. If an interrupt
-// (e.g. a VBI that also touches the same chip) preempts a transfer and changes
+// (e.g. a frame interrupt that also touches the same chip) preempts a transfer and changes
 // or disturbs the bank, the rest of the transfer lands in the wrong place. The
-// owning backend must keep the bank stable across interrupts (the Atari VBXE
-// backend does this by having its VBI save/restore MEMAC_BANK_SEL).
+// owning backend must keep the bank stable across interrupts (a backend does this
+// by having its frame interrupt save/restore the bank-select register).
 
 #include <string.h>
 
@@ -32,7 +32,7 @@ namespace engine {
 // ── Memory-mapped register handle ────────────────────────────────────
 //
 // Read via `operator u8`, write via `operator=`. Use as e.g.
-// `Mmio<0xD640>{} = v;` or `u8 x = Mmio<0xD640>{};`.
+// `Mmio<Addr>{} = v;` or `u8 x = Mmio<Addr>{};`.
 template <u16 Address>
 struct Mmio {
     [[gnu::always_inline]] inline operator u8() const noexcept {
@@ -47,7 +47,7 @@ struct Mmio {
 //
 // Like Mmio, but accessed via operator[] returning a reference to the volatile
 // byte. Constant offsets fold to literal absolute addresses; runtime offsets
-// compile to 6502 absolute-indexed addressing (e.g. LDA $B000,X).
+// compile to 6502 absolute-indexed addressing (e.g. LDA Base,X).
 template <u16 Base>
 struct MmioWindow {
     [[gnu::always_inline]] inline volatile u8& operator[](u16 offset) const noexcept {
@@ -70,12 +70,12 @@ constexpr u8 log2_pow2(u32 v) noexcept {
 // A fixed-size aperture at Base into a larger banked backing store. Only one
 // WindowSize-byte bank is visible at a time; which bank shows through is chosen
 // by writing the bank-select register at BankSelAddr. WindowSize must be a
-// power of two and must match the hardware window size (e.g. the VBXE MEMAC
-// SIZE bits). A linear (multi-bank) address splits into
+// power of two and must match the hardware window size (e.g. a banked memory
+// window's SIZE bits). A linear (multi-bank) address splits into
 //   bank   = addr >> bank_shift
 //   offset = addr & offset_mask
 // both of which fold to constants when addr is a constant. BankSelOrMask is
-// OR'd into every bank write (carry e.g. the MEMAC MGE/MBCE enable bit here),
+// OR'd into every bank write (carry e.g. a window-enable bit here),
 // so a bank select is a single LDA #imm / STA with no register read and no
 // temporary.
 template <u16 Base, u32 WindowSize, u16 BankSelAddr, u8 BankSelOrMask = 0x00>
@@ -135,7 +135,7 @@ struct MmioBankedWindow {
     }
 
     // Efficient banked read window -> CPU RAM: mirror of copy(). The bank-walk
-    // lives here so callers (e.g. MEMAC read) never duplicate the boundary math.
+    // lives here so callers (e.g. a banked window read) never duplicate the boundary math.
     inline void read(u32 start, u8* dst, u32 len) const noexcept {
         while (len) {
             const u16 off = static_cast<u16>(start) & offset_mask;
