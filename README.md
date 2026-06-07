@@ -91,8 +91,9 @@ For a fuller walkthrough, start with [`/documents/QUICK_START.md`](./documents/Q
 - [`/engine`](./engine) — public engine headers and the Atari backend
 - [`/tests`](./tests) — `mos-sim` unit tests for engine subsystems
 - [`/demo`](./demo) — hardware validation demos: `atari_hw_test`, `atari_scroll_test`,
-  and the VBXE set (`atari_vbxe_bringup`, `atari_vbxe_gfx`, `atari_vbxe_text`,
-  `atari_vbxe_sprites`)
+  the VBXE set (`atari_vbxe_bringup`, `atari_vbxe_gfx`, `atari_vbxe_text`,
+  `atari_vbxe_sprites`), and the Arena game (`arena_base`, plus `arena_vbxe` — the
+  same game rendered entirely through the VBXE overlay)
 - [`/documents`](./documents) — end-user documentation
 - [`/cmake`](./cmake) — toolchain files for simulator and Atari builds
 
@@ -126,9 +127,11 @@ cmake --build build-atari --target atari_hw_test
 ```
 
 Other demo targets follow the same pattern: `atari_scroll_test` (hardware scroll),
-and the VBXE set `atari_vbxe_bringup`, `atari_vbxe_gfx`, `atari_vbxe_text`, and
-`atari_vbxe_sprites`. See [`/demo/README.md`](./demo/README.md) for what each one
-exercises on real hardware or emulators.
+the VBXE set `atari_vbxe_bringup`, `atari_vbxe_gfx`, `atari_vbxe_text`, and
+`atari_vbxe_sprites`, and the Arena game `arena_base` / `arena_vbxe` (one source,
+ANTIC vs full-VBXE-overlay backends via `-DEDGE_VBXE=1`). See
+[`/demo/README.md`](./demo/README.md) for what each one exercises on real hardware
+or emulators.
 
 ## Versioning and releases
 
