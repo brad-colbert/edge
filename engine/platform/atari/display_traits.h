@@ -22,7 +22,7 @@ namespace display {
 template <>
 struct traits<atari::Mode> {
     static constexpr bool is_text(atari::Mode m) { return atari::is_text(m); }
-    static constexpr bool is_vbxe(atari::Mode m) { return atari::is_vbxe(m); }
+    static constexpr bool is_overlay_mode(atari::Mode m) { return atari::is_vbxe(m); }
     static constexpr engine::u16 bytes_per_line(atari::Mode m) {
         return atari::bytes_per_line(m);
     }

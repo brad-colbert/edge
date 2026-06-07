@@ -159,7 +159,7 @@ static_assert(TextLayout::overlay_region_index() == TextLayout::region_count,
               "no overlay => index past the end");
 
 // NOTE (negative test, kept disabled): instantiating OverlayRegion on a non-VBXE
-// mode must fail the is_vbxe static_assert. Verified manually, e.g.
+// mode must fail the is_overlay_mode static_assert. Verified manually, e.g.
 //   using BadOverlay = OverlayRegion<M::Mode::MODE_2, 24>;  // static_assert fires
 // Left commented out so the suite still builds.
 

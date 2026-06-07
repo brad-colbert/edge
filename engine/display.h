@@ -248,12 +248,8 @@ struct OverlayRegion {
     static constexpr u16       map_width      = bytes_per_line;
     static constexpr u16       map_height     = Height;
 
-    // FIXME[HAL]: the display-traits seam is_vbxe() embeds the VBXE product name;
-    // rename it to a neutral predicate (e.g. is_overlay_mode) across
-    // display_traits.h and the backend's traits specialization. The assert message
-    // likewise names concrete VBXE mode tokens and moves with that rename.
-    static_assert(engine::display::traits<mode_type>::is_vbxe(M),
-                  "OverlayRegion requires a VBXE mode (VBXE_SR, VBXE_HR, VBXE_LR, VBXE_T80)");
+    static_assert(engine::display::traits<mode_type>::is_overlay_mode(M),
+                  "OverlayRegion requires an overlay mode — use an overlay-capable mode token");
 
     // Placeholder view: a typed metadata handle, not a drawing surface. Overlay
     // pixels live in VRAM, so the view's `ptr` is nullptr at runtime and must not
