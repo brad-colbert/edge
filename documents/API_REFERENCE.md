@@ -1,6 +1,6 @@
 # EDGE API Reference
 
-> **Applies to EDGE v0.4.1** — see [CHANGELOG](../CHANGELOG.md) for version history.
+> **Applies to EDGE v0.5.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
 
 This reference is organized in two layers:
 
@@ -165,8 +165,8 @@ The engine exposes three display-region kinds:
   in VBXE VRAM (zero screen-buffer RAM). `Mode` is a VBXE overlay mode
   (`atari::Mode::VBXE_SR`/`VBXE_HR`/`VBXE_LR`/`VBXE_T80`). Region order sets the
   overlay's vertical position. A layout of only `OverlayRegion`s is a *pure
-  overlay*: `set_screen` keeps ANTIC DMA off for it automatically (no
-  `antic_playfield(false)` needed), and its `OverlayRegion` mode/height are checked
+  overlay*: `set_screen` keeps ANTIC DMA off for it automatically (no manual
+  playfield-DMA disable needed), and its `OverlayRegion` mode/height are checked
   against the platform's VBXE `Config` at compile time.
 
 These are composed into a screen layout:
@@ -287,18 +287,20 @@ Background / compositing (for sprites-over-bitmap):
 - `Game::overlay_publish_background()` — publish the bitmap drawn via `Game::gfx()`
   to the live display page(s); sprite footprints are then restored from it each
   frame
-- `Game::antic_playfield(bool enable)` — enable/disable the ANTIC playfield
-  (character/bitmap) DMA. **Atari-only, opt-in escape hatch.** The common case is
-  now automatic: a *pure-overlay* screen (`DisplayLayout` of only
-  `OverlayRegion`s) keeps ANTIC DMA off through `set_screen`, so you do **not**
-  need to call this. When an opaque VBXE overlay covers the screen the ANTIC
-  playfield is invisible, but its per-scanline VRAM DMA starves the blitter's
-  restore copies and can collapse the compositor's per-frame budget (e.g.
-  `Background::Bitmap` ran the loop at ~8 Hz instead of 60). Use this only for the
-  cases the engine can't infer: a transparent overlay that shows ANTIC through
-  (leave it enabled), or a mixed overlay+ANTIC layout where you want the playfield
-  fetch off anyway. It toggles only the playfield bits; any `set_screen` on a
-  non-pure-overlay layout re-enables them.
+- `atari::set_playfield_dma(bool enable)` — enable/disable the ANTIC playfield
+  (character/bitmap) DMA. **Atari platform-layer function, opt-in escape hatch** —
+  it lives in the Atari platform headers, *not* on `Game::` (ADR-031: platform-
+  specific escape hatches belong on the platform). Reach it by including the Atari
+  platform header your game already uses. The common case is now automatic: a
+  *pure-overlay* screen (`DisplayLayout` of only `OverlayRegion`s) keeps ANTIC DMA
+  off through `set_screen`, so you do **not** need to call this. When an opaque VBXE
+  overlay covers the screen the ANTIC playfield is invisible, but its per-scanline
+  VRAM DMA starves the blitter's restore copies and can collapse the compositor's
+  per-frame budget (e.g. `Background::Bitmap` ran the loop at ~8 Hz instead of 60).
+  Use it only for the cases the engine can't infer: a transparent overlay that shows
+  ANTIC through (leave it enabled), or a mixed overlay+ANTIC layout where you want
+  the playfield fetch off anyway. It toggles only the playfield bits; any
+  `set_screen` on a non-pure-overlay layout re-enables them.
 
 Overlay collision snapshots, latched at the frame service:
 

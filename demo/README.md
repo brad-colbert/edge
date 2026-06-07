@@ -1,6 +1,6 @@
 # Hardware validation demo (`atari_hw_test.xex`)
 
-> **Applies to EDGE v0.4.1** — see [CHANGELOG](../CHANGELOG.md) for version history.
+> **Applies to EDGE v0.5.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
 
 A minimal Atari 8-bit program that drives every engine subsystem at once, so
 the engine's live ANTIC path can be confirmed on real hardware / emulators
@@ -171,7 +171,7 @@ The screen is a pure-overlay `DisplayLayout<OverlayRegion<VBXE_SR, 240>>`, so
 `set_screen` keeps ANTIC DMA off automatically — without that, the hidden ANTIC
 playfield's DMA would contend the VRAM bus and stall the blitter's per-frame
 restore copies, throttling motion to ~8 Hz. (Earlier versions of this demo
-achieved the same with a manual `Game::antic_playfield(false)` call.)
+achieved the same with a manual `atari::set_playfield_dma(false)` call.)
 
 | Observation | Proves |
 |---|---|

@@ -1,6 +1,6 @@
 # API Design
 
-> **Applies to EDGE v0.4.1** — see [CHANGELOG](../CHANGELOG.md) for version history.
+> **Applies to EDGE v0.5.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
 
 The user-facing API for the engine. This document describes what
 a game author writes. Internal engine implementation details are
@@ -367,7 +367,7 @@ struct OverlayScreen {
 
 A *pure-overlay* screen (only `OverlayRegion`s) turns ANTIC DMA
 off automatically in `set_screen` — there is no manual
-`antic_playfield(false)` to remember — and the engine
+playfield-DMA disable to remember — and the engine
 compile-time-checks the region's mode/height against the
 platform's VBXE `Config`. Mixing an `OverlayRegion` with ANTIC
 `TextRegion`/`BitmapRegion`s in one layout positions the overlay
