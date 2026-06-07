@@ -139,6 +139,8 @@ struct OverlayHal {
     // (init / set_background / bitmap ops), since the VBI shares queue_/the blitter.
     static void blit_rect(u32 dest, u16 w, u8 h, u8 color) {
         NmiGuard cs;
+        wait_blitter_idle();   // a compositor blit may still be in flight (async
+                               // overlay_submit); never reset/submit over a running op
         queue_.reset();
         queue_.push(vbxe::bcb_fill_rect(dest, w, h, fb_stride, color));
         queue_.template submit<Config>();
@@ -166,6 +168,7 @@ struct OverlayHal {
     // Synchronous, like blit_fill: NmiGuard makes it safe after the VBI is armed.
     static void blit_copy(u32 src, u32 dest) {
         NmiGuard cs;
+        wait_blitter_idle();   // don't reset/submit over an in-flight compositor blit
         queue_.reset();
         queue_.push(vbxe::bcb_copy(src, dest, fb_stride, fb_height, fb_stride, fb_stride));
         queue_.template submit<Config>();

@@ -30,6 +30,9 @@
 #include <engine/math.h>
 #include <engine/pool.h>
 #include <engine/platform/atari/platform.h>
+#ifdef EDGE_VBXE
+#include <engine/platform/atari/vbxe.h>   // power-user: VBXE Config + palette set_color
+#endif
 
 using engine::u8;
 using engine::u16;
@@ -37,16 +40,66 @@ using engine::i8;
 namespace M = atari;
 
 // ── Platform + game configuration ────────────────────────────────────────
-
+//
+// VBXE Tier 2 variant (-DEDGE_VBXE): the SAME game, rendered ENTIRELY in the VBXE
+// overlay (room, HUD, and all text drawn into the overlay bitmap) with the ANTIC
+// playfield OFF, multi-colour pixel sprites composited over it. Game logic, room
+// layout, sound, collision, and difficulty are shared verbatim with the baseline;
+// only the rendering (and the screen/coordinate plumbing it needs) differs, inside
+// #ifdef EDGE_VBXE blocks.
+//
+// Why full-overlay (Tier 2) rather than a transparent overlay over ANTIC text
+// (Tier 1): a transparent overlay forces ANTIC playfield DMA to stay ON, and ANTIC
+// has VRAM-bus priority over the blitter — running both every frame is the documented
+// bus-contention wall (the blitter starves, the VBI overruns, the loop freezes). A
+// pure-overlay screen keeps ANTIC DMA off (set_screen does this automatically), so
+// the blitter owns the bus. This is the same proven path as the sprites-over-bitmap
+// demo. The room/HUD/text are drawn into a VRAM "master" canvas (Background::Bitmap)
+// and the compositor restores sprite footprints from it each frame; double-buffered
+// for flicker-free motion. Run with BASIC disabled and a VBXE FX core.
 #ifdef EDGE_VBXE
-// Placeholder for a future VBXE build (no target yet) — follows the vbxe_*.cpp
-// pattern: a gfx::VBXE<Config> platform. Left unimplemented until a VBXE arena
-// target is added in a later step.
-#error "arena: EDGE_VBXE platform path not implemented yet (no VBXE target)"
+namespace V = atari::vbxe;
+// DOUBLE-buffered Bitmap — the same proven configuration as the working sprites-
+// over-bitmap demo. The room/HUD/text are drawn once into the VRAM master and
+// published to both pages; each frame the compositor restores sprite footprints from
+// the master and blits the sprites, and overlay_present WAITS for that blit to finish
+// before flipping (proper completion sync). Single-buffer's async submit without a
+// per-frame completion wait let a long blit be overwritten in flight → cascading
+// corruption; double-buffer avoids it. play_enter now draws the room with ~15 blitter
+// rects (not ~900 per-cell ops), so the old "flip shows a half-drawn page" problem is
+// gone too.
+// MEMAC window at $A000 (NOT the engine default $B000). CRITICAL: the llvm-mos soft
+// (call) stack lives at the top of RAM — ~$BC01 here — which is INSIDE the default
+// $B000-$BFFF MEMAC-A window. Enabling that window for VRAM access aliases the call
+// stack onto VRAM: every overlay/VRAM operation then corrupts both the call stack
+// (→ crash) and the displayed overlay (→ progressive noise). Hardware-diagnosed via
+// the soft-stack pointer ($80/$81 = $BC01) sitting in the window. $A000-$AFFF is free
+// RAM (BASIC off) between BSS/heap (ends well below $A000) and the stack (above
+// $AFFF), so the window no longer overlaps the stack. (The sprites-over-bitmap demo
+// happens to survive $B000, but this is a real trap for any overlay program whose
+// stack reaches into $B000-$BFFF.)
+using VBXECfg = V::Config<M::Mode::VBXE_SR, V::Buffers::Double, V::RegBase::D640,
+                          V::MEMAC_A_Cfg<0xA0>, 0x00000, V::Background::Bitmap>;
+using Platform = M::Platform<M::Machine::XL, M::RAM::Baseline,
+                             M::gfx::VBXE<VBXECfg>, M::Sound::Mono, M::TV::NTSC>;
 #else
 using Platform = atari::StockXL_NTSC;
 #endif
 
+#ifdef EDGE_VBXE
+// Tier 2: every screen is one full-screen VBXE overlay (pure overlay → set_screen
+// keeps ANTIC DMA off). All content is drawn into the overlay bitmap; there are no
+// ANTIC text regions, no charset base, and no DLI colour split.
+struct TitleScreen {
+    using display = engine::DisplayLayout<engine::OverlayRegion<M::Mode::VBXE_SR, 240>>;
+};
+struct PlayScreen {
+    using display = engine::DisplayLayout<engine::OverlayRegion<M::Mode::VBXE_SR, 240>>;
+};
+struct GameOverScreen {
+    using display = engine::DisplayLayout<engine::OverlayRegion<M::Mode::VBXE_SR, 240>>;
+};
+#else
 struct TitleScreen {
     using display = engine::DisplayLayout<engine::TextRegion<M::Mode::MODE_4, 24>>;
 };
@@ -61,10 +114,19 @@ struct PlayScreen {
 struct GameOverScreen {
     using display = engine::DisplayLayout<engine::TextRegion<M::Mode::MODE_4, 24>>;
 };
+#endif
 
 struct GameConfig {
     using screens        = engine::ScreenSet<TitleScreen, PlayScreen, GameOverScreen>;
     using initial_screen = TitleScreen;
+#ifdef EDGE_VBXE
+    // Tier 2: player (0) + 3 enemies (1..3) + 4 bullets (4..7) all composite as
+    // blitter overlay sprites (P/M would sit under the opaque overlay). The blitter
+    // has no 4-sprite hardware limit, so 8 logical sprites is fine.
+    static constexpr u8 max_sprites      = 8;
+    static constexpr u8 sound_channels   = 2;
+    static constexpr u8 max_raster_hooks = 1;   // unused on the overlay; keep minimal
+#else
     // Player (slot 0) + up to 3 enemies (slots 1..3) = 4 sprites, the number of P/M
     // hardware players. At <=4 the multiplexer forms a single zone and maps every
     // sprite 1:1 onto a hardware player for the whole frame — no Y-zone splitting,
@@ -79,6 +141,7 @@ struct GameConfig {
     // only its 1 static colour-split hook; 2 leaves a slot of headroom. (The title
     // animates via the COLPF0 shadow, not a DLI, so it needs no hooks.)
     static constexpr u8 max_raster_hooks = 2;
+#endif
 };
 
 using Game = engine::Core<Platform, GameConfig>;
@@ -213,9 +276,9 @@ constexpr Room make_room() {
 constexpr Room kRoom = make_room();
 
 // ── Colours ───────────────────────────────────────────────────────────────
-//
-// Field map for set_color_pf: 0-3 = COLPF0-3, 4 = COLBK.
 
+#ifndef EDGE_VBXE
+// Field map for set_color_pf: 0-3 = COLPF0-3, 4 = COLBK.
 static void set_hud_palette() {
     Platform::hal::set_color_pf(4, 0x92);   // COLBK  : dark blue
     Platform::hal::set_color_pf(0, 0x0E);   // COLPF0 : white
@@ -245,17 +308,22 @@ static void play_palette_split() {
 // play area begins at scanline 24 + 1*8 = 32. (Same derivation as the row-12
 // split in atari_hw_test.cpp; tune on hardware if the seam is off.)
 static constexpr u8 kSplitScanline = 32;
+#endif // !EDGE_VBXE
 
 // ── Small helpers ──────────────────────────────────────────────────────────
 
+#ifndef EDGE_VBXE
 // Fill every cell of a text-region view with one tile (the view has no clear()).
 template <typename View>
 static void fill_region(View& v, u8 tile) {
     for (u16 i = 0; i < View::length; ++i) v.ptr[i] = tile;
 }
+#endif
 
-// Centre column for an n-character string on a 40-column line.
-static constexpr u8 centre(u8 n) { return static_cast<u8>((40 - n) / 2); }
+// Centre column for an n-character string on a 40-column line. (Baseline text +
+// in-game overlay HUD layout; the overlay title/game-over use centre_px instead.)
+[[maybe_unused]] static constexpr u8 centre(u8 n) { return static_cast<u8>((40 - n) / 2); }
+
 
 // ── Player entity ────────────────────────────────────────────────────────────
 
@@ -268,7 +336,10 @@ struct Player {
 };
 static Player player;
 
-// 8x8 humanoid silhouette (1bpp; each set bit is a player pixel).
+// 8x8 humanoid silhouette. Baseline: 1bpp P/M (each set bit is a player pixel).
+// VBXE: the same silhouette as 8bpp pixel art — body (palette-1 idx 1), darker
+// outline (2), and a highlight visor/belt (3); idx 0 is transparent.
+#ifndef EDGE_VBXE
 constexpr auto player_shape = engine::make_sprite<8, 8>({
     0b00111100,   // ..XXXX..  head
     0b00111100,   // ..XXXX..
@@ -279,6 +350,18 @@ constexpr auto player_shape = engine::make_sprite<8, 8>({
     0b00100100,   // ..X..X..  legs
     0b01100110,   // .XX..XX.  feet
 });
+#else
+constexpr auto player_shape = engine::make_pixel_sprite<8, 8>({
+    0,0,2,1,1,2,0,0,   // head (outline-capped)
+    0,0,1,3,3,1,0,0,   // visor highlight
+    0,0,0,1,1,0,0,0,   // neck
+    0,2,1,1,1,1,2,0,   // shoulders / arms (outline tips)
+    0,0,1,3,3,1,0,0,   // torso + belt highlight
+    0,0,1,1,1,1,0,0,   // torso
+    0,0,1,0,0,1,0,0,   // legs
+    0,2,1,0,0,1,2,0,   // feet (outline)
+});
+#endif
 
 // ── Sprite <-> play-area coordinate mapping ──
 //
@@ -291,11 +374,26 @@ constexpr auto player_shape = engine::make_sprite<8, 8>({
 // tile rows up with what's actually drawn. Region 1 (play area) begins at
 // kSplitScanline; each Mode 4 row is 8 scanlines tall. Hardware-tuned: nudge
 // kPmYBias if the sprite stops a little early/late against horizontal walls.
+#ifdef EDGE_VBXE
+// Tier 2 overlay coordinates: the play area lives in the VBXE framebuffer's pixel
+// space, mapped 1:1 onto blitter-sprite (x,y). The exact baseline cell math is kept
+// (4px cells; the 8px sprite spans 2 columns / 1 row) so game logic and difficulty
+// are byte-identical — only the origin moves. The blitter-sprite X is u8, so the
+// 160px-wide room (40*4) is centred at x=80 to stay within 0..255. The HUD occupies
+// the HUD row, then the play area. A top margin pushes everything down out of the
+// NTSC top overscan (otherwise the HUD row at y=0 is hidden off the top of screen).
+static constexpr u8 kPlayLeftX = 80;             // overlay px of play-area column 0 ((320-160)/2)
+static constexpr u8 kCellW     = 4;              // play-area cell width in overlay px
+static constexpr u8 kCellH     = 8;              // play-area row height in overlay px
+static constexpr u8 kTopMargin = 24;             // shift content below the top overscan (also ~centres 192px in 240)
+static constexpr u8 kPlayTopY  = kTopMargin + kCellH; // overlay y of play-area row 0 (HUD row sits at kTopMargin)
+#else
 static constexpr u8 kPlayLeftX = 48;             // HPOSP of play-area column 0
 static constexpr u8 kCellW     = 4;              // Mode 4 cell width in color clocks
 static constexpr u8 kPmYBias   = 8;              // P/M-vs-playfield vertical offset (scanlines, hardware-measured: one full Mode 4 row)
 static constexpr u8 kPlayTopY  = kSplitScanline + kPmYBias; // collision row-0 origin (36)
 static constexpr u8 kCellH     = 8;              // Mode 4 row height in scanlines
+#endif
 
 static constexpr u8 kSpriteW   = 8;              // player sprite footprint (color clocks / scanlines)
 static constexpr u8 kSpriteH   = 8;
@@ -341,6 +439,182 @@ static bool can_move(u8 new_x, u8 new_y) {
     return !is_blocked(tile_at(x0, y0)) && !is_blocked(tile_at(x1, y0)) &&
            !is_blocked(tile_at(x0, y1)) && !is_blocked(tile_at(x1, y1));
 }
+
+#ifdef EDGE_VBXE
+// ── VBXE overlay renderer (Tier 2) ──────────────────────────────────────────
+//
+// All screen content is drawn into the overlay "master" canvas via Game::gfx()
+// (Background::Bitmap), then published; the compositor restores sprite footprints
+// from the master each frame. Glyphs — room tiles AND text — are rendered straight
+// from the existing arena_charset (each Mode-4 cell is 4px wide x 8 tall, 2bpp), so
+// no separate overlay font is needed. Cell (col,row) maps to overlay pixel
+// (kPlayLeftX + col*kCellW, row*kCellH); the play-area room rows are offset by the
+// HUD row via kPlayTopY (= one cell). Walls fill via the blitter (fast); sparse
+// text/dots plot per pixel (cheap one-time per screen).
+
+// Palette-1 indices. 0 = transparent (sprite/text skip). 1..6 are the sprite colours
+// (must match the pixel-shape data above); 7..13 are room/HUD/text colours.
+namespace pal {
+    constexpr u8 kPlayerBody = 1, kPlayerOutline = 2, kPlayerHi = 3;
+    constexpr u8 kEnemyBody = 4, kEnemyTrim = 5, kEnemyEye = 6;
+    constexpr u8 kText     = 7;    // white text / HUD digits & letters
+    constexpr u8 kFloorBg  = 8;    // play-area background fill
+    constexpr u8 kFloorDot = 9;    // sparse floor texture
+    constexpr u8 kWallLite = 10;   // brick face
+    constexpr u8 kWallDark = 11;   // mortar course / shadow
+    constexpr u8 kHeart    = 12;   // life heart
+    constexpr u8 kHudBg    = 13;   // HUD background bar
+    constexpr u8 kExploRing = kEnemyTrim;  // reuse orange
+}
+
+static void load_overlay_palette() {
+    V::set_color<VBXECfg>(1, pal::kPlayerBody,    0x20, 0xA0, 0xFE); // sky blue
+    V::set_color<VBXECfg>(1, pal::kPlayerOutline, 0x10, 0x18, 0x40); // navy
+    V::set_color<VBXECfg>(1, pal::kPlayerHi,      0xFE, 0xFE, 0xFE); // white visor
+    V::set_color<VBXECfg>(1, pal::kEnemyBody,     0xE0, 0x10, 0x10); // red
+    V::set_color<VBXECfg>(1, pal::kEnemyTrim,     0xFE, 0x80, 0x00); // orange
+    V::set_color<VBXECfg>(1, pal::kEnemyEye,      0xFE, 0xF0, 0x00); // yellow
+    V::set_color<VBXECfg>(1, pal::kText,          0xFE, 0xFE, 0xFE); // white
+    V::set_color<VBXECfg>(1, pal::kFloorBg,       0x00, 0x00, 0x18); // near-black blue
+    V::set_color<VBXECfg>(1, pal::kFloorDot,      0x28, 0x34, 0x60); // dim blue
+    V::set_color<VBXECfg>(1, pal::kWallLite,      0xC0, 0x60, 0x20); // brick
+    V::set_color<VBXECfg>(1, pal::kWallDark,      0x50, 0x28, 0x10); // mortar
+    V::set_color<VBXECfg>(1, pal::kHeart,         0xE0, 0x20, 0x20); // red heart
+    V::set_color<VBXECfg>(1, pal::kHudBg,         0x18, 0x18, 0x40); // HUD bar
+}
+
+// Overlay pixel of a play-area / screen cell.
+static constexpr u16 cell_px(u8 col) { return static_cast<u16>(kPlayLeftX + col * kCellW); }
+static constexpr u16 cell_py(u8 row) { return static_cast<u16>(kTopMargin + row * kCellH); }
+
+// Plot a charset glyph at overlay pixel (px,py): 4px wide x 8 tall, each 2-bit pixel
+// value -> color (value 0 skipped — leaves the background). Used for text glyphs.
+static void plot_glyph(u8 code, u16 px, u16 py, u8 color) {
+    auto& g = Game::gfx();
+    const u16 base = static_cast<u16>(code) * 8;
+    for (u8 r = 0; r < 8; ++r) {
+        const u8 byte = arena_charset.data[base + r];
+        for (u8 c = 0; c < 4; ++c)
+            if ((byte >> (6 - 2 * c)) & 3) g.plot(static_cast<u16>(px + c),
+                                                  static_cast<u16>(py + r), color);
+    }
+}
+
+// Draw a string of arena glyphs at (col,row) in `color` (skips spaces).
+static void draw_text(u8 col, u8 row, const char* s, u8 color) {
+    u16 px = cell_px(col);
+    const u16 py = cell_py(row);
+    for (; *s; ++s, px += kCellW) {
+        const u8 code = M::ascii_to_internal(*s);
+        if (code) plot_glyph(code, px, py, color);     // 0 = space -> nothing
+    }
+}
+
+// Draw a zero-padded number of `digits` at (col,row): right-aligned like print_num.
+static void draw_num(u8 col, u8 row, u16 value, u8 digits, u8 color) {
+    for (u8 i = 0; i < digits; ++i) {
+        const u8 d = static_cast<u8>(value % 10);
+        value = static_cast<u16>(value / 10);
+        // Digit glyphs sit at internal codes 0x10..0x19.
+        plot_glyph(static_cast<u8>(0x10 + d),
+                   cell_px(static_cast<u8>(col + digits - 1 - i)), cell_py(row), color);
+    }
+}
+
+// ── Wide (2x-horizontal) text, pixel-positioned ──
+//
+// The 4px charset glyphs look cramped at 1:1 (square pixels). The title and game-
+// over screens are pure full-screen text (no room to align to), so they use 2x-wide
+// glyphs (8px) for readability, laid out directly in overlay pixels across the full
+// 320px width. The in-game HUD/GET READY stay on the 4px room grid (they must align
+// with the room, and read fine there). kCharW2x is the per-character pitch (8px).
+static constexpr u8  kCharW2x = 8;
+static constexpr u16 row_py(u8 row) { return static_cast<u16>(kTopMargin + row * kCellH); }
+// Left pixel that centres `n` wide chars in the 320px overlay.
+static constexpr u16 centre_px(u8 n) { return static_cast<u16>((320 - n * kCharW2x) / 2); }
+
+static void plot_glyph2x(u8 code, u16 px, u16 py, u8 color) {
+    auto& g = Game::gfx();
+    const u16 base = static_cast<u16>(code) * 8;
+    for (u8 r = 0; r < 8; ++r) {
+        const u8 byte = arena_charset.data[base + r];
+        for (u8 c = 0; c < 4; ++c)
+            if ((byte >> (6 - 2 * c)) & 3) {
+                const u16 x = static_cast<u16>(px + c * 2);
+                g.plot(x, static_cast<u16>(py + r), color);
+                g.plot(static_cast<u16>(x + 1), static_cast<u16>(py + r), color);
+            }
+    }
+}
+static void draw_text2x(u16 px, u16 py, const char* s, u8 color) {
+    for (; *s; ++s, px += kCharW2x) {
+        const u8 code = M::ascii_to_internal(*s);
+        if (code) plot_glyph2x(code, px, py, color);
+    }
+}
+static void draw_num2x(u16 px, u16 py, u16 value, u8 digits, u8 color) {
+    for (u8 i = 0; i < digits; ++i) {
+        const u8 d = static_cast<u8>(value % 10);
+        value = static_cast<u16>(value / 10);
+        plot_glyph2x(static_cast<u8>(0x10 + d),
+                     static_cast<u16>(px + (digits - 1 - i) * kCharW2x), py, color);
+    }
+}
+
+// Draw one room tile (index) as an 8-tall, 4-wide overlay cell at (col,row-in-screen).
+static void draw_tile(u8 code, u8 col, u8 screen_row) {
+    auto& g = Game::gfx();
+    const u16 px = cell_px(col), py = cell_py(screen_row);
+    switch (code) {
+        case kWallA:
+        case kWallB:
+            g.fill_rect(px, py, kCellW, kCellH, pal::kWallLite);     // brick face
+            g.fill_rect(px, static_cast<u16>(py + 3), kCellW, 1, pal::kWallDark); // mortar
+            g.fill_rect(px, static_cast<u16>(py + 7), kCellW, 1, pal::kWallDark);
+            break;
+        case 0x03:  // floor dot
+            g.fill_rect(px, py, kCellW, kCellH, pal::kFloorBg);
+            g.plot(static_cast<u16>(px + 1), static_cast<u16>(py + 4), pal::kFloorDot);
+            break;
+        default:    // blank floor
+            g.fill_rect(px, py, kCellW, kCellH, pal::kFloorBg);
+            break;
+    }
+}
+
+// Redraw a single play-area cell from the baked room (used to erase explosions /
+// GET READY back to the room). screen_row = room row + 1 (HUD occupies row 0).
+static void restore_room_cell(u8 col, u8 room_row) {
+    draw_tile(kRoom.t[room_row][col], col, static_cast<u8>(room_row + 1));
+}
+
+// Draw the whole room with a handful of blitter rectangles (mirrors make_room's
+// structure) instead of ~920 per-cell ops + ~200 dot plots — far fewer blitter
+// round-trips, which the overlay compositor shares. Play rows map to screen rows
+// (room row r -> screen row r+1, below the HUD). Floor dots are omitted (texture only).
+static void draw_room_fast() {
+    auto& g = Game::gfx();
+    g.fill_rect(cell_px(0), cell_py(1), 40 * kCellW, 23 * kCellH, pal::kFloorBg); // floor
+    g.fill_rect(cell_px(0),  cell_py(1),  40 * kCellW, kCellH, pal::kWallLite);   // top wall
+    g.fill_rect(cell_px(0),  cell_py(23), 40 * kCellW, kCellH, pal::kWallLite);   // bottom
+    g.fill_rect(cell_px(0),  cell_py(1),  kCellW, 23 * kCellH, pal::kWallLite);   // left
+    g.fill_rect(cell_px(39), cell_py(1),  kCellW, 23 * kCellH, pal::kWallLite);   // right
+    // Interior bars (same coords as make_room): outer in wall-lite, inner in wall-dark.
+    const u8 ys1[2] = {5, 17}, xs1[2] = {8, 28};
+    for (u8 a = 0; a < 2; ++a)
+        for (u8 b = 0; b < 2; ++b)
+            g.fill_rect(cell_px(xs1[b]), cell_py(static_cast<u8>(ys1[a] + 1)),
+                        4 * kCellW, kCellH, pal::kWallLite);
+    const u8 ys2[2] = {9, 13}, xs2[2] = {14, 22};
+    for (u8 a = 0; a < 2; ++a)
+        for (u8 b = 0; b < 2; ++b)
+            g.fill_rect(cell_px(xs2[b]), cell_py(static_cast<u8>(ys2[a] + 1)),
+                        4 * kCellW, kCellH, pal::kWallDark);
+}
+
+// Publish the freshly-drawn master canvas to the live display page(s).
+static void overlay_present_master() { Game::overlay_publish_background(); }
+#endif // EDGE_VBXE
 
 static void player_init() {
     // Centre of the 40x23 play area (col 20, row 11 — open floor in the room).
@@ -401,7 +675,10 @@ struct Enemy {
 };
 static engine::SlotPool<Enemy, 3> enemies;
 
-// 8x8 blocky-robot silhouette (1bpp) — deliberately unlike the humanoid player.
+// 8x8 blocky-robot silhouette — deliberately unlike the humanoid player. Baseline:
+// 1bpp P/M. VBXE: the same silhouette as menacing 8bpp pixel art — red body
+// (palette-1 idx 4), orange trim (5), and glowing yellow eyes (6); idx 0 transparent.
+#ifndef EDGE_VBXE
 constexpr auto enemy_shape = engine::make_sprite<8, 8>({
     0b10011001,   // X..XX..X  antennae
     0b11111111,   // XXXXXXXX  head
@@ -412,6 +689,18 @@ constexpr auto enemy_shape = engine::make_sprite<8, 8>({
     0b10100101,   // X.X..X.X  legs
     0b01000010,   // .X....X.  feet
 });
+#else
+constexpr auto enemy_shape = engine::make_pixel_sprite<8, 8>({
+    5,0,0,5,5,0,0,5,   // antennae (orange)
+    4,4,4,4,4,4,4,4,   // head
+    4,6,4,4,4,4,6,4,   // glowing eyes
+    4,4,4,4,4,4,4,4,
+    4,4,5,4,4,5,4,4,   // body (orange trim)
+    4,5,4,4,4,4,5,4,
+    5,0,4,0,0,4,0,5,   // legs
+    0,5,0,0,0,0,5,0,   // feet
+});
+#endif
 
 static constexpr u8 kEnemyColor    = 0x34;   // red — contrasts the white player + play palette
 static constexpr u8 kEnemyStep     = 2;      // pixels moved per move tick (matches kPlayerSpeed)
@@ -504,6 +793,29 @@ static constexpr u8  kBulletW      = 4;       // bullet collision box width
 static constexpr u8  kIFrames      = 120;     // ~2 s invincibility after a hit
 static constexpr u16 kScorePerKill = 10;
 
+// Bullets render differently per backend: baseline uses the P/M hardware missiles
+// (ADR-025), but on the VBXE overlay those P/M projectiles sit UNDER the opaque
+// overlay and are invisible — so the overlay draws bullets as small blitter sprites
+// in slots 4..7 (4 + pool index; the player is 0, enemies 1..3 — max_sprites=8).
+#ifdef EDGE_VBXE
+static constexpr u8 kBulletSlotBase = 4;
+constexpr auto kBulletShape = engine::make_pixel_sprite<4, 4>({
+    0, 3, 3, 0,
+    3, 3, 3, 3,
+    3, 3, 3, 3,
+    0, 3, 3, 0,
+});
+static void bullet_show(u8 idx, u8 x, u8 y) {
+    Game::sprite(static_cast<u8>(kBulletSlotBase + idx), kBulletShape, x, y);
+}
+static void bullet_hide(u8 idx) {
+    Game::sprite_hide(static_cast<u8>(kBulletSlotBase + idx));
+}
+#else
+static void bullet_show(u8 idx, u8 x, u8 y) { Game::missile(idx, x, y, kBulletHeight); }
+static void bullet_hide(u8 idx)             { Game::missile_hide(idx); }
+#endif
+
 // Axis-aligned box overlap. Promotes to int for the +w/+h so u8 edges don't wrap.
 static bool boxes_overlap(u8 ax, u8 ay, u8 aw, u8 ah,
                           u8 bx, u8 by, u8 bw, u8 bh) {
@@ -534,7 +846,9 @@ static u8   g_death_timer= 0;     // freeze frames before the game-over screen (
 static constexpr u8  kGetReadyFrames  = 90;    // ~1.5 s orientation pause at play start
 static constexpr u8  kDeathPause      = 60;    // ~1 s frozen-room beat before game-over
 static constexpr u8  kKillsPerLevel   = 8;     // kills between level (difficulty) ticks
-static constexpr u8  kFlashColor      = 0x0E;  // white play-area flash on player damage
+#ifndef EDGE_VBXE
+static constexpr u8  kFlashColor      = 0x0E;  // white play-area flash on player damage (ANTIC COLBK)
+#endif
 // "GET READY" is 9 chars (the charset has no '!' glyph — '!' maps to the wall tile),
 // centred at col 15 (cols 15..23), on row 9 so it clears the player at centre row 11.
 static constexpr u8  kGetReadyRow     = 9;
@@ -564,6 +878,47 @@ constexpr auto kDamageSfx = engine::make_sound({
 // HUD redraw eats the headroom a live bullet's work needs — push play_step over one
 // frame and the loop drops frames, dropping fire-button edges with them. So redraw
 // the score only when it changes (a kill) and the hearts only on a life change.
+// Level/wave readout in the HUD gap between SCORE (cols 0..11) and the hearts
+// (cols 36..38). Event-driven like the score — redrawn only when the level ticks.
+static constexpr u8 kHudLevelCol = 18;   // "LV:" label; digits start at +3
+
+#ifdef EDGE_VBXE
+// Overlay HUD: redraw the changed field into the master canvas (clearing it to the
+// HUD background first) and republish. HUD fields change only on a kill / life /
+// level event, so the whole-master republish cost lands rarely, not per frame.
+static void hud_draw_score() {
+    Game::gfx().fill_rect(cell_px(7), cell_py(0), 5 * kCellW, kCellH, pal::kHudBg);
+    draw_num(7, 0, g_score, 5, pal::kText);
+    overlay_present_master();
+}
+static void hud_draw_lives() {
+    Game::gfx().fill_rect(cell_px(36), cell_py(0), 3 * kCellW, kCellH, pal::kHudBg);
+    for (u8 i = 0; i < player.lives; ++i)
+        plot_glyph(0x05, cell_px(static_cast<u8>(36 + i)), cell_py(0), pal::kHeart);
+    overlay_present_master();
+}
+static void hud_draw_level() {
+    Game::gfx().fill_rect(cell_px(kHudLevelCol + 3), cell_py(0), 2 * kCellW, kCellH, pal::kHudBg);
+    draw_num(static_cast<u8>(kHudLevelCol + 3), 0, g_level, 2, pal::kText);
+    overlay_present_master();
+}
+
+// Overlay explosion: stamp the explosion glyph into the master cell and republish.
+static void spawn_explosion(u8 sprite_x, u8 sprite_y) {
+    if (sprite_x < kPlayLeftX || sprite_y < kPlayTopY) return;
+    const u8 col = static_cast<u8>((sprite_x - kPlayLeftX) / kCellW);
+    const u8 row = static_cast<u8>((sprite_y - kPlayTopY) / kCellH);
+    if (col >= 40 || row >= 23) return;
+    if (Explosion* e = explosions.acquire()) {
+        e->col = col; e->row = row; e->timer = kExplosionFrames;
+        Game::gfx().fill_rect(cell_px(col), cell_py(static_cast<u8>(row + 1)),
+                              kCellW, kCellH, pal::kFloorBg);
+        plot_glyph(kExplosionTile, cell_px(col), cell_py(static_cast<u8>(row + 1)),
+                   pal::kExploRing);
+        overlay_present_master();
+    }
+}
+#else
 static void hud_draw_score() {
     Game::region<PlayScreen, 0>().print_num(7, 0, g_score, 5);
 }
@@ -573,9 +928,6 @@ static void hud_draw_lives() {
     for (u8 i = 0; i < player.lives; ++i)
         hud.put_char(static_cast<u8>(36 + i), 0, 0x05);
 }
-// Level/wave readout in the HUD gap between SCORE (cols 0..11) and the hearts
-// (cols 36..38). Event-driven like the score — redrawn only when the level ticks.
-static constexpr u8 kHudLevelCol = 18;   // "LV:" label; digits start at +3
 static void hud_draw_level() {
     Game::region<PlayScreen, 0>().print_num(kHudLevelCol + 3, 0, g_level, 2);
 }
@@ -591,6 +943,7 @@ static void spawn_explosion(u8 sprite_x, u8 sprite_y) {
         Game::region<PlayScreen, 1>().put_char(col, row, kExplosionTile);
     }
 }
+#endif
 
 // ── Screen entry + per-frame callbacks ──────────────────────────────────────
 
@@ -634,6 +987,7 @@ static constexpr u8 kTitleRowEdge  = 10;   // EDGE ARENA
 static constexpr u8 kTitleRowPress = 14;   // PRESS FIRE (blinks)
 static constexpr u8 kTitleRowInstr = 16;   // instruction line
 static constexpr u8 kTitleRowBest  = 18;   // BEST: nnnnn
+#ifndef EDGE_VBXE
 static constexpr u8 kTitleTextColor = 0x0E; // white — title default and HUD/game-over text
 
 // Bright hues against the dark-blue (0x92) title background: white, cyan, green,
@@ -641,8 +995,24 @@ static constexpr u8 kTitleTextColor = 0x0E; // white — title default and HUD/g
 static constexpr u8 kTitleHues[]      = {0x0E, 0x9A, 0xCA, 0x1A, 0x2A, 0x4A};
 static constexpr u8 kTitleHueCount    = sizeof(kTitleHues);
 static constexpr u8 kTitleColorPeriod = 8;   // frames between hue steps (slow cycle)
+#endif
 
 static void title_enter() {
+#ifdef EDGE_VBXE
+    // Draw the whole title into the overlay master once (PRESS FIRE static — no
+    // per-frame republish; the blink/colour-cycle are cosmetic and skipped here).
+    auto& g = Game::gfx();
+    g.clear(pal::kFloorBg);
+    draw_text2x(centre_px(10), row_py(kTitleRowEdge),  "EDGE ARENA", pal::kPlayerHi);
+    draw_text2x(centre_px(10), row_py(kTitleRowPress), "PRESS FIRE", pal::kEnemyTrim);
+    draw_text2x(centre_px(31), row_py(kTitleRowInstr), "JOYSTICK TO MOVE  FIRE TO SHOOT", pal::kText);
+    if (g_high_score > 0) {
+        draw_text2x(centre_px(11), row_py(kTitleRowBest), "BEST: 00000", pal::kText);
+        draw_num2x(static_cast<u16>(centre_px(11) + 6 * kCharW2x), row_py(kTitleRowBest),
+                   g_high_score, 5, pal::kText);
+    }
+    overlay_present_master();
+#else
     auto& v = Game::region<TitleScreen, 0>();
     fill_region(v, 0x00);
     v.print(centre(10), kTitleRowEdge, "EDGE ARENA");
@@ -652,11 +1022,25 @@ static void title_enter() {
         v.print(centre(11), kTitleRowBest, "BEST: 00000");
         v.print_num(static_cast<u8>(centre(11) + 6), kTitleRowBest, g_high_score, 5);
     }
+#endif
     g_title_frames = 0;
     arm_fire();
 }
 
 static bool title_step(const engine::Input& in) {
+#ifdef EDGE_VBXE
+    // Blink "PRESS FIRE" every 30 frames; republish only on the toggle (2x/sec).
+    const bool show = ((g_title_frames / 30) & 1) == 0;
+    static bool last_show = false;
+    if (g_title_frames == 0) last_show = !show;     // force a redraw on (re)enter
+    if (show != last_show) {
+        last_show = show;
+        if (show) draw_text2x(centre_px(10), row_py(kTitleRowPress), "PRESS FIRE", pal::kEnemyTrim);
+        else      Game::gfx().fill_rect(centre_px(10), row_py(kTitleRowPress),
+                                        10 * kCharW2x, kCellH, pal::kFloorBg);
+        overlay_present_master();
+    }
+#else
     auto& v = Game::region<TitleScreen, 0>();
     // Blink "PRESS FIRE" on row 14 every 30 frames.
     const bool show = ((g_title_frames / 30) & 1) == 0;
@@ -665,11 +1049,30 @@ static bool title_step(const engine::Input& in) {
     // Animate the whole title: rotate COLPF0 through the hue table every period. The VBI
     // copies this shadow to the hardware register, so all title text changes colour.
     Platform::hal::set_color_pf(0, kTitleHues[(g_title_frames / kTitleColorPeriod) % kTitleHueCount]);
+#endif
     ++g_title_frames;
     return fire_edge(in);
 }
 
 static void play_enter() {
+#ifdef EDGE_VBXE
+    // Draw the whole play screen into the overlay master: HUD bar (row 0), the baked
+    // room (rows 1..23), HUD labels/values, then publish once. Sprites composite over
+    // this each frame; dynamic HUD/explosions redraw + republish on change.
+    // Draw the whole play screen into the overlay master: HUD bar (row 0), the baked
+    // room (rows 1..23), HUD labels/values, then publish once. Sprites composite over
+    // this each frame; dynamic HUD/explosions redraw + republish on change.
+    auto& g = Game::gfx();
+    g.clear(pal::kFloorBg);                                                  // whole canvas (covers margins)
+    g.fill_rect(cell_px(0), cell_py(0), 40 * kCellW, kCellH, pal::kHudBg);   // HUD bar
+    draw_room_fast();
+    draw_text(0, 0, "SCORE: 00000", pal::kText);
+    draw_text(kHudLevelCol, 0, "LV:01", pal::kText);
+    for (u8 c = 36; c <= 38; ++c) plot_glyph(0x05, cell_px(c), cell_py(0), pal::kHeart);
+    // GET READY (play row 9 -> screen row 10).
+    draw_text(kGetReadyCol, static_cast<u8>(kGetReadyRow + 1), "GET READY", pal::kText);
+    overlay_present_master();
+#else
     auto& hud  = Game::region<PlayScreen, 0>();
     auto& play = Game::region<PlayScreen, 1>();
     fill_region(hud, 0x00);
@@ -691,6 +1094,7 @@ static void play_enter() {
     // is black now; the death-flash raises it briefly mid-round.
     g_play_bg = 0x00;
     Game::interrupts.add_raster_hook(kSplitScanline, &play_palette_split);
+#endif
 
     player_init();
     // Draw the player up front so it's visible during the GET READY pause (player_update
@@ -714,37 +1118,52 @@ static void play_enter() {
     g_new_high   = false;
 
     // GET READY orientation pause: hold the room/player a beat before action starts.
-    play.print(kGetReadyCol, kGetReadyRow, "GET READY");
+#ifndef EDGE_VBXE
+    play.print(kGetReadyCol, kGetReadyRow, "GET READY");   // overlay draws it in the branch above
+#endif
     g_get_ready = kGetReadyFrames;
 
     arm_fire();
 }
 
 static bool play_step(const engine::Input& in) {
+#ifndef EDGE_VBXE
     auto& play = Game::region<PlayScreen, 1>();
+#endif
 
     // Death pause: lives just hit 0. Freeze every entity (skip all updates so sprites
     // hold their last-committed positions) while the room stays on screen, then signal
     // game-over when the beat expires. Checked first so we can't re-enter GET READY.
     if (g_death_timer > 0) {
+#ifndef EDGE_VBXE
         g_play_bg = 0x00;                  // clear any lingering damage flash
+#endif
         return (--g_death_timer == 0);     // transition only when the freeze ends
     }
 
     // GET READY countdown: hold before action starts. Blocks spawns/movement/fire; on
     // the final frame, erase "GET READY" back to the baked room tiles (cols 15..23).
     if (g_get_ready > 0) {
-        if (--g_get_ready == 0)
+        if (--g_get_ready == 0) {
+#ifdef EDGE_VBXE
+            for (u16 c = kGetReadyCol; c < kGetReadyClearEnd; ++c)
+                restore_room_cell(static_cast<u8>(c), kGetReadyRow);
+            overlay_present_master();
+#else
             for (u16 c = kGetReadyCol; c < kGetReadyClearEnd; ++c)
                 play.put_char(static_cast<u8>(c), kGetReadyRow, kRoom.t[kGetReadyRow][c]);
+#endif
+        }
         return false;
     }
 
     player_update(in);
 
+#ifndef EDGE_VBXE
     // Damage flash: white play-area background for the first 4 frames of invincibility.
     // The play DLI reads g_play_bg every frame, so the flash needs no extra timer.
     g_play_bg = (player.iframe >= kIFrames - 4) ? kFlashColor : 0x00;
+#endif
 
     // Fire: launch a bullet in the last-moved direction (missile index == pool slot).
     if (fire_edge(in) && !bullets.full()) {
@@ -767,10 +1186,10 @@ static bool play_step(const engine::Input& in) {
         b.x = static_cast<u8>(b.x + b.dx);
         b.y = static_cast<u8>(b.y + b.dy);
         if (is_blocked(tile_at(b.x, b.y))) {
-            Game::missile_hide(idx);
+            bullet_hide(idx);
             bullets.release(idx);
         } else {
-            Game::missile(idx, b.x, b.y, kBulletHeight);
+            bullet_show(idx, b.x, b.y);
         }
     });
 
@@ -809,7 +1228,12 @@ static bool play_step(const engine::Input& in) {
     for (u8 i = 0; i < explosions.count();) {
         Explosion& ex = explosions[i];
         if (--ex.timer == 0) {
+#ifdef EDGE_VBXE
+            restore_room_cell(ex.col, ex.row);
+            overlay_present_master();
+#else
             play.put_char(ex.col, ex.row, kRoom.t[ex.row][ex.col]);
+#endif
             explosions.release(i);
         } else {
             ++i;
@@ -836,7 +1260,7 @@ static bool play_step(const engine::Input& in) {
                 spawn_explosion(e.x, e.y);
                 Game::sprite_hide(s);
                 enemies.release(ei);
-                Game::missile_hide(idx);
+                bullet_hide(idx);
                 bullets.release(idx);
                 g_score = static_cast<u16>(g_score + kScorePerKill);
                 hud_draw_score();
@@ -878,6 +1302,18 @@ static bool play_step(const engine::Input& in) {
 }
 
 static void gameover_enter() {
+#ifdef EDGE_VBXE
+    auto& g = Game::gfx();
+    g.clear(pal::kFloorBg);
+    draw_text2x(centre_px(9), row_py(8), "GAME OVER", pal::kEnemyTrim);
+    if (g_new_high) draw_text2x(centre_px(14), row_py(10), "NEW HIGH SCORE", pal::kEnemyEye);
+    draw_text2x(centre_px(12), row_py(12), "SCORE: 00000", pal::kText);
+    draw_num2x(static_cast<u16>(centre_px(12) + 7 * kCharW2x), row_py(12), g_score, 5, pal::kText);
+    draw_text2x(centre_px(12), row_py(13), "BEST:  00000", pal::kText);
+    draw_num2x(static_cast<u16>(centre_px(12) + 7 * kCharW2x), row_py(13), g_high_score, 5, pal::kText);
+    draw_text2x(centre_px(10), row_py(16), "PRESS FIRE", pal::kText);
+    overlay_present_master();
+#else
     auto& v = Game::region<GameOverScreen, 0>();
     fill_region(v, 0x00);
     v.print(centre(9), 8, "GAME OVER");
@@ -891,6 +1327,7 @@ static void gameover_enter() {
     v.print(centre(12), 13, "BEST:  00000");
     v.print_num(static_cast<u8>(centre(12) + 7), 13, g_high_score, 5);
     v.print(centre(10), 16, "PRESS FIRE");
+#endif
     arm_fire();
 }
 
@@ -900,37 +1337,69 @@ static bool gameover_step(const engine::Input& in) {
 
 // ── Entry point ──────────────────────────────────────────────────────────
 
+#ifdef EDGE_VBXE
+// No-VBXE fallback: this build renders entirely through the VBXE overlay, so on a
+// machine without VBXE there is nothing to show. Detect the board BEFORE bringing up
+// the overlay; if absent, write a message on the OS GR.0 text screen (still up at
+// program start, pointed to by SAVMSC $58/$59 — ANTIC internal codes match
+// ascii_to_internal) and halt, instead of leaving a black/garbage screen.
+static void require_vbxe_or_halt() {
+    if (V::detect<VBXECfg>()) return;
+    u8* scr = *reinterpret_cast<u8* volatile*>(0x58);   // SAVMSC -> GR.0 screen RAM
+    const char msg[] = "VBXE REQUIRED";
+    for (u8 i = 0; msg[i]; ++i) scr[i] = M::ascii_to_internal(msg[i]);
+    for (;;) {}
+}
+#endif
+
 int main() {
-    Game::init(arena_charset);
+#ifdef EDGE_VBXE
+    require_vbxe_or_halt();   // must run before Game::init() switches off the OS screen
+#endif
+    Game::init(arena_charset);   // charset unused on the VBXE overlay path, harmless there
+#ifdef EDGE_VBXE
+    // Tier 2: pure-overlay screens (ANTIC playfield off — no bus contention). Upload
+    // the palette; all content (room, HUD, text) is drawn into the overlay master by
+    // the per-screen *_enter callbacks. No ANTIC charset bind, no HUD/DLI palette.
+    load_overlay_palette();
+#else
     set_hud_palette();   // OS colour shadows; persists across frames/screens.
 
     // Normal-width player objects, so the 8px sprite spans 8 color clocks (= 2
     // Mode 4 cells), matching the kSpriteW/kCellW collision mapping.
     for (u8 p = 0; p < 4; ++p)
         Platform::hal::set_player_size(p, M::sizep::NORMAL);
+#endif
 
     for (;;) {
         Game::set_screen<TitleScreen>(&title_enter);
         Game::run_until(title_step);
+#ifndef EDGE_VBXE
         // The title animation left COLPF0 on some hue; restore white so the HUD score and
         // the game-over text (all COLPF0, no DLI) render readable.
         Platform::hal::set_color_pf(0, kTitleTextColor);
+#endif
 
         Game::set_screen<PlayScreen>(&play_enter);
         Game::run_until(play_step);
+#ifndef EDGE_VBXE
         Game::interrupts.remove_raster_hook(kSplitScanline);
+#endif
         Game::sprite_hide(0);   // don't carry the player onto title / game-over
         // Likewise hide every live enemy and empty the pool for the next round.
         enemies.for_each_indexed(
             [](u8 idx, Enemy&) { Game::sprite_hide(static_cast<u8>(idx + 1)); });
         enemies.clear();
-        // Retire bullets (hide their missiles, next commit clears the strip) and
-        // restore any explosion tiles still showing, then empty both pools.
-        bullets.for_each_indexed([](u8 idx, Bullet&) { Game::missile_hide(idx); });
+        // Retire bullets (hide their projectiles, next commit clears the strip) and
+        // empty both pools. On the overlay the next play_enter redraws the whole room,
+        // so explosion cells need no restore here.
+        bullets.for_each_indexed([](u8 idx, Bullet&) { bullet_hide(idx); });
         bullets.clear();
+#ifndef EDGE_VBXE
         explosions.for_each([](Explosion& ex) {
             Game::region<PlayScreen, 1>().put_char(ex.col, ex.row, kRoom.t[ex.row][ex.col]);
         });
+#endif
         explosions.clear();
 
         Game::set_screen<GameOverScreen>(&gameover_enter);

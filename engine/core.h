@@ -167,9 +167,15 @@ public:
             // antic_playfield(false): set_screen keeps ANTIC DMA off for it, so
             // the playfield never contends the VRAM bus (see screen.h).
             Platform::hal::overlay_init();
-        } else {
-            setup_sprites();
         }
+        // Arm the P/M base + DMA on every backend. On baseline this is the hardware
+        // sprite path; on a blitter backend the players composite in VRAM instead,
+        // but the four hardware MISSILES are still used directly (ADR-025), so they
+        // need P/M DMA armed to render below the overlay. Done before set_screen so
+        // the P/M DMA bits survive its SDMCTL rewrite (the screen manager preserves
+        // them via the PM_DMA_MASK partition — see hal.h SDMCTL note). The empty
+        // player strips on a blitter backend simply draw nothing.
+        setup_sprites();
         set_screen<InitialScreen>([] {});
         // The ANTIC charset buffer is only used by the baseline tile path; the
         // VBXE overlay-font upload to VRAM lands with the 4b text path.
@@ -187,9 +193,10 @@ public:
             // Pure-overlay layouts no longer need a manual antic_playfield(false):
             // set_screen keeps ANTIC DMA off for them (see screen.h).
             Platform::hal::overlay_init();
-        } else {
-            setup_sprites();
         }
+        // Arm P/M base + DMA on every backend (hardware sprites on baseline; the
+        // hardware missiles on a blitter backend — see init(cs) above).
+        setup_sprites();
         set_screen<InitialScreen>([] {});
         interrupts.arm_dispatch();
         sprites.arm_multiplex_dli();   // bind the raw zone-boundary DLI (baseline)

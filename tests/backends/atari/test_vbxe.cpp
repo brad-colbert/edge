@@ -69,6 +69,15 @@ static_assert((0x12345u & v::MemacWindow<CfgDefault>::Window::offset_mask) == 0x
 static_assert(v::MemacWindow<Cfg8K>::window_bytes == 8192,         "8K window");
 static_assert(v::MemacWindow<Cfg8K>::Window::bank_shift == 13,     "8K -> shift 13");
 
+// ── 2b. VBXE presence-detection decision logic (detect_matches) ──────
+// A real board echoes BOTH distinct probe values; an absent $D6xx region floats.
+// Requiring both defeats a constant float AND a single retained-write value.
+static_assert(v::detect_matches(0x85, 0x85, 0x8A, 0x8A) == true,   "present: both echo");
+static_assert(v::detect_matches(0xFF, 0x85, 0xFF, 0x8A) == false,  "absent: constant 0xFF float");
+static_assert(v::detect_matches(0xD6, 0x85, 0xD6, 0x8A) == false,  "absent: $D6 address float");
+static_assert(v::detect_matches(0x85, 0x85, 0x85, 0x8A) == false,  "absent: bus retains first write");
+static_assert(v::detect_matches(0x8A, 0x85, 0x8A, 0x8A) == false,  "absent: bus retains... only 2nd matches");
+
 // ── 3. MEMAC-B window geometry + bank math ───────────────────────────
 static_assert(v::is_memac_b<v::MEMAC_B>::value == true,            "is_memac_b<MEMAC_B>");
 static_assert(v::MemacWindow<CfgB>::is_b == true,                  "CfgB is MEMAC-B");
@@ -251,6 +260,11 @@ static void test_memac_a() {
     CHECK(v::MemacWindow<CfgDefault>::cpu_base == 0xB000);
     CHECK(v::MemacWindow<CfgDefault>::window_bytes == 4096);
     CHECK(v::MemacWindow<Cfg8K>::window_bytes == 8192);
+    // VBXE presence-detection decision logic (floating-bus robustness).
+    CHECK(v::detect_matches(0x85, 0x85, 0x8A, 0x8A) == true);
+    CHECK(v::detect_matches(0xFF, 0x85, 0xFF, 0x8A) == false);
+    CHECK(v::detect_matches(0x85, 0x85, 0x85, 0x8A) == false);
+    CHECK(v::detect_matches(0xD6, 0x85, 0xD6, 0x8A) == false);
 }
 
 static void test_memac_b() {
