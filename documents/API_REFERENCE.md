@@ -1,6 +1,6 @@
 # EDGE API Reference
 
-> **Applies to EDGE v0.4.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
+> **Applies to EDGE v0.4.1** — see [CHANGELOG](../CHANGELOG.md) for version history.
 
 This reference is organized in two layers:
 
@@ -378,6 +378,9 @@ General contract:
 - `sprite` updates logical buffered sprite state
 - the backend commit happens later, not immediately at the call site
 - hidden sprites are excluded from rendering and multiplex assignment
+- `missile` drives a separate, simpler projectile object on every backend; on a
+  blitter platform it is the hardware P/M projectile rendered *below* the overlay
+  (see the platform guide for the visibility caveat under an opaque overlay)
 
 ### Collision Snapshot
 

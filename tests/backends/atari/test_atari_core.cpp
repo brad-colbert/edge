@@ -67,6 +67,7 @@ struct MockHal {
     static void set_color_pm(u8, u8) {}
     static uint16_t sprite_strip_offset(u8, u8 s) { return static_cast<uint16_t>(s * 256); }
     static uint16_t sprite_strip_size(u8) { return 256; }
+    static uint16_t missile_strip_offset(u8) { return 768; }
     static uint16_t raster_dispatch_addr() { return 0xD15A; }
     static uint16_t raster_terminal_addr() { return 0xD160; }
     static void program_raster_lines(u8*, u16, const u8*, u8) {}

@@ -1,6 +1,6 @@
 # EDGE Atari Platform Guide
 
-> **Applies to EDGE v0.4.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
+> **Applies to EDGE v0.4.1** — see [CHANGELOG](../CHANGELOG.md) for version history.
 
 This document describes the first concrete EDGE backend: the Atari 8-bit family.
 
@@ -136,6 +136,12 @@ Atari-specific behavior behind those calls:
 - `make_sprite` shapes (`Packed1bpp`) render as P/M graphics; `make_pixel_sprite`
   shapes (`Pixel8bpp`, full colour) require the VBXE path and render through the
   overlay blitter (see "VBXE / Graphics" below)
+- `Game::missile()` always drives the GTIA hardware missiles, on **both** backends.
+  On the VBXE overlay backend the logical sprites composite in VRAM but the missiles
+  remain P/M projectiles, rendered on the P/M layer *below* the overlay. With an
+  opaque overlay they are therefore hidden — a full-overlay game that wants visible
+  projectiles should draw them as `make_pixel_sprite` blitter sprites instead (the
+  `arena_vbxe` demo does exactly this for its bullets)
 
 Useful multiplex queries:
 
@@ -190,6 +196,33 @@ using Platform = atari::Platform<
 Palette entries are uploaded with the power-user helper
 `atari::vbxe::set_color<Cfg>(palette, index, r, g, b)` from
 `<engine/platform/atari/vbxe.h>`.
+
+> **Place the MEMAC window clear of the call stack.** The CPU reaches VRAM through a
+> banked MEMAC aperture (default MEMAC-A at `$B000-$BFFF`). While the window is
+> enabled, *every* CPU access in that range goes to VRAM instead of RAM — including
+> the llvm-mos soft (call) stack, which the atari8-dos runtime places at the top of
+> RAM (often inside the default window). An overlapping window aliases the call stack
+> onto VRAM on every VRAM access and corrupts both the display and the program
+> (progressive on-screen noise, then a crash). Choose a window base in free RAM clear
+> of the stack and heap — e.g. `MEMAC_A_Cfg<0xA0>` (`$A000`), as `arena_vbxe` does —
+> and verify against the linker `.map`; diagnose a suspected collision by reading the
+> soft-stack pointer at ZP `$80`/`$81`.
+
+### Detecting VBXE at runtime
+
+A program built for the VBXE overlay shows nothing on a machine without the board.
+Probe for it before bringing the overlay up:
+
+```cpp
+#include <engine/platform/atari/vbxe.h>
+if (!atari::vbxe::detect<Cfg>()) {
+    // No VBXE — fall back / show a message on the OS text screen and halt.
+}
+```
+
+`detect()` reads back the MEMAC bank-select register (a real board echoes the written
+bank with its global-enable bit; absent `$D6xx` I/O floats); it uses two distinct
+probe values plus a bus-flush so a floating bus can't produce a false positive.
 
 ### Hardware text overlay (`Mode::Text_80`)
 

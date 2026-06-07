@@ -11,6 +11,41 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-06-06
+
+### Added
+- **Arena demo — VBXE "Tier 2" variant (`arena_vbxe`):** the same Berzerk-style
+  game as the baseline `arena_base`, rendered entirely through the VBXE overlay
+  (room, HUD, and text drawn into the bitmap; multi-colour pixel sprites for the
+  player, enemies, and bullets composited over it; ANTIC playfield off). Built from
+  the one `demo/arena/arena.cpp` source with `-DEDGE_VBXE=1`; all game logic, room
+  layout, sound, collision, and difficulty are shared with the baseline. New
+  `CMakeLists.txt` target `arena_vbxe`.
+- `atari::vbxe::detect<Config>()` — runtime VBXE presence probe (MEMAC bank-select
+  read-back signature, with floating-bus robustness: two distinct probe values + a
+  bus-flush). `arena_vbxe` uses it to print "VBXE REQUIRED" on the OS text screen and
+  halt on a machine without VBXE, rather than showing a black/garbage overlay. Pure
+  decision logic split out as `detect_matches()` and unit-tested.
+
+### Changed
+- P/M **hardware missiles now render on the blitter (VBXE) backend** too. The missile
+  half of `SpriteManager::commit_pm()` is factored into `commit_missiles()` and called
+  from both `commit_pm()` (unchanged baseline behaviour) and `commit_blitter()`; the
+  blitter init path now also arms P/M DMA. Projectiles stay direct P/M on both
+  backends (ADR-025); see ADR-029.
+- `OverlayHal::blit_rect()` / `blit_copy()` now wait for the blitter to be idle
+  **before** submitting (not only after). A main-thread bitmap draw could otherwise
+  overwrite the BCB queue while an async compositor blit was still in flight.
+
+### Fixed
+- **VBXE overlay corruption + crash (progressive on-screen noise, then a JAM, ~5 s
+  in):** the default MEMAC-A window (`$B000-$BFFF`) overlapped the llvm-mos soft
+  (call) stack (~`$BC01`). Enabling the window for any VRAM access aliased the call
+  stack onto VRAM, so every overlay operation slowly corrupted both the displayed
+  image and the program's own stack until it crashed. `arena_vbxe` places its window
+  at `$A000` (free RAM between heap and stack). Hardware-diagnosed via the soft-stack
+  pointer (`$80`/`$81`) sitting inside the window. See ADR-030 / CONSTRAINTS.md.
+
 ## [0.4.0] - 2026-06-05
 
 ### Added
