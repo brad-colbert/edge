@@ -127,21 +127,20 @@ if(EDGE_BUILD_DEMO)
     target_link_options(multiplex_demo PRIVATE
         "LINKER:--Map=$<TARGET_FILE_DIR:multiplex_demo>/multiplex_demo.map")
 
-    # Arena demo scaffold — independent .xex (constexpr in-source charset).
-    add_executable(arena_base demo/arena/arena.cpp)
-    target_compile_options(arena_base PRIVATE
+    # Arena demo — native ANTIC/GTIA build (constexpr in-source charset).
+    add_executable(arena_native demo/arena/arena_native.cpp)
+    target_compile_options(arena_native PRIVATE
         -std=c++20 -fno-exceptions -fno-rtti -O2 -Wall -Wextra)
-    target_include_directories(arena_base PRIVATE ${CMAKE_SOURCE_DIR})
-    set_target_properties(arena_base PROPERTIES OUTPUT_NAME "arena_base.xex")
-    target_link_options(arena_base PRIVATE
-        "LINKER:--Map=$<TARGET_FILE_DIR:arena_base>/arena_base.map")
+    target_include_directories(arena_native PRIVATE ${CMAKE_SOURCE_DIR})
+    set_target_properties(arena_native PROPERTIES OUTPUT_NAME "arena_native.xex")
+    target_link_options(arena_native PRIVATE
+        "LINKER:--Map=$<TARGET_FILE_DIR:arena_native>/arena_native.map")
 
-    # Arena demo — VBXE Tier 1 variant (same source, -DEDGE_VBXE=1): pixel sprites
-    # over the transparent ANTIC text. Run with a VBXE FX core, BASIC disabled.
-    add_executable(arena_vbxe demo/arena/arena.cpp)
+    # Arena demo — VBXE Tier 2 full-overlay build (separate source): pixel sprites
+    # over a VBXE overlay canvas. Run with a VBXE FX core, BASIC disabled.
+    add_executable(arena_vbxe demo/arena/arena_vbxe.cpp)
     target_compile_options(arena_vbxe PRIVATE
         -std=c++20 -fno-exceptions -fno-rtti -O2 -Wall -Wextra)
-    target_compile_definitions(arena_vbxe PRIVATE EDGE_VBXE=1)
     target_include_directories(arena_vbxe PRIVATE ${CMAKE_SOURCE_DIR})
     set_target_properties(arena_vbxe PROPERTIES OUTPUT_NAME "arena_vbxe.xex")
     target_link_options(arena_vbxe PRIVATE
@@ -304,42 +303,43 @@ if(MOS_ATARI8_CXX)
         VERBATIM)
     add_custom_target(atari_vbxe_sprites DEPENDS ${VBXE_SPRITES_XEX})
 
-    # ── Arena demo scaffold (arena_base.xex) ─────────────────────────────
-    #   cmake --build build --target arena_base   # -> build/arena_base.xex
+    # ── Arena demo — native ANTIC/GTIA build (arena_native.xex) ──────────
+    #   cmake --build build --target arena_native   # -> build/arena_native.xex
     # Constexpr in-source charset, so no generated charset header dependency.
-    set(ARENA_BASE_XEX ${CMAKE_BINARY_DIR}/arena_base.xex)
-    set(ARENA_BASE_MAP ${CMAKE_BINARY_DIR}/arena_base.map)
+    set(ARENA_NATIVE_XEX ${CMAKE_BINARY_DIR}/arena_native.xex)
+    set(ARENA_NATIVE_MAP ${CMAKE_BINARY_DIR}/arena_native.map)
     add_custom_command(
-        OUTPUT ${ARENA_BASE_XEX}
+        OUTPUT ${ARENA_NATIVE_XEX}
         COMMAND ${MOS_ATARI8_CXX}
                 -std=c++20 -fno-exceptions -fno-rtti -O2 -Wall -Wextra
                 -I${CMAKE_SOURCE_DIR}
-                ${CMAKE_SOURCE_DIR}/demo/arena/arena.cpp
-                -o ${ARENA_BASE_XEX}
-                -Wl,--Map=${ARENA_BASE_MAP}
-        DEPENDS ${CMAKE_SOURCE_DIR}/demo/arena/arena.cpp
+                ${CMAKE_SOURCE_DIR}/demo/arena/arena_native.cpp
+                -o ${ARENA_NATIVE_XEX}
+                -Wl,--Map=${ARENA_NATIVE_MAP}
+        DEPENDS ${CMAKE_SOURCE_DIR}/demo/arena/arena_native.cpp
+                ${CMAKE_SOURCE_DIR}/demo/arena/arena_shared.h
                 ${EDGE_ENGINE_HEADERS}
-        BYPRODUCTS ${ARENA_BASE_MAP}
-        COMMENT "Building Atari XEX demo (arena_base.xex)"
+        BYPRODUCTS ${ARENA_NATIVE_MAP}
+        COMMENT "Building Atari XEX demo (arena_native.xex)"
         VERBATIM)
-    add_custom_target(arena_base DEPENDS ${ARENA_BASE_XEX})
+    add_custom_target(arena_native DEPENDS ${ARENA_NATIVE_XEX})
 
-    # ── Arena demo — VBXE Tier 1 variant (arena_vbxe.xex) ─────────────────
+    # ── Arena demo — VBXE Tier 2 full-overlay build (arena_vbxe.xex) ──────
     #   cmake --build build --target arena_vbxe   # -> build/arena_vbxe.xex
-    # Same source as arena_base, compiled with -DEDGE_VBXE=1: pixel sprites over
-    # the transparent ANTIC text. Run with a VBXE FX core, BASIC disabled.
+    # Separate source sharing arena_shared.h: pixel sprites over a VBXE overlay
+    # canvas (ANTIC playfield off). Run with a VBXE FX core, BASIC disabled.
     set(ARENA_VBXE_XEX ${CMAKE_BINARY_DIR}/arena_vbxe.xex)
     set(ARENA_VBXE_MAP ${CMAKE_BINARY_DIR}/arena_vbxe.map)
     add_custom_command(
         OUTPUT ${ARENA_VBXE_XEX}
         COMMAND ${MOS_ATARI8_CXX}
                 -std=c++20 -fno-exceptions -fno-rtti -O2 -Wall -Wextra
-                -DEDGE_VBXE=1
                 -I${CMAKE_SOURCE_DIR}
-                ${CMAKE_SOURCE_DIR}/demo/arena/arena.cpp
+                ${CMAKE_SOURCE_DIR}/demo/arena/arena_vbxe.cpp
                 -o ${ARENA_VBXE_XEX}
                 -Wl,--Map=${ARENA_VBXE_MAP}
-        DEPENDS ${CMAKE_SOURCE_DIR}/demo/arena/arena.cpp
+        DEPENDS ${CMAKE_SOURCE_DIR}/demo/arena/arena_vbxe.cpp
+                ${CMAKE_SOURCE_DIR}/demo/arena/arena_shared.h
                 ${EDGE_ENGINE_HEADERS}
         BYPRODUCTS ${ARENA_VBXE_MAP}
         COMMENT "Building Atari XEX demo (arena_vbxe.xex)"
