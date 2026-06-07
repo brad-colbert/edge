@@ -39,6 +39,12 @@ using engine::u16;
 using engine::i8;
 namespace M = atari;
 
+// Cold path: screen setup + non-gameplay (title/game-over) callbacks. Keep these OUT
+// of the hot, -O2-inlined main loop and compile them for minimum size. The per-frame
+// path (play_step, engine frame_service) stays untouched at -O2 — only these one-shot /
+// non-gameplay functions are size-optimized, so there's no gameplay-framerate impact.
+#define EDGE_COLD [[gnu::noinline, clang::minsize]]
+
 // ── Platform + game configuration ────────────────────────────────────────
 //
 // VBXE Tier 2 variant (-DEDGE_VBXE): the SAME game, rendered ENTIRELY in the VBXE
@@ -279,7 +285,7 @@ constexpr Room kRoom = make_room();
 
 #ifndef EDGE_VBXE
 // Field map for set_color_pf: 0-3 = COLPF0-3, 4 = COLBK.
-static void set_hud_palette() {
+EDGE_COLD static void set_hud_palette() {
     Platform::hal::set_color_pf(4, 0x92);   // COLBK  : dark blue
     Platform::hal::set_color_pf(0, 0x0E);   // COLPF0 : white
     Platform::hal::set_color_pf(1, 0x1A);   // COLPF1 : yellow
@@ -467,7 +473,7 @@ namespace pal {
     constexpr u8 kExploRing = kEnemyTrim;  // reuse orange
 }
 
-static void load_overlay_palette() {
+EDGE_COLD static void load_overlay_palette() {
     V::set_color<VBXECfg>(1, pal::kPlayerBody,    0x20, 0xA0, 0xFE); // sky blue
     V::set_color<VBXECfg>(1, pal::kPlayerOutline, 0x10, 0x18, 0x40); // navy
     V::set_color<VBXECfg>(1, pal::kPlayerHi,      0xFE, 0xFE, 0xFE); // white visor
@@ -997,7 +1003,7 @@ static constexpr u8 kTitleHueCount    = sizeof(kTitleHues);
 static constexpr u8 kTitleColorPeriod = 8;   // frames between hue steps (slow cycle)
 #endif
 
-static void title_enter() {
+EDGE_COLD static void title_enter() {
 #ifdef EDGE_VBXE
     // Draw the whole title into the overlay master once (PRESS FIRE static — no
     // per-frame republish; the blink/colour-cycle are cosmetic and skipped here).
@@ -1027,7 +1033,7 @@ static void title_enter() {
     arm_fire();
 }
 
-static bool title_step(const engine::Input& in) {
+EDGE_COLD static bool title_step(const engine::Input& in) {
 #ifdef EDGE_VBXE
     // Blink "PRESS FIRE" every 30 frames; republish only on the toggle (2x/sec).
     const bool show = ((g_title_frames / 30) & 1) == 0;
@@ -1054,7 +1060,7 @@ static bool title_step(const engine::Input& in) {
     return fire_edge(in);
 }
 
-static void play_enter() {
+EDGE_COLD static void play_enter() {
 #ifdef EDGE_VBXE
     // Draw the whole play screen into the overlay master: HUD bar (row 0), the baked
     // room (rows 1..23), HUD labels/values, then publish once. Sprites composite over
@@ -1301,7 +1307,7 @@ static bool play_step(const engine::Input& in) {
     return false;
 }
 
-static void gameover_enter() {
+EDGE_COLD static void gameover_enter() {
 #ifdef EDGE_VBXE
     auto& g = Game::gfx();
     g.clear(pal::kFloorBg);
@@ -1331,7 +1337,7 @@ static void gameover_enter() {
     arm_fire();
 }
 
-static bool gameover_step(const engine::Input& in) {
+EDGE_COLD static bool gameover_step(const engine::Input& in) {
     return fire_edge(in);
 }
 
@@ -1343,7 +1349,7 @@ static bool gameover_step(const engine::Input& in) {
 // the overlay; if absent, write a message on the OS GR.0 text screen (still up at
 // program start, pointed to by SAVMSC $58/$59 — ANTIC internal codes match
 // ascii_to_internal) and halt, instead of leaving a black/garbage screen.
-static void require_vbxe_or_halt() {
+EDGE_COLD static void require_vbxe_or_halt() {
     if (V::detect<VBXECfg>()) return;
     u8* scr = *reinterpret_cast<u8* volatile*>(0x58);   // SAVMSC -> GR.0 screen RAM
     const char msg[] = "VBXE REQUIRED";
