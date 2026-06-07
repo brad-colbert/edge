@@ -136,6 +136,28 @@ public:
     static constexpr u16 buffer_size =
         screens::max_screen_ram > 0 ? screens::max_screen_ram : 1;
 
+    // Alignment that keeps a single-page screen buffer off the ANTIC 4K scan
+    // boundary. ANTIC increments only the low 12 bits of its scan counter, so a mode
+    // line whose own bytes straddle a $x000 boundary fetches its tail from the page
+    // start (corruption the display-list LMS can't fix — it only reloads at line
+    // starts; see platform/atari/display_list.h). A buffer that fits in one 4K page
+    // and is aligned to the smallest power of two >= its size can never cross a
+    // boundary, so every line stays within one page. Buffers LARGER than a page must
+    // span boundaries regardless; those keep alignment 1 (page-aligning them would
+    // force mid-line crossings, since 4096 % bytes_per_line != 0 for e.g. 40-col
+    // modes) and rely on the builder's per-line LMS landing on row-aligned crossings.
+    static constexpr u16 pow2_ceil(u16 n) {
+        u16 p = 1;
+        while (p < n && p < 4096) p <<= 1;
+        return p;
+    }
+    static constexpr u16 buffer_align =
+        buffer_size <= 4096 ? pow2_ceil(buffer_size) : u16{1};
+    // A single-page buffer aligned to >= its own size cannot straddle a 4K boundary.
+    static_assert(buffer_size > 4096 || buffer_align >= buffer_size,
+                  "single-page screen buffer must be aligned to >= its size to keep "
+                  "every mode line off the ANTIC 4K scan boundary");
+
     // Switch to screen S: build its display program against the real buffer base
     // (the backend builder inserts any backend-specific reload instructions),
     // rebind views, program the display hardware, then run the user transition
@@ -277,7 +299,7 @@ private:
         static_cast<DP*>(p)->patch_scroll(base, width, col, row);
     }
 
-    u8 screen_buffer_[buffer_size] = {};
+    alignas(buffer_align) u8 screen_buffer_[buffer_size] = {};
     typename detail::screen_views_of<screens>::type views_;
 
     u8*       active_dl_      = nullptr;   // last built list (points into a static)
