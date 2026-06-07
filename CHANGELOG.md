@@ -11,6 +11,8 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-06-06
+
 ### Added
 - **Arena demo — VBXE "Tier 2" variant (`arena_vbxe`):** the same Berzerk-style
   game as the baseline `arena_base`, rendered entirely through the VBXE overlay
