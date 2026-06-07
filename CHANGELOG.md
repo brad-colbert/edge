@@ -11,6 +11,41 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-07
+
+API-cleanup release: Atari-specific names are purged from the generic engine
+surface, and a platform-specific escape hatch is relocated to the platform layer
+(ADR-031). Breaking for Atari game code that called `Game::antic_playfield()` and for
+any custom backend implementing the display-traits contract.
+
+### Added
+- `screen_buffer_alignment` capability field (`engine/config/capabilities.h`,
+  default `1` = no constraint) — a platform-supplied screen-buffer alignment
+  granularity. The Atari profile sets it to `4096`, replacing a hardcoded scan-
+  boundary constant in `engine/screen.h`, so the portable screen manager asks for the
+  alignment it needs without encoding ANTIC's 4K page behaviour.
+
+### Changed
+- Display-traits predicate `is_vbxe(ModeT)` renamed to `is_overlay_mode(ModeT)` — the
+  `engine/display_traits.h` contract member and its Atari specialization. The name now
+  describes what it tests (an overlay vs base mode) rather than the chip that
+  introduced it. **Breaking** for custom backends that specialise the traits seam.
+- Purged Atari chip/register names (ANTIC, VBXE, P/M, DLI, GTIA, …) from the generic
+  `engine/*.h` headers — comments and identifiers now use portable
+  capability/feature vocabulary. Engine-header rule: no hardware addresses, register
+  names, or platform-specific types outside the `Platform` template parameter.
+
+### Removed
+- `Game::antic_playfield(bool)` removed from the engine facade. The Atari playfield-
+  DMA escape hatch is now the free function `atari::set_playfield_dma(bool)` in the
+  Atari platform layer, reached by including the Atari platform header. Per ADR-031,
+  platform-specific escape hatches belong on the platform, not on the generic `Game::`
+  facade. **Breaking** for Atari game code that called it.
+- `DisplayLayout::antic_region_count` removed — an unused public layout query (no
+  engine consumers; it degraded to `region_count` on any platform without an overlay
+  plane). Its only consumers were unit tests, now expressed via `region_count` and the
+  existing `has_overlay` / `is_pure_overlay` queries.
+
 ## [0.4.1] - 2026-06-06
 
 ### Added

@@ -1,6 +1,6 @@
 # Architecture Decision Records
 
-> **Applies to EDGE v0.4.1** — see [CHANGELOG](../CHANGELOG.md) for version history.
+> **Applies to EDGE v0.5.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
 
 Decisions made during design, with rationale. These explain the
 "why" behind architectural choices and document tradeoffs.
@@ -1419,3 +1419,84 @@ toolchain. Until the window region is reserved in the linker, a
 binary whose heap grows up or stack grows down into the chosen
 window could still collide — verify against the `.map` if the
 binary grows substantially.
+
+## ADR-031: Platform-Specific Escape Hatches Belong on the Platform, Not Game::
+
+**Status:** Accepted
+
+**Context:**
+During initial implementation, `Game::antic_playfield(bool)` was added
+to `engine/core.h` as a convenience method for disabling ANTIC playfield
+DMA on VBXE overlay screens. It was placed on the `Game::` facade because
+that was the path of least resistance — game code already uses `Game::`
+for everything else.
+
+A subsequent portability audit (the header leakage cleanup) flagged the
+method: `antic_playfield` embeds a chip name in the generic engine
+facade and has no meaningful implementation on any non-Atari backend.
+The initial FIXME proposed renaming it to a neutral portable name.
+
+That diagnosis was wrong. The problem is not the name — it is the
+location. There is no portable concept to rename it to. A C64 backend
+has no equivalent DMA control; a hypothetical Apple II backend doesn't
+either. The operation is intrinsically Atari-specific.
+
+**Options Considered:**
+
+1. **Rename to a neutral name on Game::** (rejected): `set_playfield_dma`,
+   `set_background_fetch`, etc. Forces every future backend to implement
+   or stub a concept that may not exist on its hardware. The `Game::`
+   facade becomes polluted with lowest-common-denominator wrappers around
+   hardware quirks. A C64 game author sees a method that does nothing on
+   their platform. Wrong abstraction.
+
+2. **Gate behind `if constexpr` on Game::** (rejected): exposes the
+   method only when `caps::has_antic_dma_control` or similar is true.
+   Keeps it on `Game::` but invisible on non-Atari builds. Still wrong —
+   it couples the engine facade to a platform capability that exists
+   solely because one chip works a particular way. Capability flags should
+   describe features game code cares about, not hardware quirks the engine
+   needs to manage internally.
+
+3. **Remove from Game:: and expose through the platform layer** (chosen):
+   The method is removed from `engine/core.h`. The equivalent function is
+   exposed directly in the Atari platform headers
+   (`engine/platform/atari/antic.h` or similar). Atari game code that
+   needs it calls the platform function directly. Non-Atari game code
+   never sees it.
+
+**Decision:**
+`Game::antic_playfield()` is removed from `engine/core.h`.
+The functionality is exposed as a free function in the Atari platform
+layer. Atari game code accesses it by including the Atari platform
+header directly. The `Game::` facade exposes no platform-specific
+escape hatches.
+
+**Rationale:**
+The `Game::` facade exists to give game code a single portable surface.
+It should expose only operations that every backend can meaningfully
+implement. Platform-specific escape hatches — DMA controls, chip-specific
+registers, hardware quirks — belong on the platform layer, reachable
+directly by game code that has already committed to a specific platform
+by virtue of its platform type alias.
+
+This is the same reason `Game::sid_volume()` would be wrong on a
+C64 backend: not because SID is a bad name, but because it doesn't
+belong on the generic facade. Platform-specific code reaches
+platform-specific hardware through platform-specific APIs. The engine
+facade stays clean.
+
+**Principle established:**
+If a method on `Game::` has no meaningful implementation on a
+hypothetical second backend, it does not belong on `Game::`. Move it
+to the platform layer. Game code that is already platform-specific
+(by platform type alias) can include platform headers directly without
+compromising portability.
+
+**Tradeoff:**
+Atari game code that calls `Game::antic_playfield()` must be updated to
+call the platform function directly. Since EDGE is pre-1.0 and the only
+callers are the engine's own demos, this is a one-site update. Future
+callers will find the function where it semantically belongs — in the
+Atari platform headers — rather than on a generic facade that implies
+cross-platform availability.

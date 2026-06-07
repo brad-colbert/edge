@@ -133,11 +133,11 @@ static_assert(OverlaySR::is_overlay     == true, "OverlayRegion::is_overlay");
 static_assert(OverlaySR::bytes_per_line == 320,  "VBXE_SR = 320 bytes/line (u16)");
 static_assert(OverlaySR::height         == 240,  "overlay height passes through");
 
-// 5. Pure-overlay layout: ANTIC can be fully disabled, costs 0 screen RAM.
+// 5. Pure-overlay layout: playfield DMA can be fully disabled, costs 0 screen RAM.
 using PureOverlay = DisplayLayout<OverlayRegion<M::Mode::VBXE_SR, 240>>;
 static_assert(PureOverlay::is_pure_overlay    == true,  "single overlay is pure");
 static_assert(PureOverlay::has_overlay        == true,  "pure overlay has an overlay");
-static_assert(PureOverlay::antic_region_count == 0,     "no ANTIC regions");
+static_assert(PureOverlay::region_count       == 1,     "single region, all overlay");
 static_assert(PureOverlay::total_ram          == 0,     "overlay-only = 0 screen RAM");
 
 // 6. Mixed layout: overlay over a 3-row text region. Only the text costs RAM.
@@ -147,19 +147,19 @@ using MixedOverlay = DisplayLayout<
 >;
 static_assert(MixedOverlay::is_pure_overlay    == false, "a text region breaks purity");
 static_assert(MixedOverlay::has_overlay        == true,  "still has an overlay");
-static_assert(MixedOverlay::antic_region_count == 1,     "one ANTIC (text) region");
+static_assert(MixedOverlay::region_count       == 2,     "overlay + one text region");
 static_assert(MixedOverlay::total_ram          == 120,   "40x3 text only; overlay = 0");
 static_assert(MixedOverlay::overlay_region_index() == 0, "overlay is region 0");
 
 // 7. Traditional layout: zero overlays. is_pure_overlay must NOT be vacuously true.
 static_assert(TextLayout::has_overlay     == false, "no overlay in a pure-text layout");
 static_assert(TextLayout::is_pure_overlay == false, "no overlay => not pure overlay");
-static_assert(TextLayout::antic_region_count == 1,  "the text region is an ANTIC region");
+static_assert(TextLayout::region_count == 1,  "single non-overlay text region");
 static_assert(TextLayout::overlay_region_index() == TextLayout::region_count,
               "no overlay => index past the end");
 
 // NOTE (negative test, kept disabled): instantiating OverlayRegion on a non-VBXE
-// mode must fail the is_vbxe static_assert. Verified manually, e.g.
+// mode must fail the is_overlay_mode static_assert. Verified manually, e.g.
 //   using BadOverlay = OverlayRegion<M::Mode::MODE_2, 24>;  // static_assert fires
 // Left commented out so the suite still builds.
 

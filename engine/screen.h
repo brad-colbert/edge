@@ -21,6 +21,7 @@
 //
 // Depends on display.h and types.h.
 
+#include "config/capabilities.h"
 #include "display.h"
 #include "types.h"
 
@@ -128,35 +129,39 @@ template <typename Platform, typename GameConfig>
 class ScreenManager {
 public:
     using screens = typename GameConfig::screens;
+    using caps    = engine::caps_of_t<Platform>;
 
     // Clamp to at least 1 byte: a pure-overlay-only ScreenSet contributes no
-    // screen RAM (overlay pixels live in VBXE VRAM, ram_bytes == 0), which would
+    // screen RAM (overlay pixels live in VRAM, ram_bytes == 0), which would
     // otherwise make screen_buffer_ a zero-length array (ill-formed). The 1-byte
     // buffer is never read — set_base only computes buf + offset(0).
     static constexpr u16 buffer_size =
         screens::max_screen_ram > 0 ? screens::max_screen_ram : 1;
 
-    // Alignment that keeps a single-page screen buffer off the ANTIC 4K scan
-    // boundary. ANTIC increments only the low 12 bits of its scan counter, so a mode
-    // line whose own bytes straddle a $x000 boundary fetches its tail from the page
-    // start (corruption the display-list LMS can't fix — it only reloads at line
-    // starts; see platform/atari/display_list.h). A buffer that fits in one 4K page
-    // and is aligned to the smallest power of two >= its size can never cross a
-    // boundary, so every line stays within one page. Buffers LARGER than a page must
-    // span boundaries regardless; those keep alignment 1 (page-aligning them would
-    // force mid-line crossings, since 4096 % bytes_per_line != 0 for e.g. 40-col
-    // modes) and rely on the builder's per-line LMS landing on row-aligned crossings.
+    // Alignment that keeps a single-page screen buffer off the platform's
+    // screen-buffer alignment boundary (caps::screen_buffer_alignment — the display
+    // hardware's scan-boundary granularity, or 1 for no constraint). Where the
+    // display hardware's scan-line address counter wraps within that boundary, a mode
+    // line whose own bytes straddle a boundary fetches its tail from the page start
+    // (corruption the display program's per-line address reload can't fix — it only
+    // reloads at line starts; see the backend display-program builder). A buffer that
+    // fits in one boundary-sized page and is aligned to the smallest power of two >=
+    // its size can never cross a boundary, so every line stays within one page.
+    // Buffers LARGER than a page must span boundaries regardless; those keep
+    // alignment 1 (page-aligning them would force mid-line crossings, since the
+    // boundary is not a multiple of bytes_per_line for e.g. 40-col modes) and rely on
+    // the builder's per-line address reload landing on row-aligned crossings.
     static constexpr u16 pow2_ceil(u16 n) {
         u16 p = 1;
-        while (p < n && p < 4096) p <<= 1;
+        while (p < n && p < caps::screen_buffer_alignment) p <<= 1;
         return p;
     }
     static constexpr u16 buffer_align =
-        buffer_size <= 4096 ? pow2_ceil(buffer_size) : u16{1};
-    // A single-page buffer aligned to >= its own size cannot straddle a 4K boundary.
-    static_assert(buffer_size > 4096 || buffer_align >= buffer_size,
+        buffer_size <= caps::screen_buffer_alignment ? pow2_ceil(buffer_size) : u16{1};
+    // A single-page buffer aligned to >= its own size cannot straddle a boundary.
+    static_assert(buffer_size > caps::screen_buffer_alignment || buffer_align >= buffer_size,
                   "single-page screen buffer must be aligned to >= its size to keep "
-                  "every mode line off the ANTIC 4K scan boundary");
+                  "every mode line within one screen-buffer alignment boundary");
 
     // Switch to screen S: build its display program against the real buffer base
     // (the backend builder inserts any backend-specific reload instructions),
@@ -179,16 +184,17 @@ public:
         Platform::hal::display_dma_disable();
         Platform::hal::set_display_program(dl.bytes);
         if constexpr (!S::display::is_pure_overlay) {
-            // ANTIC content present (ANTIC-only or mixed overlay+ANTIC):
-            // re-enable playfield DMA. Mixed layouts cost only the DL DMA that
-            // reads blank instructions (~1 cycle/line), not screen fetches.
+            // Playfield content present (playfield-only or mixed overlay+playfield):
+            // re-enable playfield DMA. Mixed layouts cost only the display-program
+            // DMA that reads blank instructions (~1 cycle/line), not screen fetches.
             Platform::hal::display_dma_enable();
         }
-        // Pure overlay: ANTIC stays off. The VBXE overlay (brought up by
-        // Core::init through the graphics axis) drives the display via its XDL;
-        // the 3-byte JVB stub is only a safety pointer for DLISTL. Leaving ANTIC
-        // DMA off frees the VRAM bus for the blitter/MEMAC — the bus-contention
-        // fix (formerly a manual antic_playfield(false)), now automatic.
+        // Pure overlay: playfield DMA stays off. The overlay (brought up by
+        // Core::init through the graphics axis) drives the display via its own
+        // display list; the backend's 3-byte stub is only a safety pointer for the
+        // display-list register. Leaving playfield DMA off frees the VRAM bus for the
+        // blitter — the bus-contention fix (formerly a manual playfield-DMA disable),
+        // now automatic.
 
         active_dl_      = dl.bytes;
         active_dl_size_ = dl.size;

@@ -6,12 +6,12 @@
 // BitmapOps is a portable drawing API over a bitmap "canvas". It dispatches at
 // compile time on the platform's `has_blitter` capability:
 //
-//   * Blitter platforms (VBXE): the canvas is the 256-colour overlay framebuffer
+//   * Blitter platforms: the canvas is the 256-colour overlay framebuffer
 //     (8bpp in VRAM). Operations go through neutral `overlay_bitmap_*` HAL seams,
-//     which use the blitter (rectangle fills) and the MEMAC window (single pixels)
-//     — the generic engine never names a VBXE type.
+//     which use the blitter (rectangle fills) and the backend's memory window
+//     (single pixels) — the generic engine never names a backend type.
 //
-//   * Baseline platforms: the canvas is an ANTIC `BitmapRegion`. Operations
+//   * Baseline platforms: the canvas is a baseline `BitmapRegion`. Operations
 //     delegate to that region's `BitmapRegionView` (engine/display.h), which owns
 //     the mode-dependent (1/2/4 bpp) pixel packing — we do not re-implement it.
 //

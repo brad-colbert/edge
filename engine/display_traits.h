@@ -14,7 +14,7 @@
 //
 // Required static members of a specialisation `traits<ModeT>` (all constexpr):
 //   static constexpr bool is_text(ModeT);            // text vs bitmap mode
-//   static constexpr bool is_vbxe(ModeT);            // overlay (VBXE) vs base mode
+//   static constexpr bool is_overlay_mode(ModeT);    // overlay vs base mode
 //   static constexpr u16  bytes_per_line(ModeT);     // screen-memory width
 //   static constexpr u8   bits_per_pixel(ModeT);     // bitmap packing (text: n/a)
 //   static constexpr u8   scanlines_per_line(ModeT); // mode-line height

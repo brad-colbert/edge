@@ -87,6 +87,10 @@ struct Capabilities {
     static constexpr u32 extended_ram_bytes = 0;
     static constexpr u16 extended_bank_size = 0;
     static constexpr u8  zp_available       = 0;
+    // Required alignment for the shared screen buffer in bytes.
+    // 1 = no constraint. Platform sets this to its display
+    // hardware's scan-boundary granularity.
+    static constexpr u16 screen_buffer_alignment = 1;
 
     // ── Input ──
     static constexpr u8   joystick_ports = 0;

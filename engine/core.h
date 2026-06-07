@@ -162,44 +162,44 @@ public:
     static void init(const Charset& cs) {
         using caps = engine::caps_of_t<Platform>;
         if constexpr (caps::has_blitter) {
-            // VBXE overlay bring-up (MEMAC window + full-screen XDL + enable).
-            // A pure-overlay InitialScreen no longer needs a manual
-            // antic_playfield(false): set_screen keeps ANTIC DMA off for it, so
+            // Overlay bring-up (HAL sets up its memory window, display list, and
+            // enable). A pure-overlay InitialScreen no longer needs a manual
+            // playfield-DMA disable: set_screen keeps playfield DMA off for it, so
             // the playfield never contends the VRAM bus (see screen.h).
             Platform::hal::overlay_init();
         }
-        // Arm the P/M base + DMA on every backend. On baseline this is the hardware
-        // sprite path; on a blitter backend the players composite in VRAM instead,
-        // but the four hardware MISSILES are still used directly (ADR-025), so they
-        // need P/M DMA armed to render below the overlay. Done before set_screen so
-        // the P/M DMA bits survive its SDMCTL rewrite (the screen manager preserves
-        // them via the PM_DMA_MASK partition — see hal.h SDMCTL note). The empty
-        // player strips on a blitter backend simply draw nothing.
+        // Arm the hardware-sprite base + DMA on every backend. On baseline this is
+        // the hardware sprite path; on a blitter backend the players composite in
+        // VRAM instead, but the four hardware MISSILES are still used directly
+        // (ADR-025), so they need sprite DMA armed to render below the overlay. Done
+        // before set_screen so the sprite-DMA bits survive its display-DMA reprogram
+        // (the screen manager preserves the sprite-DMA bits — see the HAL note). The
+        // empty player strips on a blitter backend simply draw nothing.
         setup_sprites();
         set_screen<InitialScreen>([] {});
-        // The ANTIC charset buffer is only used by the baseline tile path; the
-        // VBXE overlay-font upload to VRAM lands with the 4b text path.
+        // The character-set buffer is only used by the baseline tile path; the
+        // blitter backend's overlay-font upload to VRAM lands with the 4b text path.
         if constexpr (!caps::has_blitter) {
             tiles.init_charset(cs, charset_buffer_);
             tiles.bind_charset_page(page_of(charset_buffer_));
         }
         interrupts.arm_dispatch();
-        sprites.arm_multiplex_dli();   // bind the raw zone-boundary DLI (baseline)
+        sprites.arm_multiplex_hook();  // bind the raw zone-boundary raster hook (baseline)
         Platform::hal::install_frame_isr(&frame_service);
     }
     static void init() {
         using caps = engine::caps_of_t<Platform>;
         if constexpr (caps::has_blitter) {
-            // Pure-overlay layouts no longer need a manual antic_playfield(false):
-            // set_screen keeps ANTIC DMA off for them (see screen.h).
+            // Pure-overlay layouts no longer need a manual playfield-DMA disable:
+            // set_screen keeps playfield DMA off for them (see screen.h).
             Platform::hal::overlay_init();
         }
-        // Arm P/M base + DMA on every backend (hardware sprites on baseline; the
-        // hardware missiles on a blitter backend — see init(cs) above).
+        // Arm hardware-sprite base + DMA on every backend (hardware sprites on
+        // baseline; the hardware missiles on a blitter backend — see init(cs) above).
         setup_sprites();
         set_screen<InitialScreen>([] {});
         interrupts.arm_dispatch();
-        sprites.arm_multiplex_dli();   // bind the raw zone-boundary DLI (baseline)
+        sprites.arm_multiplex_hook();  // bind the raw zone-boundary raster hook (baseline)
         Platform::hal::install_frame_isr(&frame_service);
     }
 
@@ -241,23 +241,8 @@ public:
         Platform::hal::overlay_publish_background();
     }
 
-    // Enable/disable the ANTIC playfield (character/bitmap) DMA. The common
-    // opaque VBXE-only case is now automatic: a pure-overlay screen
-    // (is_pure_overlay) keeps ANTIC DMA off through set_screen, so no manual call
-    // is needed. This remains as an escape hatch for the cases the engine can't
-    // infer: a transparent overlay that shows ANTIC through (leave it enabled),
-    // or a mixed overlay+ANTIC layout where you want the playfield fetch off to
-    // free the VRAM bus even though ANTIC regions are present. When an opaque
-    // overlay covers the screen the ANTIC playfield is invisible, but its
-    // per-scanline VRAM-bus DMA starves the blitter's restore copies and
-    // collapses the overlay compositor's per-frame budget. Re-enabled by any
-    // set_screen on a non-pure-overlay layout. Atari-only (see API_REFERENCE.md).
-    static void antic_playfield(bool enable) {
-        Platform::hal::set_antic_playfield_dma(enable);
-    }
-
-    // ── Overlay text mode (VBXE Text_80; no-op on platforms without it) ──
-    // A dedicated text surface separate from the baseline ANTIC TextRegion API.
+    // ── Overlay text mode (80-column overlay text; no-op on platforms without it) ──
+    // A dedicated text surface separate from the baseline TextRegion API.
     // Chars are raw font indices (no screen-code remap); `attr` is the cell colour
     // attribute (foreground index in b0-b6; b7=1 = opaque background). Call after
     // init(), on a Text_80 overlay config.
@@ -296,7 +281,7 @@ public:
     static auto& region() { return screen.template region<S, N>(); }
 
     // ── Bitmap drawing ──
-    // The bitmap canvas: the VBXE overlay framebuffer on blitter platforms, else a
+    // The bitmap canvas: the overlay framebuffer on blitter platforms, else a
     // BitmapRegion (GameConfig::bitmap_region) via its software view. Call after
     // init(); on baseline the view is bound to the screen buffer by set_screen().
     static Gfx& gfx() { return gfx_; }
@@ -306,23 +291,23 @@ public:
     // scroll_map() once the game has bound its map buffer.
     template <typename S, typename Cb>
     static void set_screen(Cb cb) {
-        // Config agreement: if this screen declares a VBXE overlay region, its
-        // mode and height must match the VBXE Config the graphics axis was built
-        // with — otherwise the ANTIC display list reserves overlay scanlines that
-        // disagree with the live overlay framebuffer (silent corruption). Checked
-        // here (not in the generic ScreenManager) because the VBXE Config is only
+        // Config agreement: if this screen declares an overlay region, its mode and
+        // height must match the overlay graphics config the graphics axis was built
+        // with — otherwise the display list reserves overlay scanlines that disagree
+        // with the live overlay framebuffer (silent corruption). Checked here (not in
+        // the generic ScreenManager) because the overlay graphics config is only
         // reachable through Platform::graphics, and this runs for every screen.
         if constexpr (engine::caps_of_t<Platform>::has_blitter) {
             using Layout = typename S::display;
             if constexpr (Layout::has_overlay) {
                 using OvRegion =
                     typename Layout::template region_at<Layout::overlay_region_index()>;
-                using Cfg = typename Platform::graphics::config;  // gfx::VBXE<Cfg>::config
+                using Cfg = typename Platform::graphics::config;  // the graphics axis's overlay config
                 static_assert(OvRegion::height <= Cfg::fb_height,
-                    "OverlayRegion height exceeds the VBXE framebuffer height");
+                    "OverlayRegion height exceeds the overlay framebuffer height");
                 static_assert(OvRegion::mode == Cfg::overlay_mode,
-                    "OverlayRegion mode does not match the VBXE Config overlay_mode "
-                    "(e.g. OverlayRegion<VBXE_SR> under a Config<VBXE_HR>)");
+                    "OverlayRegion mode does not match the overlay graphics config's "
+                    "overlay_mode (e.g. a narrow OverlayRegion under a wide Config)");
             }
         }
 
@@ -377,14 +362,15 @@ public:
         //    after a few minutes of no console/keyboard input).
         Platform::hal::suppress_idle_dim();
 
-        // 0a. Gate raster (DLI) NMIs off for the duration of this service. The
-        //     deferred VBI rewrites the raster-hook chain state below
-        //     (VDSLST/current_ and the multiplexer's mux_index_/mux_table_), and
-        //     a heavy service (e.g. the 9-sprite multiplexer) can still be running
-        //     when it overruns vertical blank into the visible region — where a
-        //     zone-boundary DLI would otherwise fire mid-rewrite and corrupt the
-        //     chain (raw DLIs are not re-entrant against the builder). prepare_chain
-        //     re-arms NMIEN at the end once the chain is consistent, so any boundary
+        // 0a. Gate raster interrupts off for the duration of this service. The
+        //     deferred frame service rewrites the raster-hook chain state below
+        //     (the raster-hook vector/current_ and the multiplexer's
+        //     mux_index_/mux_table_), and a heavy service (e.g. the 9-sprite
+        //     multiplexer) can still be running when it overruns vertical blank into
+        //     the visible region — where a zone-boundary raster hook would otherwise
+        //     fire mid-rewrite and corrupt the chain (raw raster hooks are not
+        //     re-entrant against the builder). prepare_chain re-arms raster
+        //     interrupts at the end once the chain is consistent, so any boundary
         //     line the beam has not yet reached still fires this frame; one the
         //     overrun already passed is simply skipped for the frame (a cosmetic
         //     seam, not a crash). Backends with no raster hooks just stay disabled.
@@ -406,32 +392,33 @@ public:
         sound.tick();
 
         // 3. Commit buffered sprite state (pre-commit hook first). The path
-        //    diverges by backend: VBXE composes the overlay via the blitter and
-        //    has its own collision model; baseline writes P/M hardware sprites.
+        //    diverges by backend: a blitter backend composes the overlay and
+        //    has its own collision model; the baseline writes hardware sprites.
         if (hooks.pre_sprite_commit) hooks.pre_sprite_commit();
 
         // Commit buffered sprites — self-dispatching by backend.
         if constexpr (caps::has_blitter) {
-            // VBXE: present first — show the page composed last frame (which had a
-            // full frame's display time to finish) and flip so we now compose the
-            // hidden page. Then commit this frame's blits (commit_blitter clears the
-            // back page and queues a blit per active sprite) and start them async.
-            // The blit is deliberately NOT waited on here: a synchronous wait makes
-            // the VBI outrun a frame, letting the next VBI NMI re-enter this handler
-            // (stack overflow). The present's wait is for LAST frame's blit, already
+            // Blitter backend: present first — show the page composed last frame
+            // (which had a full frame's display time to finish) and flip so we now
+            // compose the hidden page. Then commit this frame's blits (commit_blitter
+            // clears the back page and queues a blit per active sprite) and start them
+            // async. The blit is deliberately NOT waited on here: a synchronous wait
+            // makes the frame service outrun a frame, letting the next frame interrupt
+            // re-enter this handler (stack overflow). The present's wait is for LAST
+            // frame's blit, already
             // finished, so it returns at once. Single-buffer present is a no-op (it
             // composes the visible page in place, dirty-rect).
             Platform::hal::overlay_present();
             sprites.commit(pm_buffer_);
             Platform::hal::overlay_submit();
 
-            // 4. Latch overlay collisions (overlay↔PF/PMG and overlay↔overlay).
+            // 4. Latch overlay collisions (overlay↔playfield/sprite and overlay↔overlay).
             if constexpr (caps::has_overlay_collision) {
                 overlay_collision_      = Platform::hal::overlay_collision();
                 overlay_blit_collision_ = Platform::hal::overlay_blit_collision();
             }
         } else {
-            // Baseline P/M path: write P/M memory, then latch + clear collisions.
+            // Baseline path: write hardware-sprite memory, then latch + clear collisions.
             sprites.commit(pm_buffer_);
             for (u8 i = 0; i < 4; ++i) {
                 collisions_.s_bg[i] = Platform::hal::coll_player_playfield(i);
@@ -442,13 +429,14 @@ public:
             Platform::hal::clear_collisions();
         }
 
-        // 5. Recompute multiplex zones for the next commit (harmless on VBXE,
+        // 5. Recompute multiplex zones for the next commit (harmless on a blitter backend,
         //    where no sprites are committed yet — the Y-sort over zero active
         //    sprites yields no zones).
         sprites.update_zones();
 
-        // 6. Rebuild the raster-hook chain and arm per-line delivery. VBXE needs
-        //    no zone-boundary DLIs (no hardware players to reposition), so the
+        // 6. Rebuild the raster-hook chain and arm per-line delivery. A blitter
+        //    backend needs no zone-boundary raster hooks (no hardware players to
+        //    reposition), so the
         //    hook rebuild is baseline-only; prepare_chain still runs for both.
         if constexpr (!caps::has_blitter) {
             sprites.build_raster_hooks(interrupts);
@@ -503,7 +491,7 @@ private:
     static inline SpriteCollisionState collisions_{};
 
     // ── Overlay frame state (neutral; meaningful only on extended-graphics
-    //    platforms — a few bytes on baseline, never named with VBXE identity) ──
+    //    platforms — a few bytes on baseline, never named with backend identity) ──
     static inline u8   overlay_collision_      = 0;
     static inline u8   overlay_blit_collision_ = 0;
 };

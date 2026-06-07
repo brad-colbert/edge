@@ -151,14 +151,15 @@ public:
     // begin_dynamic() discards the dynamic tail, keeping the static slots.
     // add_dynamic_raster_hook() appends a raw, top-priority slot.
     //
-    // The slot is registered RAW: `h` is a backend-supplied, hand-written DLI that
-    // ANTIC enters directly (the multiplexer's edge_multiplex_dli). Routing it
-    // through the generic C++ dispatcher was tried and failed on hardware — the
-    // dispatcher's full $80-$9F save makes each DLI ~11 scanlines, and a DLI is an
-    // unmaskable, non-re-entrant NMI, so two zone boundaries landing within a mode
-    // line of each other corrupt the shared dispatch state (ADR-019). The raw
-    // handler stays under a scanline by writing pre-baked registers, then chains
-    // VDSLST from the next_ table just like the dispatcher (it shares that tail).
+    // The slot is registered RAW: `h` is a backend-supplied, hand-written raw raster
+    // hook the backend's raster hardware enters directly (the multiplexer's raw
+    // boundary hook). Routing it through the generic C++ dispatcher was tried and
+    // failed on hardware — the dispatcher's full $80-$9F save makes each dispatched
+    // hook ~11 scanlines, and a raster interrupt is unmaskable and non-re-entrant, so
+    // two zone boundaries landing within a mode line of each other corrupt the shared
+    // dispatch state (ADR-019). The raw handler stays under a scanline by writing
+    // pre-baked registers, then chains the raster-hook vector from the next_ table
+    // just like the dispatcher (it shares that tail).
     void begin_dynamic() { total_count_ = static_count_; }
 
     void add_dynamic_raster_hook(u8 scanline, void (*h)()) {
