@@ -184,7 +184,7 @@ public:
             tiles.bind_charset_page(page_of(charset_buffer_));
         }
         interrupts.arm_dispatch();
-        sprites.arm_multiplex_dli();   // bind the raw zone-boundary raster hook (baseline)
+        sprites.arm_multiplex_hook();  // bind the raw zone-boundary raster hook (baseline)
         Platform::hal::install_frame_isr(&frame_service);
     }
     static void init() {
@@ -199,7 +199,7 @@ public:
         setup_sprites();
         set_screen<InitialScreen>([] {});
         interrupts.arm_dispatch();
-        sprites.arm_multiplex_dli();   // bind the raw zone-boundary raster hook (baseline)
+        sprites.arm_multiplex_hook();  // bind the raw zone-boundary raster hook (baseline)
         Platform::hal::install_frame_isr(&frame_service);
     }
 

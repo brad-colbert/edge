@@ -445,7 +445,7 @@ public:
     // One-time setup: bind the raw multiplex raster hook to this manager's flat table and
     // fire index (the single instance never moves). engine::Core::init calls this on
     // baseline backends; discarded on blitter backends, which have no boundary raster hooks.
-    void arm_multiplex_dli() {
+    void arm_multiplex_hook() {
         if constexpr (!caps::has_blitter) {
             Platform::hal::install_multiplex_dli(
                 static_cast<u16>(reinterpret_cast<uintptr_t>(mux_table_)),
