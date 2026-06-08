@@ -83,6 +83,17 @@ struct user_zp_bytes<C, void_t<decltype(C::user_zp_bytes)>> {
     static constexpr u8 value = C::user_zp_bytes;
 };
 
+// uses_missiles: whether the game uses hardware missiles (Core::missile). Default
+// true. A game that draws everything through the blitter/overlay and fires no missiles
+// can set `uses_missiles = false`; the engine then skips reserving the hardware
+// sprite-memory buffer, freeing that RAM for the game.
+template <typename C, typename = void>
+struct uses_missiles { static constexpr bool value = true; };
+template <typename C>
+struct uses_missiles<C, void_t<decltype(C::uses_missiles)>> {
+    static constexpr bool value = C::uses_missiles;
+};
+
 // Joystick port count: Platform::capabilities::joystick_ports if present, else 2.
 template <typename P, typename = void>
 struct ports { static constexpr u8 value = 2; };
@@ -121,7 +132,15 @@ public:
     static constexpr u8  kPorts          = cdetail::ports<Platform>::value;
     static constexpr u8  kMaxRasterHooks = cdetail::max_raster_hooks<GameConfig>::value;
     static constexpr u8  kMaxFrameHooks  = cdetail::max_frame_hooks<GameConfig>::value;
-    static constexpr u16 kPmBytes        = Platform::hal::sprite_area_bytes;
+    // Hardware sprite-memory buffer sizing. A blitter backend composes sprites itself,
+    // so it only needs this buffer for hardware missiles; if the game declares it uses
+    // none (uses_missiles=false), the buffer is dropped to free RAM. Non-blitter
+    // backends always need it (hardware sprites live here).
+    static constexpr bool kUsesMissiles  = cdetail::uses_missiles<GameConfig>::value;
+    static constexpr bool kNeedSpriteMem =
+        !engine::caps_of_t<Platform>::has_blitter || kUsesMissiles;
+    static constexpr u16 kSpriteMemBytes =
+        kNeedSpriteMem ? Platform::hal::sprite_area_bytes : 0;
     static constexpr u16 kCharsetBytes   = 1024;   // largest charset (Charset1K)
 
     // Subsystem types.
@@ -409,7 +428,7 @@ public:
             // finished, so it returns at once. Single-buffer present is a no-op (it
             // composes the visible page in place, dirty-rect).
             Platform::hal::overlay_present();
-            sprites.commit(pm_buffer_);
+            sprites.commit(sprite_mem_);
             Platform::hal::overlay_submit();
 
             // 4. Latch overlay collisions (overlay↔playfield/sprite and overlay↔overlay).
@@ -419,7 +438,7 @@ public:
             }
         } else {
             // Baseline path: write hardware-sprite memory, then latch + clear collisions.
-            sprites.commit(pm_buffer_);
+            sprites.commit(sprite_mem_);
             for (u8 i = 0; i < 4; ++i) {
                 collisions_.s_bg[i] = Platform::hal::coll_player_playfield(i);
                 collisions_.s_s[i]  = Platform::hal::coll_player_player(i);
@@ -458,7 +477,7 @@ public:
     static constexpr u16 ram_usage =
         static_cast<u16>(sizeof(Screen) + sizeof(Sprites) + sizeof(Sound) +
                          sizeof(Scroll) + sizeof(Tiles) + sizeof(Interrupts) +
-                         sizeof(InputState<kPorts>) + kPmBytes + kCharsetBytes);
+                         sizeof(InputState<kPorts>) + kSpriteMemBytes + kCharsetBytes);
 
     // Zero-page accounting is approximate until a global ZP allocator exists:
     // the engine reserves a fixed slice at the base of the $80-$FF user page, the
@@ -471,11 +490,15 @@ public:
 
 private:
     static void setup_sprites() {
-        Platform::hal::set_sprite_base(page_of(pm_buffer_));
-        // Pass the sprite manager's vertical resolution so the HAL sets single-line
-        // sprite DMA to match the layout sprites.commit() writes into pm_buffer_.
-        Platform::hal::sprite_dma_enable(
-            sprites.resolution() == SpriteVerticalResolution::SingleLine);
+        if constexpr (kNeedSpriteMem) {
+            Platform::hal::set_sprite_base(page_of(sprite_mem_));
+            // Pass the sprite manager's vertical resolution so the HAL sets single-line
+            // sprite DMA to match the layout sprites.commit() writes into sprite_mem_.
+            Platform::hal::sprite_dma_enable(
+                sprites.resolution() == SpriteVerticalResolution::SingleLine);
+        }
+        // else: no hardware missiles — leave hardware-sprite DMA off so nothing
+        // fetches the (absent) buffer; the blitter composes everything itself.
     }
     static u8 page_of(const void* p) {
         return static_cast<u8>(
@@ -484,7 +507,7 @@ private:
 
     // Hardware-sprite graphics memory. Single-line resolution wants 2K alignment
     // so the high byte alone selects the region (the sprite base register).
-    alignas(2048) static inline u8 pm_buffer_[kPmBytes] = {};
+    alignas(2048) static inline u8 sprite_mem_[kSpriteMemBytes] = {};
     // Char-set destination (page-aligned so the charset base is just the high byte).
     alignas(256)  static inline u8 charset_buffer_[kCharsetBytes] = {};
 
