@@ -227,10 +227,16 @@ struct Enemy {
     u8 period;  // frames between moves: LOWER = faster. Set per spawn (difficulty ramp).
     u8 timer;   // movement tick counter
 };
-static engine::SlotPool<Enemy, 3> enemies;
+// Enemy count is per-variant: the P/M native build is hard-limited to 4 hardware
+// sprites (player + 3 enemies), but the VBXE blitter has no such limit, so the VBXE
+// build defines ARENA_ENEMY_COUNT higher before including this header.
+#ifndef ARENA_ENEMY_COUNT
+#define ARENA_ENEMY_COUNT 3
+#endif
+static engine::SlotPool<Enemy, ARENA_ENEMY_COUNT> enemies;
 
 static constexpr u8 kEnemyStep     = 2;      // pixels moved per move tick (matches kPlayerSpeed)
-static constexpr u8 kEnemyCount    = 3;      // pool capacity / sprite slots 1..3
+static constexpr u8 kEnemyCount    = ARENA_ENEMY_COUNT;   // pool capacity / sprite slots 1..kEnemyCount
 static constexpr u8 kSpawnInterval = 60;     // frames between spawn attempts (~1 second)
 
 // Difficulty ramp: each new enemy moves a little more often than the last, gently.

@@ -83,6 +83,17 @@ struct user_zp_bytes<C, void_t<decltype(C::user_zp_bytes)>> {
     static constexpr u8 value = C::user_zp_bytes;
 };
 
+// uses_missiles: whether the game uses the hardware projectiles. Default true (all
+// existing games keep their P/M-sprite buffer). A blitter game that draws everything
+// as overlay sprites can set `uses_missiles = false` to drop the 2K P/M buffer — a
+// large saving that also keeps RAM clear of the MEMAC window on tight VBXE builds.
+template <typename C, typename = void>
+struct uses_missiles { static constexpr bool value = true; };
+template <typename C>
+struct uses_missiles<C, void_t<decltype(C::uses_missiles)>> {
+    static constexpr bool value = C::uses_missiles;
+};
+
 // Joystick port count: Platform::capabilities::joystick_ports if present, else 2.
 template <typename P, typename = void>
 struct ports { static constexpr u8 value = 2; };
@@ -121,7 +132,14 @@ public:
     static constexpr u8  kPorts          = cdetail::ports<Platform>::value;
     static constexpr u8  kMaxRasterHooks = cdetail::max_raster_hooks<GameConfig>::value;
     static constexpr u8  kMaxFrameHooks  = cdetail::max_frame_hooks<GameConfig>::value;
-    static constexpr u16 kPmBytes        = Platform::hal::sprite_area_bytes;
+    // Hardware P/M graphics memory. A blitter game that uses no hardware missiles
+    // (uses_missiles=false) needs none — drop it (saves 2K and keeps RAM out of the
+    // MEMAC window). Players are never hardware sprites on a blitter backend.
+    static constexpr bool kUsesMissiles  = cdetail::uses_missiles<GameConfig>::value;
+    static constexpr bool kNeedPmBuffer  =
+        !engine::caps_of_t<Platform>::has_blitter || kUsesMissiles;
+    static constexpr u16 kPmBytes        =
+        kNeedPmBuffer ? Platform::hal::sprite_area_bytes : 0;
     static constexpr u16 kCharsetBytes   = 1024;   // largest charset (Charset1K)
 
     // Subsystem types.
@@ -471,11 +489,15 @@ public:
 
 private:
     static void setup_sprites() {
-        Platform::hal::set_sprite_base(page_of(pm_buffer_));
-        // Pass the sprite manager's vertical resolution so the HAL sets single-line
-        // sprite DMA to match the layout sprites.commit() writes into pm_buffer_.
-        Platform::hal::sprite_dma_enable(
-            sprites.resolution() == SpriteVerticalResolution::SingleLine);
+        if constexpr (kNeedPmBuffer) {
+            Platform::hal::set_sprite_base(page_of(pm_buffer_));
+            // Pass the sprite manager's vertical resolution so the HAL sets single-line
+            // sprite DMA to match the layout sprites.commit() writes into pm_buffer_.
+            Platform::hal::sprite_dma_enable(
+                sprites.resolution() == SpriteVerticalResolution::SingleLine);
+        }
+        // else: no hardware projectiles — leave P/M DMA off so the hardware never
+        // fetches the (absent) buffer; the blitter draws everything in the overlay.
     }
     static u8 page_of(const void* p) {
         return static_cast<u8>(

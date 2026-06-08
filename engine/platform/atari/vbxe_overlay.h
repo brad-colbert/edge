@@ -53,7 +53,11 @@ struct OverlayHal {
     static constexpr u32 xdl_b = Layout::xdl + 32;
 
     // ── Backend VBXE state (lives here, never in the generic engine) ──
-    static inline vbxe::BlitterQueue<16> queue_{};
+    // Queue depth covers the worst-case per-frame chain: 2 BCBs (restore + draw) per
+    // logical sprite when every slot changes at once (e.g. just after a background
+    // republish). Sized to 2*kMaxSlots; the VRAM bcb_queue region (4K) holds far more.
+    static constexpr u8 kQueueDepth = 24;
+    static inline vbxe::BlitterQueue<kQueueDepth> queue_{};
     static inline u8 active_fb_ = 0;       // 0 = framebuffer A shown, 1 = B
 
     // Shape registry: maps a ROM shape pointer to its uploaded VRAM copy. Shapes
@@ -71,24 +75,28 @@ struct OverlayHal {
     static inline u8  reg_count_  = 0;
     static inline u32 next_shape_ = Layout::shapes;
 
-    // Dirty-rect bookkeeping: each frame erases the small rects the previous frame
-    // drew (cheap, vs a full-screen clear) and records this frame's rects for the
-    // next erase. kMaxRects*2 BCBs (erase + draw) must fit the queue.
+    // Per-slot, per-page sprite cache (skip-unchanged compositing). The generic
+    // SpriteManager commits each frame's sprites by logical slot; we remember, for
+    // each page, what is currently painted there per slot, and each frame only erase+
+    // redraw the slots whose state changed (position/shape/colour/visibility) since
+    // this page was last composed. A stationary sprite then costs ZERO blitter work.
     //
-    // Used for single-buffer (any background) AND double-buffer in Background::Bitmap
-    // mode (where a full-screen master->back copy every frame would keep the blitter
-    // busy the whole frame and starve CPU VRAM access). Double-buffer Flat keeps the
-    // simpler full clear. Because a double-buffer page is recomposed only every other
-    // frame, each page carries its own prev-rect list (prev_[page]); single-buffer
-    // uses index 0 only.
-    static constexpr u8 kMaxRects = 8;
-    static_assert(kMaxRects * 2 <= 16,
-        "erase+draw BCBs (one each per rect) must fit BlitterQueue<16>");
-    struct Rect { u32 dest; u8 w, h; };
-    static inline Rect prev_[2][kMaxRects] = {};
-    static inline Rect cur_[kMaxRects]     = {};
-    static inline u8   prev_count_[2] = { 0, 0 };
-    static inline u8   cur_count_     = 0;
+    // Per-PAGE because double-buffering composes the alternate page each frame, so a
+    // change must be repainted on both pages (it naturally is: the slot reads dirty
+    // against each page until both match). Used for single-buffer (any background) AND
+    // double-buffer Bitmap (dirty-rect modes). Double-buffer Flat full-clears the page
+    // every frame, so it can't skip — it redraws all desired slots (cache unused).
+    static constexpr u8 kMaxSlots = 12;   // logical blitter sprites (arena VBXE: player + 7 enemies + 4 bullets)
+    static_assert(kMaxSlots * 2 <= kQueueDepth,
+        "erase+draw BCBs (one each per dirty slot) must fit the blitter queue");
+    // A slot caches the resolved shape entry (e) so the per-frame commit never
+    // re-scans the registry; e carries vram/w/h/fmt. e==nullptr ⇒ slot not present.
+    struct Slot { u8 x, y, color; const ShapeEntry* e; bool valid; };
+    static inline Slot painted_[2][kMaxSlots] = {};   // currently on each page, per slot
+    static inline Slot desired_[kMaxSlots]    = {};   // requested this frame (valid = present)
+    static inline u8   draw_order_[kMaxSlots] = {};   // slots in back-to-front draw order
+    static inline u8   draw_n_                = 0;
+    static inline u8   dirty_[kMaxSlots]      = {};   // per-slot dirty flag (commit scratch)
 
     // Whether the compositor restores per-rect (dirty-rect) rather than full-clearing
     // the back page: always single-buffer; double-buffer only with a bitmap background.
@@ -200,6 +208,7 @@ struct OverlayHal {
     // fill the master and publish it to the display page(s).
     static void overlay_set_background(u8 color) {
         bg_color_ = color;
+        overlay_invalidate_cache();   // a full background reset drops any cached sprites
         if constexpr (bitmap_bg) {
             blit_fill(Layout::master, color);
             overlay_publish_background();
@@ -209,13 +218,32 @@ struct OverlayHal {
         }
     }
 
-    // Publish the master canvas to the live display page(s). The game calls this
-    // after drawing the background via the bitmap seams (and after any dynamic
-    // edit) to seed/refresh what is shown. No-op outside sprites-over-bitmap mode.
+    // Copy the master canvas onto one page AND, in the same blitter chain, redraw the
+    // sprites currently cached for that page on top — so a republish never leaves the
+    // page sprite-less (the cause of the "sprites blink on a kill" glitch). Synchronous
+    // (NmiGuard so the VBI compositor can't race the shared queue). After a reset
+    // (clear/set_background) the cache is empty, so this just lays down the clean master.
+    static void publish_page(u8 pidx, u32 page) {
+        NmiGuard cs;
+        wait_blitter_idle();
+        queue_.reset();
+        queue_.push(vbxe::bcb_copy(Layout::master, page, fb_stride, fb_height,
+                                   fb_stride, fb_stride));
+        for (u8 s = 0; s < kMaxSlots; ++s)
+            if (painted_[pidx][s].valid) push_draw(painted_[pidx][s], page);
+        queue_.template submit<Config>();
+        wait_blitter_idle();
+        queue_.reset();
+    }
+
+    // Publish the master canvas to the live display page(s). The game calls this after
+    // drawing the background via the bitmap seams (HUD/explosion edits) to refresh what
+    // is shown. Sprites cached for each page are re-laid on top so they don't blink.
+    // No-op outside sprites-over-bitmap mode.
     static void overlay_publish_background() {
         if constexpr (bitmap_bg) {
-            blit_copy(Layout::master, Layout::fb_a);
-            if constexpr (double_buffered) blit_copy(Layout::master, Layout::fb_b);
+            publish_page(0, Layout::fb_a);
+            if constexpr (double_buffered) publish_page(1, Layout::fb_b);
         }
     }
 
@@ -251,48 +279,130 @@ struct OverlayHal {
         next_shape_ += bytes;
     }
 
-    // Start a frame's overlay composition. Double-buffer Flat: clear the whole hidden
-    // back page to the background colour (cheap, invisible until the flip). Everything
-    // else (single-buffer, and double-buffer Bitmap) erases only the rects drawn the
-    // last time THIS page was composed — a full clear/copy would race the async blitter
-    // and (in Bitmap mode) keep the blitter busy the whole frame, starving CPU VRAM
-    // draws. In Bitmap mode the erase is a master->page copy (restore the background);
-    // otherwise a flat clear to bg_color_. Then begin recording this frame's rects.
-    static void overlay_frame_begin() {
-        queue_.reset();
-        if constexpr (!dirty_rect) {
-            queue_.push(vbxe::bcb_clear(back_fb(), fb_stride, fb_height,
-                                        fb_stride, bg_color_));
-        } else {
-            const u8  pidx = compose_page_idx();
-            const u32 page = back_fb();
-            for (u8 i = 0; i < prev_count_[pidx]; ++i) {
-                const Rect& r = prev_[pidx][i];
-                if constexpr (bitmap_bg)
-                    queue_.push(vbxe::bcb_copy(
-                        Layout::master + (r.dest - page), r.dest,
-                        r.w, r.h, fb_stride, fb_stride));
-                else
-                    queue_.push(vbxe::bcb_clear(r.dest, r.w, r.h, fb_stride, bg_color_));
-            }
-            cur_count_ = 0;
-        }
+    // ── Skip-unchanged sprite compositing (begin → set per slot → commit) ──
+    //
+    // The generic SpriteManager calls overlay_begin_sprites(), then overlay_set_sprite()
+    // for each active sprite (by logical slot, in back-to-front order), then
+    // overlay_commit_sprites() which builds the frame's blitter chain. Only slots whose
+    // state changed since this page was last composed are erased + redrawn, so a
+    // stationary sprite costs nothing. overlay_submit() (called by the frame service)
+    // uploads the chain afterwards.
+
+    // Begin a frame: mark all slots not-present and start recording draw order.
+    static void overlay_begin_sprites() {
+        draw_n_ = 0;
+        for (u8 s = 0; s < kMaxSlots; ++s) desired_[s].valid = false;
     }
 
-    // Queue one sprite blit into the back buffer at (x, y). Packed1bpp uses the
-    // AND-mask to colour the instance; Pixel8bpp carries its own colours. Dirty-rect
-    // modes also record the footprint so the next compose of this page erases it.
-    static void overlay_blit_sprite(const u8* rom, u8 x, u8 y, u8 color) {
+    // Record one logical sprite's requested state for this frame (no BCB yet). The
+    // registry is scanned once here; the resolved entry is cached in the slot.
+    static void overlay_set_sprite(u8 slot, const u8* rom, u8 x, u8 y, u8 color) {
+        if (slot >= kMaxSlots) return;
         const ShapeEntry* e = find_shape(rom);
         if (!e) return;
-        const u32 dest = back_fb() + static_cast<u32>(y) * fb_stride + x;
+        desired_[slot] = Slot{ x, y, color, e, true };
+        draw_order_[draw_n_++] = slot;
+    }
+
+    // AABB overlap of two footprints.
+    static bool fp_overlap(u8 ax, u8 ay, u8 aw, u8 ah, u8 bx, u8 by, u8 bw, u8 bh) {
+        return ax < static_cast<u8>(bx + bw) && bx < static_cast<u8>(ax + aw) &&
+               ay < static_cast<u8>(by + bh) && by < static_cast<u8>(ay + ah);
+    }
+
+    // A slot is dirty on `pidx` if its requested state differs from what is painted
+    // there (visibility, position, shape, or colour — shape change is a different
+    // cached entry, so comparing the entry pointer covers w/h/vram/fmt).
+    static bool slot_dirty(u8 s, u8 pidx) {
+        const Slot& p = painted_[pidx][s];
+        const Slot& d = desired_[s];
+        if (d.valid != p.valid) return true;
+        if (!d.valid)           return false;
+        return d.x != p.x || d.y != p.y || d.e != p.e || d.color != p.color;
+    }
+
+    static void push_restore(const Slot& p, u32 page) {
+        const u32 dest = page + static_cast<u32>(p.y) * fb_stride + p.x;
+        if constexpr (bitmap_bg)
+            queue_.push(vbxe::bcb_copy(Layout::master + (dest - page), dest,
+                                       p.e->w, p.e->h, fb_stride, fb_stride));
+        else
+            queue_.push(vbxe::bcb_clear(dest, p.e->w, p.e->h, fb_stride, bg_color_));
+    }
+
+    static void push_draw(const Slot& d, u32 page) {
+        const ShapeEntry* e = d.e;
+        const u32 dest = page + static_cast<u32>(d.y) * fb_stride + d.x;
         if (e->fmt == engine::SpriteFormat::Pixel8bpp)
             queue_.push(vbxe::bcb_sprite(e->vram, dest, e->w, e->h, e->w, fb_stride));
         else
             queue_.push(vbxe::bcb_sprite_colored(e->vram, dest, e->w, e->h,
-                                                 e->w, fb_stride, color));
-        if constexpr (dirty_rect)
-            if (cur_count_ < kMaxRects) cur_[cur_count_++] = Rect{ dest, e->w, e->h };
+                                                 e->w, fb_stride, d.color));
+    }
+
+    // Build this frame's blitter chain from the recorded sprites.
+    static void overlay_commit_sprites() {
+        queue_.reset();
+        const u32 page = back_fb();
+
+        if constexpr (!dirty_rect) {
+            // Double-buffer Flat: the page is wiped every frame, so nothing persists —
+            // full-clear then draw every requested sprite (no skip, cache unused).
+            queue_.push(vbxe::bcb_clear(page, fb_stride, fb_height, fb_stride, bg_color_));
+            for (u8 k = 0; k < draw_n_; ++k) push_draw(desired_[draw_order_[k]], page);
+            return;
+        }
+
+        const u8 pidx = compose_page_idx();
+
+        // 1. Base dirty set: slots whose state changed vs this page.
+        for (u8 s = 0; s < kMaxSlots; ++s) dirty_[s] = slot_dirty(s, pidx) ? 1 : 0;
+
+        // 2. Overlap propagation: erasing a dirty slot's old/new footprint (an opaque
+        //    rectangular restore) would punch a hole in any sprite it overlaps, so any
+        //    clean+present slot overlapping a dirty slot's old or new footprint must be
+        //    redrawn too. Iterate to a fixed point (n is tiny).
+        for (bool changed = true; changed;) {
+            changed = false;
+            for (u8 d = 0; d < kMaxSlots; ++d) {
+                if (!dirty_[d]) continue;
+                const Slot& po = painted_[pidx][d];   // d's old footprint (this page)
+                const Slot& dn = desired_[d];          // d's new footprint
+                for (u8 s = 0; s < kMaxSlots; ++s) {
+                    if (dirty_[s] || !desired_[s].valid) continue;
+                    const Slot& c = desired_[s];        // clean slot's current footprint
+                    const bool hit =
+                        (po.valid && fp_overlap(c.x, c.y, c.e->w, c.e->h, po.x, po.y, po.e->w, po.e->h)) ||
+                        (dn.valid && fp_overlap(c.x, c.y, c.e->w, c.e->h, dn.x, dn.y, dn.e->w, dn.e->h));
+                    if (hit) { dirty_[s] = 1; changed = true; }
+                }
+            }
+        }
+
+        // 3. Erase the old footprints of all dirty slots (before any draw, so a draw
+        //    can't be clobbered by a later erase).
+        for (u8 s = 0; s < kMaxSlots; ++s)
+            if (dirty_[s] && painted_[pidx][s].valid) push_restore(painted_[pidx][s], page);
+
+        // 4. Draw the dirty present slots in back-to-front order; update the cache.
+        for (u8 k = 0; k < draw_n_; ++k) {
+            const u8 s = draw_order_[k];
+            if (!dirty_[s]) continue;
+            push_draw(desired_[s], page);
+            painted_[pidx][s] = desired_[s];   // valid == true
+        }
+
+        // 5. Dirty slots no longer present were just erased — mark them gone.
+        for (u8 s = 0; s < kMaxSlots; ++s)
+            if (dirty_[s] && !desired_[s].valid) painted_[pidx][s].valid = false;
+    }
+
+    // Invalidate the per-page sprite cache: forces a full erase+redraw next frames.
+    // Call whenever the page contents are overwritten outside the compositor (a
+    // background republish blit-copies the master over both pages, wiping sprites).
+    static void overlay_invalidate_cache() {
+        for (u8 pg = 0; pg < 2; ++pg)
+            for (u8 s = 0; s < kMaxSlots; ++s) painted_[pg][s].valid = false;
     }
 
     // These VBI-time seams touch VBXE core registers. They do NOT need to guard
@@ -305,13 +415,6 @@ struct OverlayHal {
     static void overlay_submit() {
         queue_.template submit<Config>();
         queue_.reset();
-        // Dirty-rect modes: this frame's drawn rects become this page's next erase
-        // list (recomposed next frame for single-buffer, in two frames for double).
-        if constexpr (dirty_rect) {
-            const u8 pidx = compose_page_idx();
-            for (u8 i = 0; i < cur_count_; ++i) prev_[pidx][i] = cur_[i];
-            prev_count_[pidx] = cur_count_;
-        }
     }
 
     // Latch the overlay-vs-playfield/PMG raster collision and clear it for next frame.
@@ -349,7 +452,10 @@ struct OverlayHal {
     // page — and are synchronous (blitter rect fills) or direct (MEMAC pixel/row
     // writes), each VBI-atomic via the NmiGuard in blit_rect / Memac.
 
-    static void overlay_bitmap_clear(u8 color) { blit_fill(canvas_fb(), color); }
+    // Clearing the whole canvas is a background reset: drop any cached sprites so the
+    // next publish lays down a clean field and the compositor repaints sprites fresh
+    // (rather than re-laying stale sprites from a previous screen).
+    static void overlay_bitmap_clear(u8 color) { overlay_invalidate_cache(); blit_fill(canvas_fb(), color); }
 
     static void overlay_bitmap_fill_rect(u16 x, u16 y, u16 w, u16 h, u8 color) {
         const u32 dest = canvas_fb() + static_cast<u32>(y) * fb_stride + x;
@@ -444,8 +550,9 @@ struct NullOverlay {
     static u8   overlay_blit_collision() { return 0; }
     static void overlay_present() {}
     static void overlay_register_shape(const u8*, u8, u8, engine::SpriteFormat) {}
-    static void overlay_frame_begin() {}
-    static void overlay_blit_sprite(const u8*, u8, u8, u8) {}
+    static void overlay_begin_sprites() {}
+    static void overlay_set_sprite(u8, const u8*, u8, u8, u8) {}
+    static void overlay_commit_sprites() {}
     static void overlay_set_background(u8) {}
     static void overlay_publish_background() {}
     static void overlay_bitmap_clear(u8) {}

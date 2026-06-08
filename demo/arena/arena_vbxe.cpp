@@ -21,6 +21,11 @@
 #include <engine/platform/atari/platform.h>
 #include <engine/platform/atari/vbxe.h>   // power-user: VBXE Config + palette set_color
 
+// The VBXE blitter has no 4-sprite hardware limit (unlike the P/M native build), and
+// the skip-unchanged compositor makes stationary enemies free, so this build carries
+// more enemies. Must be set before arena_shared.h. Slot budget: player(0) +
+// kEnemyCount enemies + 4 bullets must fit OverlayHal::kMaxSlots (12).
+#define ARENA_ENEMY_COUNT 6
 #include "arena_shared.h"
 
 namespace M = atari;
@@ -68,12 +73,15 @@ struct GameOverScreen {
 struct GameConfig {
     using screens        = engine::ScreenSet<TitleScreen, PlayScreen, GameOverScreen>;
     using initial_screen = TitleScreen;
-    // Tier 2: player (0) + 3 enemies (1..3) + 4 bullets (4..7) all composite as
+    // Tier 2: player (0) + kEnemyCount enemies (1..N) + 4 bullets all composite as
     // blitter overlay sprites (P/M would sit under the opaque overlay). The blitter
-    // has no 4-sprite hardware limit, so 8 logical sprites is fine.
-    static constexpr u8 max_sprites      = 8;
+    // has no 4-sprite hardware limit, so we carry many more than the native build.
+    static constexpr u8 max_sprites      = ARENA_ENEMY_COUNT + 5;   // player + enemies + 4 bullets
     static constexpr u8 sound_channels   = 2;
     static constexpr u8 max_raster_hooks = 1;   // unused on the overlay; keep minimal
+    // Bullets are blitter overlay sprites, not hardware missiles, so drop the 2K P/M
+    // buffer entirely (frees RAM and keeps .bss below the $A000 MEMAC window).
+    static constexpr bool uses_missiles  = false;
 };
 
 using Game = engine::Core<Platform, GameConfig>;
@@ -403,9 +411,9 @@ static void spawn_enemy() {
 //
 // The native build fires the four hardware P/M missiles, but on the opaque VBXE
 // overlay those projectiles sit UNDER the overlay and are invisible — so bullets are
-// drawn as small blitter sprites in slots 4..7 (4 + pool index; player is 0, enemies
-// 1..3 — max_sprites=8).
-static constexpr u8 kBulletSlotBase = 4;
+// drawn as small blitter sprites in the slots after the enemies (player is 0, enemies
+// 1..kEnemyCount, bullets kBulletSlotBase + pool index).
+static constexpr u8 kBulletSlotBase = kEnemyCount + 1;
 constexpr auto kBulletShape = engine::make_pixel_sprite<4, 4>({
     0, 3, 3, 0,
     3, 3, 3, 3,

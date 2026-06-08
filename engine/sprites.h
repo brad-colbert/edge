@@ -307,11 +307,16 @@ public:
     // below the overlay. The frame service runs the queued blits afterwards
     // (overlay_submit).
     void commit_blitter(u8* sprite_base) {
-        Platform::hal::overlay_frame_begin();
+        // Skip-unchanged compositing: hand the overlay each active sprite's state by
+        // logical slot (in back-to-front order), and let it erase+redraw only the
+        // slots that changed since the page was last composed (a stationary sprite
+        // costs no blitter work). order_[i] is the logical slot index.
+        Platform::hal::overlay_begin_sprites();
         for (u8 i = 0; i < active_count_; ++i) {
             const LogicalSprite& s = sprites_[order_[i]];
-            Platform::hal::overlay_blit_sprite(s.shape, s.x, s.y, s.color);
+            Platform::hal::overlay_set_sprite(order_[i], s.shape, s.x, s.y, s.color);
         }
+        Platform::hal::overlay_commit_sprites();
         commit_missiles(sprite_base);
     }
 
