@@ -137,10 +137,10 @@ public:
     // none (uses_missiles=false), the buffer is dropped to free RAM. Non-blitter
     // backends always need it (hardware sprites live here).
     static constexpr bool kUsesMissiles  = cdetail::uses_missiles<GameConfig>::value;
-    static constexpr bool kNeedPmBuffer  =
+    static constexpr bool kNeedSpriteMem =
         !engine::caps_of_t<Platform>::has_blitter || kUsesMissiles;
-    static constexpr u16 kPmBytes        =
-        kNeedPmBuffer ? Platform::hal::sprite_area_bytes : 0;
+    static constexpr u16 kSpriteMemBytes =
+        kNeedSpriteMem ? Platform::hal::sprite_area_bytes : 0;
     static constexpr u16 kCharsetBytes   = 1024;   // largest charset (Charset1K)
 
     // Subsystem types.
@@ -428,7 +428,7 @@ public:
             // finished, so it returns at once. Single-buffer present is a no-op (it
             // composes the visible page in place, dirty-rect).
             Platform::hal::overlay_present();
-            sprites.commit(pm_buffer_);
+            sprites.commit(sprite_mem_);
             Platform::hal::overlay_submit();
 
             // 4. Latch overlay collisions (overlay↔playfield/sprite and overlay↔overlay).
@@ -438,7 +438,7 @@ public:
             }
         } else {
             // Baseline path: write hardware-sprite memory, then latch + clear collisions.
-            sprites.commit(pm_buffer_);
+            sprites.commit(sprite_mem_);
             for (u8 i = 0; i < 4; ++i) {
                 collisions_.s_bg[i] = Platform::hal::coll_player_playfield(i);
                 collisions_.s_s[i]  = Platform::hal::coll_player_player(i);
@@ -477,7 +477,7 @@ public:
     static constexpr u16 ram_usage =
         static_cast<u16>(sizeof(Screen) + sizeof(Sprites) + sizeof(Sound) +
                          sizeof(Scroll) + sizeof(Tiles) + sizeof(Interrupts) +
-                         sizeof(InputState<kPorts>) + kPmBytes + kCharsetBytes);
+                         sizeof(InputState<kPorts>) + kSpriteMemBytes + kCharsetBytes);
 
     // Zero-page accounting is approximate until a global ZP allocator exists:
     // the engine reserves a fixed slice at the base of the $80-$FF user page, the
@@ -490,10 +490,10 @@ public:
 
 private:
     static void setup_sprites() {
-        if constexpr (kNeedPmBuffer) {
-            Platform::hal::set_sprite_base(page_of(pm_buffer_));
+        if constexpr (kNeedSpriteMem) {
+            Platform::hal::set_sprite_base(page_of(sprite_mem_));
             // Pass the sprite manager's vertical resolution so the HAL sets single-line
-            // sprite DMA to match the layout sprites.commit() writes into pm_buffer_.
+            // sprite DMA to match the layout sprites.commit() writes into sprite_mem_.
             Platform::hal::sprite_dma_enable(
                 sprites.resolution() == SpriteVerticalResolution::SingleLine);
         }
@@ -507,7 +507,7 @@ private:
 
     // Hardware-sprite graphics memory. Single-line resolution wants 2K alignment
     // so the high byte alone selects the region (the sprite base register).
-    alignas(2048) static inline u8 pm_buffer_[kPmBytes] = {};
+    alignas(2048) static inline u8 sprite_mem_[kSpriteMemBytes] = {};
     // Char-set destination (page-aligned so the charset base is just the high byte).
     alignas(256)  static inline u8 charset_buffer_[kCharsetBytes] = {};
 
