@@ -83,10 +83,10 @@ struct user_zp_bytes<C, void_t<decltype(C::user_zp_bytes)>> {
     static constexpr u8 value = C::user_zp_bytes;
 };
 
-// uses_missiles: whether the game uses the hardware projectiles. Default true (all
-// existing games keep their P/M-sprite buffer). A blitter game that draws everything
-// as overlay sprites can set `uses_missiles = false` to drop the 2K P/M buffer — a
-// large saving that also keeps RAM clear of the MEMAC window on tight VBXE builds.
+// uses_missiles: whether the game uses hardware missiles (Core::missile). Default
+// true. A game that draws everything through the blitter/overlay and fires no missiles
+// can set `uses_missiles = false`; the engine then skips reserving the hardware
+// sprite-memory buffer, freeing that RAM for the game.
 template <typename C, typename = void>
 struct uses_missiles { static constexpr bool value = true; };
 template <typename C>
@@ -132,9 +132,10 @@ public:
     static constexpr u8  kPorts          = cdetail::ports<Platform>::value;
     static constexpr u8  kMaxRasterHooks = cdetail::max_raster_hooks<GameConfig>::value;
     static constexpr u8  kMaxFrameHooks  = cdetail::max_frame_hooks<GameConfig>::value;
-    // Hardware P/M graphics memory. A blitter game that uses no hardware missiles
-    // (uses_missiles=false) needs none — drop it (saves 2K and keeps RAM out of the
-    // MEMAC window). Players are never hardware sprites on a blitter backend.
+    // Hardware sprite-memory buffer sizing. A blitter backend composes sprites itself,
+    // so it only needs this buffer for hardware missiles; if the game declares it uses
+    // none (uses_missiles=false), the buffer is dropped to free RAM. Non-blitter
+    // backends always need it (hardware sprites live here).
     static constexpr bool kUsesMissiles  = cdetail::uses_missiles<GameConfig>::value;
     static constexpr bool kNeedPmBuffer  =
         !engine::caps_of_t<Platform>::has_blitter || kUsesMissiles;
@@ -496,8 +497,8 @@ private:
             Platform::hal::sprite_dma_enable(
                 sprites.resolution() == SpriteVerticalResolution::SingleLine);
         }
-        // else: no hardware projectiles — leave P/M DMA off so the hardware never
-        // fetches the (absent) buffer; the blitter draws everything in the overlay.
+        // else: no hardware missiles — leave hardware-sprite DMA off so nothing
+        // fetches the (absent) buffer; the blitter composes everything itself.
     }
     static u8 page_of(const void* p) {
         return static_cast<u8>(
