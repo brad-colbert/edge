@@ -54,11 +54,21 @@ Implemented today:
   `engine::OverlayRegion` in a screen's `DisplayLayout`; a pure-overlay screen
   turns ANTIC DMA off automatically
 
+Networking (`engine/net.h`):
+
+- dual-lane API (`Game::net.realtime` and `Game::net.session`) implemented and frozen
+- compile-time capability gating: `Game::net` is absent on `Network::None` platforms; individual
+  lanes are absent when their lane capability is disabled
+- **Session lane** (`Game::net.session`) optionally wired to real fujinet-lib TCP transport;
+  enable at configure time with `-DEDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON` (OFF by default;
+  no external library required for default builds)
+- **Realtime lane** (`Game::net.realtime`) stubbed; FujiNet Netstream / UDP-seq wiring deferred
+- the `net_dual_lane_demo` compiles and demonstrates the intended API shape
+
 Planned or intentionally deferred:
 
 - broader non-Atari backends
-- `engine/net.h` (the networking *subsystem*; the `Network`/Fujinet capability
-  axis already exists on the Atari platform)
+- realtime lane FujiNet Netstream / UDP-seq wiring
 
 ## Example program shape
 

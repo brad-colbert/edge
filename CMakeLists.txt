@@ -29,6 +29,63 @@ option(EDGE_BUILD_DEMO
        "Build the Atari .xex demo via add_executable (atari8-dos toolchain only)"
        OFF)
 
+option(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB
+       "Enable Atari FujiNet session adapter scaffolding against external fujinetlib-llvm"
+       OFF)
+
+set(EDGE_FUJINETLIB_ROOT
+    ""
+    CACHE PATH
+    "Root path to fujinetlib-llvm checkout (optional if include/library are set explicitly)")
+set(EDGE_FUJINETLIB_INCLUDE_DIR
+    ""
+    CACHE PATH
+    "Path to fujinetlib include directory (contains fujinet-network.h)")
+set(EDGE_FUJINETLIB_LIBRARY
+    ""
+    CACHE FILEPATH
+    "Path to libfujinet.a")
+
+set(EDGE_FUJINET_VALIDATE_HOST
+    "192.168.1.205"
+    CACHE STRING
+    "Host used by demo/fujinet_session_validate runtime validation demo")
+set(EDGE_FUJINET_VALIDATE_PORT
+    "9000"
+    CACHE STRING
+    "Port used by demo/fujinet_session_validate runtime validation demo")
+
+if(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB)
+    if(EDGE_FUJINETLIB_ROOT)
+        if(NOT EDGE_FUJINETLIB_INCLUDE_DIR)
+            set(EDGE_FUJINETLIB_INCLUDE_DIR "${EDGE_FUJINETLIB_ROOT}/src/include")
+        endif()
+        if(NOT EDGE_FUJINETLIB_LIBRARY)
+            set(EDGE_FUJINETLIB_LIBRARY "${EDGE_FUJINETLIB_ROOT}/build/libfujinet.a")
+        endif()
+    endif()
+
+    if(NOT EDGE_FUJINETLIB_INCLUDE_DIR OR NOT EDGE_FUJINETLIB_LIBRARY)
+        message(FATAL_ERROR
+            "EDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON requires EDGE_FUJINETLIB_ROOT or both EDGE_FUJINETLIB_INCLUDE_DIR and EDGE_FUJINETLIB_LIBRARY")
+    endif()
+
+    if(NOT EXISTS "${EDGE_FUJINETLIB_INCLUDE_DIR}/fujinet-network.h")
+        message(FATAL_ERROR
+            "Missing fujinet-network.h under EDGE_FUJINETLIB_INCLUDE_DIR='${EDGE_FUJINETLIB_INCLUDE_DIR}'")
+    endif()
+    if(NOT EXISTS "${EDGE_FUJINETLIB_INCLUDE_DIR}/fujinet-network-atari.h")
+        message(FATAL_ERROR
+            "Missing fujinet-network-atari.h under EDGE_FUJINETLIB_INCLUDE_DIR='${EDGE_FUJINETLIB_INCLUDE_DIR}'")
+    endif()
+    if(NOT EXISTS "${EDGE_FUJINETLIB_LIBRARY}")
+        message(FATAL_ERROR
+            "EDGE_FUJINETLIB_LIBRARY does not exist: '${EDGE_FUJINETLIB_LIBRARY}'")
+    endif()
+
+    add_compile_definitions(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB=1)
+endif()
+
 # Diagnostic mode for the atari_vbxe_bringup demo: 0 = colour bars, 1 = solid
 # fill, 2 = VRAM round-trip probe. Passed to the compiler as -DVBXE_BRINGUP_MODE.
 set(EDGE_VBXE_BRINGUP_MODE 0
@@ -42,6 +99,14 @@ set(EDGE_DEMO_CHARSET_BIN
 set(USER_CHARSET_HEADER ${CMAKE_SOURCE_DIR}/demo/user_charset.h)
 set(GENERATE_CHARSET_HEADER_SCRIPT
     ${CMAKE_SOURCE_DIR}/cmake/generate_charset_header.cmake)
+
+# fujinetlib — prebuilt static library + headers, used by the fujinet_net_test
+# demo. Built with the same mos-atari8-dos toolchain (see that repo's
+# CMakeLists.txt). Override FUJINETLIB_DIR if the checkout lives elsewhere.
+set(FUJINETLIB_DIR ""
+    CACHE PATH "Path to the fujinetlib-llvm checkout")
+set(FUJINETLIB_INC ${FUJINETLIB_DIR}/src/include)
+set(FUJINETLIB_A   ${FUJINETLIB_DIR}/build/libfujinet.a)
 
 add_custom_command(
     OUTPUT ${USER_CHARSET_HEADER}
@@ -145,6 +210,56 @@ if(EDGE_BUILD_DEMO)
     set_target_properties(arena_vbxe PROPERTIES OUTPUT_NAME "arena_vbxe.xex")
     target_link_options(arena_vbxe PRIVATE
         "LINKER:--Map=$<TARGET_FILE_DIR:arena_vbxe>/arena_vbxe.map")
+
+    # Fujinet UDP position-streaming smoke test — links the prebuilt fujinetlib.
+    # -O2 (not -Os): -Os breaks real-time performance with the template-heavy
+    # engine headers (same as the arena demos).
+    if(EXISTS "${FUJINETLIB_INC}/fujinet-network.h" AND EXISTS "${FUJINETLIB_A}")
+        add_executable(fujinet_net_test demo/fujinet_net_test/fujinet_net_test.cpp)
+        target_compile_options(fujinet_net_test PRIVATE
+            -std=c++20 -fno-exceptions -fno-rtti -O2 -Wall -Wextra)
+        target_include_directories(fujinet_net_test PRIVATE
+            ${CMAKE_SOURCE_DIR} ${FUJINETLIB_INC})
+        target_link_libraries(fujinet_net_test PRIVATE ${FUJINETLIB_A})
+        set_target_properties(fujinet_net_test PROPERTIES OUTPUT_NAME "fujinet_net_test.xex")
+        target_link_options(fujinet_net_test PRIVATE
+            "LINKER:--Map=$<TARGET_FILE_DIR:fujinet_net_test>/fujinet_net_test.map")
+    else()
+        message(STATUS
+            "Skipping fujinet_net_test: set FUJINETLIB_DIR to a valid fujinetlib-llvm checkout")
+    endif()
+
+    # Stage 8H runtime validation demo (session lane only).
+    # Build only when fujinet-lib session wiring is enabled and the toolchain is
+    # Atari/llvm-mos compatible.
+    if(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB AND CMAKE_CXX_COMPILER MATCHES "mos")
+        add_executable(fujinet_session_validate
+            demo/fujinet_session_validate/fujinet_session_validate.cpp)
+        target_compile_options(fujinet_session_validate PRIVATE
+            -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra)
+        target_compile_definitions(fujinet_session_validate PRIVATE
+            EDGE_FUJINET_VALIDATE_HOST="${EDGE_FUJINET_VALIDATE_HOST}"
+            EDGE_FUJINET_VALIDATE_PORT=${EDGE_FUJINET_VALIDATE_PORT})
+        target_include_directories(fujinet_session_validate PRIVATE
+            ${CMAKE_SOURCE_DIR} ${EDGE_FUJINETLIB_INCLUDE_DIR})
+        target_link_libraries(fujinet_session_validate PRIVATE ${EDGE_FUJINETLIB_LIBRARY})
+        set_target_properties(fujinet_session_validate PROPERTIES
+            OUTPUT_NAME "fujinet_session_validate.xex")
+        target_link_options(fujinet_session_validate PRIVATE
+            "LINKER:--Map=$<TARGET_FILE_DIR:fujinet_session_validate>/fujinet_session_validate.map")
+    else()
+        message(STATUS
+            "Skipping fujinet_session_validate executable: requires EDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON and a mos toolchain")
+    endif()
+
+    # Dual-lane EDGE net API usage demo (stubbed seam; no real transport wiring).
+    add_executable(net_dual_lane_demo demo/net_dual_lane/net_dual_lane.cpp)
+    target_compile_options(net_dual_lane_demo PRIVATE
+        -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra)
+    target_include_directories(net_dual_lane_demo PRIVATE ${CMAKE_SOURCE_DIR})
+    set_target_properties(net_dual_lane_demo PROPERTIES OUTPUT_NAME "net_dual_lane_demo.xex")
+    target_link_options(net_dual_lane_demo PRIVATE
+        "LINKER:--Map=$<TARGET_FILE_DIR:net_dual_lane_demo>/net_dual_lane_demo.map")
     return()
 endif()
 
@@ -345,6 +460,89 @@ if(MOS_ATARI8_CXX)
         COMMENT "Building Atari XEX demo (arena_vbxe.xex)"
         VERBATIM)
     add_custom_target(arena_vbxe DEPENDS ${ARENA_VBXE_XEX})
+
+    # ── Fujinet UDP position-streaming smoke test (fujinet_net_test.xex) ──
+    #   cmake --build build --target fujinet_net_test  # -> build/fujinet_net_test.xex
+    # Links the prebuilt fujinetlib static lib (passed as a command-line input)
+    # and adds its include dir. -O2 (not -Os): -Os breaks real-time performance
+    # with the template-heavy engine headers (same as the arena demos).
+    if(EXISTS "${FUJINETLIB_INC}/fujinet-network.h" AND EXISTS "${FUJINETLIB_A}")
+        set(FNTEST_XEX ${CMAKE_BINARY_DIR}/fujinet_net_test.xex)
+        set(FNTEST_MAP ${CMAKE_BINARY_DIR}/fujinet_net_test.map)
+        add_custom_command(
+            OUTPUT ${FNTEST_XEX}
+            COMMAND ${MOS_ATARI8_CXX}
+                    -std=c++20 -fno-exceptions -fno-rtti -O2 -Wall -Wextra
+                    -I${CMAKE_SOURCE_DIR} -I${FUJINETLIB_INC}
+                    ${CMAKE_SOURCE_DIR}/demo/fujinet_net_test/fujinet_net_test.cpp
+                    ${FUJINETLIB_A}
+                    -o ${FNTEST_XEX}
+                    -Wl,--Map=${FNTEST_MAP}
+            DEPENDS ${CMAKE_SOURCE_DIR}/demo/fujinet_net_test/fujinet_net_test.cpp
+                    ${FUJINETLIB_A}
+                    ${EDGE_ENGINE_HEADERS}
+            BYPRODUCTS ${FNTEST_MAP}
+            COMMENT "Building Atari XEX demo (fujinet_net_test.xex)"
+            VERBATIM)
+        add_custom_target(fujinet_net_test DEPENDS ${FNTEST_XEX})
+    else()
+        message(STATUS
+            "Skipping fujinet_net_test custom target: set FUJINETLIB_DIR to a valid fujinetlib-llvm checkout")
+    endif()
+
+    # ── Stage 8H session-lane runtime validation demo ─────────────────────
+    #   cmake --build build --target fujinet_session_validate
+    #     -> build/fujinet_session_validate.xex
+    # Gated to optional fujinet-lib integration and mos-atari8-dos compiler.
+    if(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB
+       AND EXISTS "${EDGE_FUJINETLIB_INCLUDE_DIR}/fujinet-network.h"
+       AND EXISTS "${EDGE_FUJINETLIB_LIBRARY}")
+        set(FN_SESSION_VALIDATE_XEX ${CMAKE_BINARY_DIR}/fujinet_session_validate.xex)
+        set(FN_SESSION_VALIDATE_MAP ${CMAKE_BINARY_DIR}/fujinet_session_validate.map)
+        add_custom_command(
+            OUTPUT ${FN_SESSION_VALIDATE_XEX}
+            COMMAND ${MOS_ATARI8_CXX}
+                    -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra
+                    -DEDGE_FUJINET_VALIDATE_HOST=\"${EDGE_FUJINET_VALIDATE_HOST}\"
+                    -DEDGE_FUJINET_VALIDATE_PORT=${EDGE_FUJINET_VALIDATE_PORT}
+                    -DEDGE_ATARI_FUJINET_SESSION_FUJINETLIB=1
+                    -I${CMAKE_SOURCE_DIR} -I${EDGE_FUJINETLIB_INCLUDE_DIR}
+                    ${CMAKE_SOURCE_DIR}/demo/fujinet_session_validate/fujinet_session_validate.cpp
+                    ${EDGE_FUJINETLIB_LIBRARY}
+                    -o ${FN_SESSION_VALIDATE_XEX}
+                    -Wl,--Map=${FN_SESSION_VALIDATE_MAP}
+            DEPENDS ${CMAKE_SOURCE_DIR}/demo/fujinet_session_validate/fujinet_session_validate.cpp
+                    ${CMAKE_SOURCE_DIR}/demo/fujinet_session_validate/README.md
+                    ${EDGE_FUJINETLIB_LIBRARY}
+                    ${EDGE_ENGINE_HEADERS}
+            BYPRODUCTS ${FN_SESSION_VALIDATE_MAP}
+            COMMENT "Building Atari XEX demo (fujinet_session_validate.xex)"
+            VERBATIM)
+        add_custom_target(fujinet_session_validate DEPENDS ${FN_SESSION_VALIDATE_XEX})
+    else()
+        message(STATUS
+            "Skipping fujinet_session_validate custom target: requires EDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON and valid EDGE_FUJINETLIB include/library paths")
+    endif()
+
+    # ── Dual-lane EDGE net API usage demo (net_dual_lane_demo.xex) ─────────
+    #   cmake --build build --target net_dual_lane_demo  # -> build/net_dual_lane_demo.xex
+    # Keeps transport fully stubbed: demonstrates API usage only.
+    set(NET_DUAL_LANE_XEX ${CMAKE_BINARY_DIR}/net_dual_lane_demo.xex)
+    set(NET_DUAL_LANE_MAP ${CMAKE_BINARY_DIR}/net_dual_lane_demo.map)
+    add_custom_command(
+        OUTPUT ${NET_DUAL_LANE_XEX}
+        COMMAND ${MOS_ATARI8_CXX}
+                -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra
+                -I${CMAKE_SOURCE_DIR}
+                ${CMAKE_SOURCE_DIR}/demo/net_dual_lane/net_dual_lane.cpp
+                -o ${NET_DUAL_LANE_XEX}
+                -Wl,--Map=${NET_DUAL_LANE_MAP}
+        DEPENDS ${CMAKE_SOURCE_DIR}/demo/net_dual_lane/net_dual_lane.cpp
+                ${EDGE_ENGINE_HEADERS}
+        BYPRODUCTS ${NET_DUAL_LANE_MAP}
+        COMMENT "Building Atari XEX demo (net_dual_lane_demo.xex)"
+        VERBATIM)
+    add_custom_target(net_dual_lane_demo DEPENDS ${NET_DUAL_LANE_XEX})
 else()
-    message(STATUS "mos-atari8-dos-clang++ not found; 'atari_hw_test'/'atari_scroll_test'/'atari_vbxe_bringup' demo targets unavailable")
+    message(STATUS "mos-atari8-dos-clang++ not found; 'atari_hw_test'/'atari_scroll_test'/'atari_vbxe_bringup'/'net_dual_lane_demo'/'fujinet_session_validate' demo targets unavailable")
 endif()

@@ -409,14 +409,137 @@ Atari-specific pieces in that example:
 
 Everything else is part of the general EDGE authoring model.
 
+## Networking on Atari
+
+The `atari::Network` axis selects the network backend:
+
+- `atari::Network::None` (default) — no `Game::net` member; zero net storage in `Core`
+- `atari::Network::Fujinet` — `Game::net.realtime` and `Game::net.session` both present
+
+```cpp
+using Platform = atari::Platform<
+    atari::Machine::XL, atari::RAM::Baseline,
+    atari::gfx::Baseline, atari::Sound::Mono, atari::TV::NTSC,
+    atari::Network::Fujinet>;    // enables both lanes
+```
+
+The `FullUpgrade` alias includes Fujinet:
+
+```cpp
+using Platform = atari::FullUpgrade;   // XL, U1MB, VBXE<>, PokeyMax, NTSC, Fujinet
+```
+
+### Capability flags set by Fujinet
+
+| Flag | Value |
+|---|---|
+| `has_network` | `true` |
+| `has_network_realtime` | `true` |
+| `has_network_session` | `true` |
+| `network_realtime_transport` | `NetworkTransport::UDP` |
+| `network_session_transport` | `NetworkTransport::TCP` |
+| `network_realtime_max_payload` | 512 |
+| `network_session_max_message` | 512 |
+| `network_session_reliable` | `true` |
+| `network_latency_ms` | 2 |
+
+### Backend wiring status
+
+| Lane | Backend | Status |
+|---|---|---|
+| `Game::net.session` | fujinet-lib / CIO `N:` TCP client | **Optional** — see below |
+| `Game::net.realtime` | FujiNet Netstream / UDP-seq | Deferred — stubbed |
+
+#### Session lane — optional fujinet-lib wiring
+
+The session lane can be wired to the real [fujinet-lib](https://github.com/FujiNetWIFI/fujinet-lib)
+C library using the `EDGE_ATARI_FUJINET_SESSION_FUJINETLIB` CMake option.
+This is **OFF by default**; default builds require no external library.
+
+```sh
+# Enable at configure time and point to your fujinet-lib checkout:
+cmake -S . -B build \
+    -DEDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON \
+    -DEDGE_FUJINETLIB_ROOT=/path/to/fujinetlib-llvm
+
+# Or supply include dir and archive explicitly:
+cmake -S . -B build \
+    -DEDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON \
+    -DEDGE_FUJINETLIB_INCLUDE_DIR=/path/to/fujinetlib-llvm/src/include \
+    -DEDGE_FUJINETLIB_LIBRARY=/path/to/fujinetlib-llvm/lib/libfujinet.a
+```
+
+**When ON**, the session adapter calls:
+- `network_init()` — once per adapter lifetime before the first open
+- `network_open(devicespec, OPEN_MODE_RW, OPEN_TRANS_NONE)` — opens a TCP connection
+- `network_close(devicespec)` — closes the connection
+- `network_read_nb(devicespec, buf, len)` — nonblocking read
+- `network_write(devicespec, buf, len)` — writes data to the session
+
+Device spec format: `N:TCP://<host>:<port>/` (built internally; 96-byte fixed buffer).
+
+**Blocking-risk note:** `network_write` (and `network_open`/`network_close`) may
+perform a full CIO/FujiNet SIO transaction and can stall for 1–3 ms. This is
+acceptable on the **session lane** for control/lobby messages. Do **not** use the
+session lane for realtime frame-rate data. Avoid large session writes during
+timing-critical frames.
+
+`session.poll()` does **not** call `network_write`. It remains a lightweight
+connected-flag check with no hidden flush.
+
+**When OFF** (the default):
+- no fujinet-lib headers are included
+- no fujinet-lib symbols are referenced
+- session methods return `Unsupported`/`WouldBlock` stubs
+- all existing tests pass without the library
+
+#### Realtime lane — deferred
+
+The realtime lane (`Game::net.realtime`) remains **stubbed**. Every
+`realtime_*` HAL method returns `WouldBlock` or a no-op. No FujiNet
+Netstream or UDP-seq wiring is present. Wiring is deferred to a later stage.
+
+#### Hardware / emulator validation checklist (deferred)
+
+Before relying on the session lane in production, validate against real
+hardware or an emulator with a FujiNet device:
+
+- [ ] llvm-mos link test with fujinet-lib archive passes
+- [ ] `connect_tcp()` opens a TCP connection to a test server
+- [ ] `send_bytes()` delivers a small control message via `network_write`
+- [ ] `recv()` delivers a small response via `network_read_nb`
+- [ ] Measure whether `network_write` blocks noticeably (expected: 1–3 ms)
+- [ ] Verify behavior when the server closes the connection
+- [ ] Verify error codes from a failed host/port (unreachable host)
+
+### Usage pattern
+
+```cpp
+static void init_network() {
+    Game::net.realtime.open_udp_seq("192.168.1.100", 9001);
+    Game::net.session.connect_tcp("192.168.1.100", 9000);
+}
+
+static void update_network_frame() {
+    Game::net.realtime.poll();
+    engine::net::RealtimePacket16 pkt{};
+    while (Game::net.realtime.recv(pkt)) { /* apply remote state */ }
+
+    Game::net.session.poll();
+    engine::net::SessionMessageView msg{};
+    while (Game::net.session.recv(msg)) { /* handle reliable data */ }
+}
+```
+
+See `demo/net_dual_lane/net_dual_lane.cpp` for the full demo and
+[API Reference — Network API](./API_REFERENCE.md#network-api) for the complete
+method list.
+
 ## Current Limits
 
-- `engine/net.h` (the networking *subsystem*) is still a placeholder. The
-  `Network`/Fujinet *capability axis* is real — `capabilities::has_network`,
-  `network_transport`, `network_max_payload` are all set — but the portable net
-  API on top of it is not built yet.
 - display layouts still use the Atari mode enum (`atari::Mode`) as the concrete backend token, supplied
   through the `engine::display::traits` seam; a second backend would add its own mode type and traits
 - the first backend is Atari, so some examples necessarily use Atari terminology
+- the Atari FujiNet session lane is optionally wired to fujinet-lib (OFF by default); the realtime lane remains stubbed
 
 That is expected at this stage of the project. The docs in this folder are organized so the general engine shape stays clear even where the concrete implementation is currently Atari-first.

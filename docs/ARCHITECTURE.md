@@ -178,11 +178,21 @@ distinguish platforms with fundamentally different pixel modes.
 
 **Network capabilities:**
 
-- `has_network` — network hardware present
-- `network_transport` — transport type (UDP, TCP, serial)
-- `network_reliable` — whether transport guarantees delivery
-- `network_max_payload` — maximum bytes per send
-- `network_latency_ms` — approximate round-trip latency
+- `has_network` — any network hardware present (true if either lane is enabled)
+- `has_network_realtime` — fixed-packet realtime lane available
+- `has_network_session` — framed byte-stream session lane available
+- `network_realtime_transport` — transport kind for the realtime lane (UDP, TCP, Serial, None)
+- `network_session_transport` — transport kind for the session lane
+- `network_realtime_max_payload` — maximum bytes per realtime send
+- `network_session_max_message` — maximum bytes per session message
+- `network_session_reliable` — whether session transport guarantees delivery
+- `network_latency_ms` — approximate round-trip latency hint
+
+Compatibility aliases (older code paths): `network_transport`, `network_reliable`,
+`network_max_payload`, `network_latency_ms`.
+
+`Network::None` sets all flags false/zero. `Game::net` is compile-time absent on
+these platforms, adding no storage to `Core`. `Network::Fujinet` enables both lanes.
 
 ## Engine Subsystems
 

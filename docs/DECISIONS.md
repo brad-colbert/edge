@@ -1500,3 +1500,76 @@ callers are the engine's own demos, this is a one-site update. Future
 callers will find the function where it semantically belongs — in the
 Atari platform headers — rather than on a generic facade that implies
 cross-platform availability.
+
+---
+
+## ADR-032: Session Lane Uses network_write; Realtime Lane Must Not
+
+**Status:** Accepted
+
+**Context:**
+After wiring the FujiNet session lane to fujinet-lib (Stages 8E–8F), the
+engine has two network lanes with different latency and reliability contracts:
+
+- **Session lane** (`Game::net.session`) — TCP/reliable, intended for lobby,
+  login, control messages, and match setup. Occasional multi-millisecond stalls
+  are acceptable here.
+- **Realtime lane** (`Game::net.realtime`) — intended for frame-rate multiplayer
+  state snapshots. Frame stalls are not acceptable here.
+
+The question is: which lane is permitted to call `network_write`, and what
+invariants must hold about hidden flushes?
+
+**Options Considered:**
+
+1. **network_write permitted on both lanes:** Realtime lane also calls
+   `network_write` for frame-rate sends. Problem: `network_write` performs a
+   full CIO/FujiNet SIO transaction and may stall for 1–3 ms. A stall every
+   frame would break the realtime lane's timing contract entirely.
+
+2. **network_write gated behind a compile flag but available on both lanes:**
+   Game code could opt in. Problem: the compile flag is a build-time choice, not
+   a per-call choice. It cannot prevent game code from accidentally calling send
+   on the realtime lane from a timing-critical path.
+
+3. **network_write restricted to session lane; realtime lane uses Netstream/UDP-seq
+   when wired** (chosen): The session adapter is the only site that calls
+   `network_write`. The realtime lane adapter never calls it. When the realtime
+   lane is wired in a future stage, it will use a non-blocking UDP-seq / Netstream
+   path.
+
+**Decision:**
+`network_write` is called only from `FujinetLibSessionAdapter::session_send_nb`.
+No realtime path, no `session_poll`, and no frame-service code calls
+`network_write`. This is enforced by code structure (only the session adapter
+file contains the call) and documented in the blocking-risk comment at the call
+site.
+
+**Rationale:**
+The session lane already accepts occasional multi-ms stalls by design (ADR-016
+discusses SIO latency). The realtime lane must not stall. Keeping `network_write`
+strictly inside `session_send_nb` makes the boundary explicit and auditable
+with a simple grep.
+
+**Blocking-risk note recorded at call site:**
+```
+// NOTE (Stage 8F): network_write may block or perform a full CIO/FujiNet
+// transaction. This call is only safe on the session/control lane where
+// occasional frame stalls are acceptable. Do NOT use this path for
+// realtime traffic; the realtime lane must use Netstream/UDP-seq when
+// that stage is implemented. Avoid large writes during timing-critical
+// frames; prefer small, bounded messages on the session lane.
+```
+
+**Invariants established:**
+- `session.poll()` does **not** call `network_write` (no hidden flush).
+- `network_write` is **not** referenced in any realtime lane file.
+- `network_write` is **not** referenced in VBI or frame-service context.
+- The realtime lane adapter (`fujinet_realtime_*.h`) will use a separate
+  non-blocking symbol when wired in a future stage.
+
+**Tradeoff:**
+The session send path may stall the frame by 1–3 ms on the frame it is called.
+Game code should send only small control messages on the session lane, not bulk
+data, and should not call session send from frames with tight timing budgets.
+This is the same tradeoff accepted in ADR-016 for polling in general.
