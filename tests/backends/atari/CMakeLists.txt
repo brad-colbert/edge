@@ -70,3 +70,30 @@ if(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB)
 			${EDGE_FUJINETLIB_LIBRARY})
 	endif()
 endif()
+
+# Stage 9H: RX ring behavioral self-test, run under mos-sim. Compiles the
+# EDGE-owned handler + ABI shim with PRIVATE test hooks (EDGE_NETSTREAM_TEST_HOOKS)
+# and exercises _ns_recv_byte / _ns_bytes_avail (via the shim) end to end. The
+# handler routines are pure-RAM, so they execute under the simulator (SMC works in
+# sim RAM). Requires the realtime option ON and the mos toolchain (the default
+# unit-test build is mos-sim). Self-contained: no upstream netstream.s, no CA65.
+if(EDGE_ATARI_FUJINET_REALTIME_NETSTREAM AND CMAKE_CXX_COMPILER MATCHES "mos")
+	add_executable(test_netstream_rx_ring
+		test_netstream_rx_ring.cpp
+		${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_realtime_abi.s
+		${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_handler.S)
+	set_source_files_properties(
+		${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_realtime_abi.s
+		${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_handler.S
+		PROPERTIES
+		LANGUAGE C
+		COMPILE_OPTIONS "-x;assembler-with-cpp")
+	target_include_directories(test_netstream_rx_ring PRIVATE
+		${CMAKE_SOURCE_DIR}
+		${CMAKE_SOURCE_DIR}/engine/platform/atari)
+	target_compile_definitions(test_netstream_rx_ring PRIVATE
+		EDGE_ATARI_FUJINET_REALTIME_NETSTREAM=1
+		EDGE_NETSTREAM_TEST_HOOKS=1)
+	add_test(NAME test_netstream_rx_ring
+		COMMAND mos-sim $<TARGET_FILE:test_netstream_rx_ring>)
+endif()

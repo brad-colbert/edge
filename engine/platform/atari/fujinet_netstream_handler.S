@@ -3,16 +3,24 @@
 ; Stage 9E: EDGE-owned, scaffolded translation of the upstream FujiNet Netstream
 ; concurrent handler into llvm-mos / GNU-as assembly.
 ;
-; This is a SCAFFOLD ONLY. It exports the full upstream `_ns_*` symbol surface so
-; the EDGE ABI shim (fujinet_netstream_realtime_abi.s) links cleanly under
-; llvm-mos, but every routine is an INERT, defined-behavior stub:
-;   - no IRQ vector install / swap
-;   - no POKEY / SKCTL programming
-;   - no SIO / DCB enable_netstream
-;   - no ring buffers, no self-modifying code
+; Incremental translation. Exports the full upstream `_ns_*` symbol surface so the
+; EDGE ABI shim (fujinet_netstream_realtime_abi.s) links cleanly under llvm-mos.
+; Implemented so far:
+;   - 9F: real BSS buffers + low-risk diagnostic/status getters.
+;   - 9H: RX ring path -- _ns_recv_byte (RX consumer) and _ns_bytes_avail, with
+;         the upstream self-modifying-code read pointer preserved (Option A).
+; Still INERT / deferred (later stages):
+;   - _ns_send_byte / _ns_init_netstream / _ns_begin_stream / _ns_end_stream
+;   - IRQ handlers + vector swap; POKEY/SKCTL/AUDCTL/PACTL; SIO/DCB enable_netstream
+;   - serialErrors[4] + serialConcurrentNum; TX ring; packet framing
 ;
-; Real behavior (the NS_*_Impl bodies, including the upstream self-modifying-code
-; design which we will preserve rather than refactor) is ported in later stages.
+; SMC note (Option A, per Stage 9D): the RX pointers inReadPtr (in _ns_recv_byte)
+; and inPtr (in the test-only producer) are kept as self-modifying absolute
+; operand bytes living in .text -- the two operand bytes of `lda abs`/`sta abs`
+; double as the 16-bit pointer variable (mutated in place by inc). They are NOT
+; .bss. The RX buffer bounds (inBuf*/inBufEnd*) are promoted to plain .bss
+; variables because their upstream SMC homes are in the not-yet-translated IRQ
+; handler -- a deliberate, documented deviation.
 ;
 ; Source dialect notes (vs upstream CA65 netstream.s):
 ;   .export X = Y   -> a label `X` aliasing the impl, plus `.global X`
@@ -84,19 +92,84 @@ _ns_send_byte:
     rts
 
 ;==========================================================================
-; _ns_recv_byte  (upstream: NS_RecvByte_Impl)
+; _ns_recv_byte  (upstream: NS_RecvByte_Impl) -- Stage 9H, faithful translation.
 ; Output: A = byte, C=0 success / C=1 empty.
-; Scaffold: always "empty" (C=1) so the ABI shim packs status=empty.
+;
+; RX consumer. php/sei/plp critical section preserved (serialInSpace is shared
+; with the future input-IRQ producer; the 16-bit RMW must be atomic once IRQs are
+; live -- sei touches only the CPU I-flag, no prohibited hardware). The read
+; pointer is self-modifying code (Option A): `lda 0xffff` whose operand bytes are
+; inReadPtr, advanced in place. Until ns_test_init_rx / begin initializes state,
+; serialInSpace == serialInSize == 0 (zeroed BSS) -> the empty branch is taken
+; and the SMC load at 0xffff is never reached: inert-safe when uninitialized.
 _ns_recv_byte:
-    sec
+    php
+    sei
+    ; empty when free space == capacity (nothing buffered)
+    lda serialInSpaceLo
+    cmp serialInSize
+    bne .Lrecv_not_empty
+    lda serialInSpaceHi
+    cmp serialInSize+1
+    beq .Lrecv_empty
+.Lrecv_not_empty:
+    lda 0xffff              ; SMC: A = *inReadPtr
+inReadPtr = . - 2
+    pha                     ; hold the byte across pointer bookkeeping
+    ; advance read pointer (16-bit inc of the SMC operand)
+    inc inReadPtr
+    bne .Lrecv_adv_done
+    inc inReadPtr+1
+.Lrecv_adv_done:
+    ; wrap inReadPtr == inBufEnd -> inBuf
+    lda inReadPtr
+    cmp inBufEndLo
+    bne .Lrecv_no_wrap
+    lda inReadPtr+1
+    cmp inBufEndHi
+    bne .Lrecv_no_wrap
+    lda inBufLo
+    sta inReadPtr
+    lda inBufHi
+    sta inReadPtr+1
+.Lrecv_no_wrap:
+    ; free one byte of space (16-bit inc)
+    inc serialInSpaceLo
+    bne .Lrecv_space_done
+    inc serialInSpaceHi
+.Lrecv_space_done:
+    pla                     ; A = received byte
+    plp                     ; end critical section FIRST (see note), then set carry
+    clc                     ; success
     rts
+.Lrecv_empty:
+    plp                     ; end critical section FIRST, then set carry
+    sec                     ; empty
+    rts
+; NOTE (deliberate deviation from upstream literal sequence): upstream exits with
+; `clc/sec; plp; rts`, but on a standard 6502 `plp` reloads the carry flag from the
+; value `php` pushed at entry -- discarding the status carry. (Upstream gets away
+; with it for routines whose result is in A/X, e.g. bytes_avail, but it breaks the
+; carry contract for recv/send.) EDGE reorders to `plp` (restore the I-flag) then
+; `clc/sec` so the empty/success status carry actually reaches the caller. A is
+; preserved across plp.
 
 ;==========================================================================
-; _ns_bytes_avail  (upstream: NS_BytesAvail_Impl)
-; Output: A = low, X = high. Scaffold: zero available.
+; _ns_bytes_avail  (upstream: NS_BytesAvail_Impl) -- Stage 9H, faithful.
+; Output: A = low, X = high (count of bytes currently buffered in RX).
+; avail = serialInSize - serialInSpace (16-bit). Critical section preserved.
 _ns_bytes_avail:
-    lda #0
-    ldx #0
+    php
+    sei
+    lda serialInSize
+    sec
+    sbc serialInSpaceLo
+    tay
+    lda serialInSize+1
+    sbc serialInSpaceHi
+    tax
+    tya
+    plp
     rts
 
 ;==========================================================================
@@ -150,6 +223,83 @@ _ns_get_final_audf4:
     rts
 
 ;==========================================================================
+; PRIVATE test-only hooks -- Stage 9H. Compiled only when EDGE_NETSTREAM_TEST_HOOKS
+; is defined (the mos-sim RX-ring behavioral test). These are NOT part of the
+; edge_ns_* ABI, NOT declared in fujinet_netstream_realtime_abi.h, and NOT called
+; by any production code. They exist solely to drive the RX ring under the
+; simulator while the real input-IRQ producer and begin-time init are still
+; deferred.
+#if defined(EDGE_NETSTREAM_TEST_HOOKS)
+.global ns_test_init_rx
+.global ns_test_rx_push
+
+; void ns_test_init_rx(void)
+; Hardware-free subset of NS_BeginConcurrent_Impl's RX init: capacity, free-space,
+; buffer bounds, and both SMC pointers set to the buffer start.
+ns_test_init_rx:
+    lda #NS_INPUT_BUFSIZE
+    sta serialInSize
+    sta serialInSpaceLo        ; empty: free space == capacity
+    lda #0
+    sta serialInSize+1
+    sta serialInSpaceHi
+    lda #<nsInputBuffer
+    ldy #>nsInputBuffer
+    sta inBufLo
+    sta inReadPtr              ; patch SMC operand (consumer ptr)
+    sta inPtr                  ; patch SMC operand (producer ptr)
+    sty inBufHi
+    sty inReadPtr+1
+    sty inPtr+1
+    clc
+    adc serialInSize           ; A = <nsInputBuffer + 128
+    sta inBufEndLo
+    tya
+    adc serialInSize+1
+    sta inBufEndHi
+    rts
+
+; uint8_t ns_test_rx_push(uint8_t byte)
+; Mimics the future input-IRQ producer (minus the `lda serin` hardware read and
+; the overflow-status bit): stores byte at inPtr, advances+wraps, consumes one
+; free-space slot. Returns A=0 pushed, A=1 full.
+ns_test_rx_push:
+    pha                        ; save byte arg
+    lda serialInSpaceLo
+    ora serialInSpaceHi
+    bne .Lpush_have_space
+    pla                        ; full: discard byte
+    lda #1
+    rts
+.Lpush_have_space:
+    pla                        ; A = byte
+    sta 0xffff                 ; SMC: *inPtr = byte
+inPtr = . - 2
+    inc inPtr                  ; advance producer ptr (16-bit)
+    bne .Lpush_adv_done
+    inc inPtr+1
+.Lpush_adv_done:
+    lda inPtr                  ; wrap inPtr == inBufEnd -> inBuf
+    cmp inBufEndLo
+    bne .Lpush_no_wrap
+    lda inPtr+1
+    cmp inBufEndHi
+    bne .Lpush_no_wrap
+    lda inBufLo
+    sta inPtr
+    lda inBufHi
+    sta inPtr+1
+.Lpush_no_wrap:
+    lda serialInSpaceLo        ; consume one free slot (16-bit dec)
+    bne .Lpush_dec_lo
+    dec serialInSpaceHi
+.Lpush_dec_lo:
+    dec serialInSpaceLo
+    lda #0                     ; pushed
+    rts
+#endif // EDGE_NETSTREAM_TEST_HOOKS
+
+;==========================================================================
 ; Handler state (.bss) -- Stage 9F.
 ;
 ; Real Netstream-sized buffers and the minimal scalar state read by the low-risk
@@ -167,6 +317,16 @@ nsVideoStd:     .zero 1     ; 0=NTSC, 1=PAL; upstream NetstreamVideoStd
 nsFinalFlags:   .zero 1     ; upstream NetstreamFinalFlags
 nsFinalAudf3:   .zero 1     ; upstream NetstreamFinalAUDF3
 nsFinalAudf4:   .zero 1     ; upstream NetstreamFinalAUDF4
+
+; Stage 9H RX ring scalars (8 bytes). The RX read/write pointers themselves are
+; NOT here -- inReadPtr / inPtr are SMC operand bytes in .text (see above).
+serialInSize:    .zero 2     ; RX capacity (=128); upstream serialInSize
+serialInSpaceLo: .zero 1     ; RX free-space lo (recv frees / IRQ consumes)
+serialInSpaceHi: .zero 1     ; RX free-space hi; upstream serialInSpaceHi
+inBufLo:         .zero 1     ; RX buffer start lo; upstream inBufLo
+inBufHi:         .zero 1     ; RX buffer start hi; upstream inBufHi
+inBufEndLo:      .zero 1     ; RX buffer end lo; upstream inBufEndLo
+inBufEndHi:      .zero 1     ; RX buffer end hi; upstream inBufEndHi
 
 nsInputBuffer:  .zero NS_INPUT_BUFSIZE   ; RX, 128; upstream inputBuffer
 nsOutputBuffer: .zero NS_OUTPUT_BUFSIZE  ; TX, 128; upstream outputBuffer0
