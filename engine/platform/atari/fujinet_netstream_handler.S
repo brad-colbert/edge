@@ -9,10 +9,14 @@
 ;   - 9F: real BSS buffers + low-risk diagnostic/status getters.
 ;   - 9H: RX ring path -- _ns_recv_byte (RX consumer) and _ns_bytes_avail, with
 ;         the upstream self-modifying-code read pointer preserved (Option A).
+;   - 9I: TX enqueue -- _ns_send_byte (pure RAM ring enqueue; index-based, no SMC).
+;         The upstream idle-prime SEROUT write is deliberately NOT done here; every
+;         accepted byte is buffered and transmission is deferred (see _ns_send_byte).
 ; Still INERT / deferred (later stages):
-;   - _ns_send_byte / _ns_init_netstream / _ns_begin_stream / _ns_end_stream
-;   - IRQ handlers + vector swap; POKEY/SKCTL/AUDCTL/PACTL; SIO/DCB enable_netstream
-;   - serialErrors[4] + serialConcurrentNum; TX ring; packet framing
+;   - _ns_init_netstream / _ns_begin_stream / _ns_end_stream
+;   - IRQ handlers + vector swap; POKEY/SKCTL/AUDCTL/PACTL/SEROUT; SIO/DCB enable
+;   - serialOutIdle idle-prime + outBuf; serialErrors[4] + serialConcurrentNum
+;   - packet framing
 ;
 ; SMC note (Option A, per Stage 9D): the RX pointers inReadPtr (in _ns_recv_byte)
 ; and inPtr (in the test-only producer) are kept as self-modifying absolute
@@ -84,11 +88,44 @@ _ns_get_base:
     rts
 
 ;==========================================================================
-; _ns_send_byte  (upstream: NS_SendByte_Impl)
-; Input:  A = byte. Output: C=0 enqueued, C=1 full.
-; Scaffold: always "full" (C=1) so the ABI shim reports not-sent.
+; _ns_send_byte  (upstream: NS_SendByte_Impl) -- Stage 9I, pure TX enqueue.
+; Input:  A = byte. Output: C=0 enqueued, C=1 TX full (not sent).
+;
+; TX producer. php/sei/plp critical section preserved (outLevel is shared with the
+; future output-IRQ consumer; the count RMW must be atomic once IRQs are live).
+; The carry status is set AFTER plp (the 9H fix: plp reloads the entry carry, so
+; setting it earlier would be discarded).
+;
+; STAGED SEMANTIC DIFFERENCE vs upstream: upstream, when serial output is idle,
+; primes the FIRST byte directly into POKEY SEROUT to kick off transmission.
+; Stage 9I deliberately does NOT do that -- it enqueues EVERY accepted byte into
+; the RAM ring and touches no POKEY/SEROUT. Real idle-prime + serialOutIdle + the
+; output-IRQ drain are deferred to the IRQ/POKEY stage. Bytes are truthfully
+; buffered (carry clear); actual transmission is deferred. Zeroed BSS is already a
+; valid empty ring (outLevel=0, serialOutHead=0), so TX needs no explicit init.
 _ns_send_byte:
-    sec
+    php
+    sei
+    pha                     ; save byte
+    lda outLevel
+    cmp #0x80               ; capacity = 128
+    beq .Lsend_full
+    ; enqueue at nsOutputBuffer[serialOutHead]
+    pla                     ; A = byte
+    ldx serialOutHead
+    sta nsOutputBuffer,x
+    inx
+    txa
+    and #0x7f               ; wrap producer index
+    sta serialOutHead
+    inc outLevel
+    plp                     ; end critical section, THEN set carry
+    clc                     ; enqueued
+    rts
+.Lsend_full:
+    pla                     ; discard byte (not sent)
+    plp                     ; end critical section, THEN set carry
+    sec                     ; full
     rts
 
 ;==========================================================================
@@ -232,6 +269,8 @@ _ns_get_final_audf4:
 #if defined(EDGE_NETSTREAM_TEST_HOOKS)
 .global ns_test_init_rx
 .global ns_test_rx_push
+.global ns_test_init_tx
+.global ns_test_tx_drain
 
 ; void ns_test_init_rx(void)
 ; Hardware-free subset of NS_BeginConcurrent_Impl's RX init: capacity, free-space,
@@ -297,6 +336,39 @@ inPtr = . - 2
     dec serialInSpaceLo
     lda #0                     ; pushed
     rts
+
+; void ns_test_init_tx(void)
+; Hardware-free TX reset (zeroed BSS is already a valid empty ring; this just lets
+; the test reset between cases).
+ns_test_init_tx:
+    lda #0
+    sta outLevel
+    sta serialOutHead
+    sta outIndex
+    rts
+
+; uint16_t ns_test_tx_drain(void)
+; Mimics the future output-IRQ consumer minus the `sta serout` hardware write:
+; pulls the next byte from the TX ring. Returns A=byte (low), X=status (high);
+; status 0 = byte returned, 1 = TX empty.
+ns_test_tx_drain:
+    lda outLevel
+    bne .Ldrain_have
+    lda #0
+    ldx #1                     ; empty
+    rts
+.Ldrain_have:
+    dec outLevel
+    ldx outIndex
+    lda nsOutputBuffer,x
+    pha                        ; hold byte
+    inx
+    txa
+    and #0x7f                  ; wrap consumer index
+    sta outIndex
+    pla                        ; A = byte
+    ldx #0                     ; ok
+    rts
 #endif // EDGE_NETSTREAM_TEST_HOOKS
 
 ;==========================================================================
@@ -327,6 +399,14 @@ inBufLo:         .zero 1     ; RX buffer start lo; upstream inBufLo
 inBufHi:         .zero 1     ; RX buffer start hi; upstream inBufHi
 inBufEndLo:      .zero 1     ; RX buffer end lo; upstream inBufEndLo
 inBufEndHi:      .zero 1     ; RX buffer end hi; upstream inBufEndHi
+
+; Stage 9I TX ring scalars (3 bytes). TX is index-based (no pointers/SMC): both
+; indices wrap with `and #0x7f` into nsOutputBuffer via absolute,X. Capacity is the
+; constant 0x80, so there is no TX size variable. serialOutIdle (idle-prime flag)
+; and outBuf (consumer base ptr) are deferred to the IRQ/POKEY stage.
+serialOutHead:   .zero 1     ; TX producer index (send); upstream serialOutHead
+outLevel:        .zero 1     ; TX count (send++ / output-IRQ--); upstream outLevel
+outIndex:        .zero 1     ; TX consumer index; upstream outIndex (output IRQ / test drain)
 
 nsInputBuffer:  .zero NS_INPUT_BUFSIZE   ; RX, 128; upstream inputBuffer
 nsOutputBuffer: .zero NS_OUTPUT_BUFSIZE  ; TX, 128; upstream outputBuffer0
