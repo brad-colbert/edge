@@ -382,6 +382,42 @@ SwapIrqVector:
     rts
 
 ;==========================================================================
+; SerialOutputIrqHandler (upstream) -- TX output-ready IRQ consumer.
+; Stage 9M.2: TRANSLATED BUT UNINSTALLED. Entered via VSEROR only once installed
+; (deferred to 9N); never reached now. Entry assumes the OS pushed A before
+; vectoring here (balanced by the `pla; rti` at SOH_xit).
+;
+; EDGE is index-based: outIndex addresses nsOutputBuffer via absolute,X -- the
+; upstream `outBuf` SMC base pointer is NOT used. No new SMC operands. Only the TX
+; state outLevel/outIndex/serialOutIdle is touched. This routine contains the only
+; SEROUT write in the file; it is unreachable from begin/end/production.
+SerialOutputIrqHandler:
+    lda outLevel
+    beq SOH_is_empty
+    dec outLevel
+    txa
+    pha
+    ldx outIndex
+    lda nsOutputBuffer,x
+    sta NS_SEROUT               ; HW write $D20D (uninstalled: never executes)
+    inx
+    txa
+    and #0x7f                   ; advance consumer index, wrapped
+    sta outIndex
+    pla
+    tax
+SOH_xit:
+    pla                         ; restore A pushed by the OS IRQ dispatch
+    rti
+SOH_is_empty:
+    sec
+    ror serialOutIdle           ; set idle (bit7) -- upstream-equivalent
+    bne SOH_xit
+
+; Serial output-complete IRQ shares the output handler's exit (upstream alias).
+SerialCompleteIrqHandler = SOH_xit
+
+;==========================================================================
 ; PRIVATE test-only hooks. Compiled only when EDGE_NETSTREAM_TEST_HOOKS is defined
 ; (the mos-sim behavioral tests). These are NOT part of the edge_ns_* ABI, NOT
 ; declared in fujinet_netstream_realtime_abi.h, and NOT called by production code.
