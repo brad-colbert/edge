@@ -135,9 +135,13 @@ ns_init_ring_state:
     sta outIndex
     lda #0xff
     sta serialOutIdle           ; idle (consumed later by the deferred idle-prime)
-    ; --- status ---
+    ; --- status: clear all four serialErrors bytes ---
     lda #0
-    sta nsStatus
+    ldx #3
+.Lclr_err:
+    sta serialErrors,x
+    dex
+    bpl .Lclr_err
     rts
 
 ;==========================================================================
@@ -283,18 +287,17 @@ _ns_bytes_avail:
 
 ;==========================================================================
 ; _ns_get_status  (upstream: NS_GetStatus_Impl)
-; Output: A = sticky status, X = 0 (clobbered). CLEARS the sticky byte on read.
-; Translated verbatim from upstream, including the IRQ-critical section. The
-; php/sei/plp is inert here -- it only touches the CPU I-flag, none of the
-; prohibited hardware -- and matches upstream so it is correct once the IRQ
-; handler (a later stage) starts writing nsStatus. Until then nsStatus is always
-; 0 (nothing writes it), so this returns 0.
+; Output: A = status, X = 0 (clobbered). CLEARS the status byte on read.
+; Reads+clears serialErrors[0] (upstream behavior). The php/sei/plp critical
+; section is inert here -- it only touches the CPU I-flag, no prohibited hardware
+; -- and matches upstream so it stays correct once the input-IRQ overflow path
+; (a later stage) starts setting serialErrors. Until then serialErrors[0] is 0.
 _ns_get_status:
     php
     sei
-    lda nsStatus            ; upstream serialErrors[0]
+    lda serialErrors        ; serialErrors[0]
     ldx #0
-    stx nsStatus            ; clear-on-read
+    stx serialErrors        ; clear-on-read
     plp
     rts
 
@@ -341,6 +344,14 @@ _ns_get_final_audf4:
 #if defined(EDGE_NETSTREAM_TEST_HOOKS)
 .global ns_test_rx_push
 .global ns_test_tx_drain
+.global ns_test_set_status
+
+; void ns_test_set_status(uint8_t value)
+; Seeds serialErrors[0] so tests can exercise the get_status read+clear model in
+; place of the still-deferred input-IRQ overflow path.
+ns_test_set_status:
+    sta serialErrors
+    rts
 
 ; uint8_t ns_test_rx_push(uint8_t byte)
 ; Mimics the future input-IRQ producer (minus the `lda serin` hardware read and
@@ -413,16 +424,25 @@ ns_test_tx_drain:
 ; yet (deferred to later stages). All are internal (no .global): not part of the
 ; C ABI. Zero-initialized, so the getters observe 0 until later stages write them.
 ;
-; Deferred state (added when their owning stages land): serialInSize,
-; serialErrors[4] + serialConcurrentNum, in/out ring pointers + levels,
-; VCount diagnostics, port + nominal-baud values.
+; Deferred state (added when their owning stages land): chain_addr (with the IRQ
+; dispatcher), serialVecs/pokey_init tables, port + nominal-baud + BaudTable (SIO).
 .bss
 
-nsStatus:       .zero 1     ; sticky status; upstream serialErrors[0]
+; Status/error model (Stage 9L): serialErrors[4] replaces the former 1-byte
+; nsStatus stand-in. _ns_get_status reads+clears serialErrors[0]; the future input
+; IRQ sets serialErrors[serialConcurrentNum-1] on RX overflow. begin/end clear all 4.
+serialErrors:   .zero 4     ; upstream serialErrors[4] (overflow status, IRQ-written)
 nsVideoStd:     .zero 1     ; 0=NTSC, 1=PAL; upstream NetstreamVideoStd
 nsFinalFlags:   .zero 1     ; upstream NetstreamFinalFlags
 nsFinalAudf3:   .zero 1     ; upstream NetstreamFinalAUDF3
 nsFinalAudf4:   .zero 1     ; upstream NetstreamFinalAUDF4
+
+; Stage 9L hardware-lifecycle state (declared ahead of its consumers; no HW yet):
+; serialVecSave saves vserin..vseroc before the (deferred) vector install;
+; NetstreamVCountMax/Prev are DetectPALViaVCOUNT scratch (deferred).
+serialVecSave:       .zero 6 ; saved serial IRQ vectors; upstream serialVecSave
+NetstreamVCountMax:  .zero 1 ; DetectPALViaVCOUNT scratch (deferred)
+NetstreamVCountPrev: .zero 1 ; DetectPALViaVCOUNT scratch (deferred)
 
 ; Stage 9H RX ring scalars (8 bytes). The RX read/write pointers themselves are
 ; NOT here -- inReadPtr / inPtr are SMC operand bytes in .text (see above).
