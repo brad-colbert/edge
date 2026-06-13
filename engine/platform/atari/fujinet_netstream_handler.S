@@ -335,6 +335,53 @@ _ns_get_final_audf4:
     rts
 
 ;==========================================================================
+; IRQ dispatcher + vector swap -- Stage 9M.1. TRANSLATED BUT UNINSTALLED.
+;
+; These are NOT reachable in this stage: begin/end do not install them, no VIMIRQ
+; vector points at them, and the production adapter never calls them. They sit as
+; dead code until the vector-install stage (9N). IrqHandler contains real IRQ
+; hardware access (IRQST/IRQEN) but never executes while uninstalled; do NOT call
+; it from mos-sim tests. SwapIrqVector touches only the VIMIRQ OS vector + the
+; chain_addr SMC operand (no hardware registers) and is exercised by a gated test.
+
+;==========================================================================
+; IrqHandler (upstream) -- immediate-IRQ dispatcher installed at VIMIRQ.
+; If the BREAK-key IRQ is pending, ack it; otherwise chain to the previously
+; installed handler via the self-modified jmp operand (chain_addr).
+IrqHandler:
+    bit NS_IRQST            ; HW read $D20E
+    bpl IH_is_break
+    jmp 0xffff              ; SMC: chain to old handler (operand patched by SwapIrqVector)
+chain_addr = . - 2
+IH_is_break:
+    pha
+    lda #0x7f
+    sta NS_IRQEN            ; HW write $D20E
+    lda NS_POKMSK           ; OS shadow $0010
+    sta NS_IRQEN            ; HW write
+    pla
+    rti
+
+;==========================================================================
+; SwapIrqVector (upstream) -- exchange the 2-byte VIMIRQ with chain_addr.
+; Internal (not exported in the ABI header / not in Game::net). begin/end will
+; jsr this from the same translation unit in the vector-install stage (9N).
+; Touches only VIMIRQ (OS RAM) and chain_addr (the .text SMC operand) -- no
+; hardware registers -- so it is safe to exercise under mos-sim.
+SwapIrqVector:
+    ldx #1
+.Lswap_loop:
+    lda NS_VIMIRQ,x
+    pha
+    lda chain_addr,x
+    sta NS_VIMIRQ,x
+    pla
+    sta chain_addr,x
+    dex
+    bpl .Lswap_loop
+    rts
+
+;==========================================================================
 ; PRIVATE test-only hooks. Compiled only when EDGE_NETSTREAM_TEST_HOOKS is defined
 ; (the mos-sim behavioral tests). These are NOT part of the edge_ns_* ABI, NOT
 ; declared in fujinet_netstream_realtime_abi.h, and NOT called by production code.
@@ -345,6 +392,15 @@ _ns_get_final_audf4:
 .global ns_test_rx_push
 .global ns_test_tx_drain
 .global ns_test_set_status
+.global ns_test_swap_irq_vector
+
+; void ns_test_swap_irq_vector(void)
+; Test-only entry to the internal SwapIrqVector (which stays unexported). Lets the
+; mos-sim test verify the VIMIRQ<->chain_addr swap is an involution without putting
+; SwapIrqVector in the ABI.
+ns_test_swap_irq_vector:
+    jsr SwapIrqVector
+    rts
 
 ; void ns_test_set_status(uint8_t value)
 ; Seeds serialErrors[0] so tests can exercise the get_status read+clear model in
