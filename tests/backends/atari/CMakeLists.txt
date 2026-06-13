@@ -11,6 +11,9 @@ add_engine_test(test_atari_interrupt)
 add_engine_test(test_atari_core)
 add_engine_test(test_atari_net_seam)
 add_engine_test(test_atari_fujinet_session_spec)
+add_engine_test(test_atari_fujinet_netstream_scaffold)
+add_engine_test(test_netstream_abi_smoke)
+add_engine_test(test_netstream_state_size)
 
 # Stage 8E.5 / 8F: session_send_nb behavior test.
 # OFF-mode: tests OFF stubs (Unsupported). No special includes needed.

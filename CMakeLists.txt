@@ -11,7 +11,7 @@ string(REGEX MATCH "[0-9]+" _edge_ver_patch "${_edge_ver_patch}")
 
 project(edge
         VERSION ${_edge_ver_major}.${_edge_ver_minor}.${_edge_ver_patch}
-        LANGUAGES CXX)
+        LANGUAGES CXX C)
 
 # The engine is header-only (DECISIONS.md ADR-012); it is consumed as an
 # include directory. Game code and tests include <engine/...>.
@@ -84,6 +84,84 @@ if(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB)
     endif()
 
     add_compile_definitions(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB=1)
+endif()
+
+option(EDGE_ATARI_FUJINET_REALTIME_NETSTREAM
+       "Enable Atari FujiNet realtime adapter scaffolding (EDGE-owned translated Netstream handler; no external CA65 dependency)"
+       OFF)
+
+set(EDGE_NETSTREAM_ROOT
+    ""
+    CACHE PATH
+    "Root path to fujinet-atari-netstream checkout (optional if explicit handler/cfg/include are set)")
+set(EDGE_NETSTREAM_SOURCE_DIR
+    ""
+    CACHE PATH
+    "Path to directory containing netstream.s handler source")
+set(EDGE_NETSTREAM_INCLUDE_DIR
+    ""
+    CACHE PATH
+    "Path to netstream handler include directory (contains sio.inc, hardware.inc, etc.)")
+set(EDGE_NETSTREAM_CFG
+    ""
+    CACHE FILEPATH
+    "Path to atari_netstream.cfg linker config (optional for EDGE linking)")
+
+if(EDGE_ATARI_FUJINET_REALTIME_NETSTREAM)
+    if(EDGE_NETSTREAM_ROOT)
+        if(NOT EDGE_NETSTREAM_SOURCE_DIR)
+            set(EDGE_NETSTREAM_SOURCE_DIR "${EDGE_NETSTREAM_ROOT}/handler")
+        endif()
+        if(NOT EDGE_NETSTREAM_INCLUDE_DIR)
+            set(EDGE_NETSTREAM_INCLUDE_DIR "${EDGE_NETSTREAM_ROOT}/handler/include")
+        endif()
+        if(NOT EDGE_NETSTREAM_CFG)
+            set(EDGE_NETSTREAM_CFG "${EDGE_NETSTREAM_ROOT}/examples/common/atari_netstream.cfg")
+        endif()
+    endif()
+
+    if(EDGE_NETSTREAM_SOURCE_DIR AND NOT EXISTS "${EDGE_NETSTREAM_SOURCE_DIR}/netstream.s")
+        message(FATAL_ERROR
+            "EDGE_NETSTREAM_SOURCE_DIR set but missing netstream.s: '${EDGE_NETSTREAM_SOURCE_DIR}/netstream.s'")
+    endif()
+
+    if(EDGE_NETSTREAM_INCLUDE_DIR)
+        if(NOT EXISTS "${EDGE_NETSTREAM_INCLUDE_DIR}/sio.inc" OR
+           NOT EXISTS "${EDGE_NETSTREAM_INCLUDE_DIR}/hardware.inc")
+            message(FATAL_ERROR
+                "EDGE_NETSTREAM_INCLUDE_DIR set but missing expected includes (sio.inc, hardware.inc): '${EDGE_NETSTREAM_INCLUDE_DIR}'")
+        endif()
+    endif()
+
+    add_compile_definitions(EDGE_ATARI_FUJINET_REALTIME_NETSTREAM=1)
+
+    # Stage 9C: ABI shim to convert carry-flag results to normal C returns.
+    # Stage 9E: also assembles the EDGE-owned scaffolded Netstream handler, which
+    # provides the raw _ns_* symbols the shim resolves against (no external CA65
+    # netstream.s, no cl65/ca65/ld65). Both are llvm-mos / GNU-as syntax.
+    # Only compiled/assembled when ON.
+    if(CMAKE_CXX_COMPILER MATCHES "mos")
+        # Atari-target assembly compilation only (not host mos-sim).
+        add_library(edge_netstream_abi_shim OBJECT
+            engine/platform/atari/fujinet_netstream_realtime_abi.s
+            engine/platform/atari/fujinet_netstream_handler.S)
+        # Route the .s/.S through the C compiler driver (project enables C, not
+        # ASM) but force assembly with `-x assembler-with-cpp` so the files are
+        # preprocessed and assembled, not parsed as C. The handler #includes the
+        # constants layer, hence the platform include dir below.
+        set_source_files_properties(
+            engine/platform/atari/fujinet_netstream_realtime_abi.s
+            engine/platform/atari/fujinet_netstream_handler.S
+            PROPERTIES
+            LANGUAGE C  # ASM via compiler integration
+            COMPILE_OPTIONS "-x;assembler-with-cpp"
+        )
+        target_include_directories(edge_netstream_abi_shim PRIVATE
+            ${CMAKE_SOURCE_DIR}/engine/platform/atari)
+    else()
+        # Host toolchain cannot compile 6502 assembly; skip shim.
+        # Tests will compile (C++) but link will fail if symbols are used.
+    endif()
 endif()
 
 # Diagnostic mode for the atari_vbxe_bringup demo: 0 = colour bars, 1 = solid
@@ -522,6 +600,47 @@ if(MOS_ATARI8_CXX)
     else()
         message(STATUS
             "Skipping fujinet_session_validate custom target: requires EDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON and valid EDGE_FUJINETLIB include/library paths")
+    endif()
+
+    # Stage 9E Atari-only ABI/link smoke for the EDGE-owned Netstream scaffold.
+    # Build-only smoke: verifies symbol/link compatibility between:
+    # - EDGE ABI shim assembly (fujinet_netstream_realtime_abi.s)
+    # - EDGE-owned scaffolded handler (fujinet_netstream_handler.S)
+    # - minimal C++ symbol reference source
+    # This is fully self-contained: it does NOT reference any external
+    # fujinet-atari-netstream checkout, and uses no cl65/ca65/ld65.
+    # This target is intentionally excluded from host test runs.
+    if(EDGE_ATARI_FUJINET_REALTIME_NETSTREAM
+       AND EXISTS "${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_handler.S")
+        set(NETSTREAM_ABI_LINK_SMOKE_XEX
+            ${CMAKE_BINARY_DIR}/netstream_abi_link_smoke.xex)
+        set(NETSTREAM_ABI_LINK_SMOKE_MAP
+            ${CMAKE_BINARY_DIR}/netstream_abi_link_smoke.map)
+        add_custom_command(
+            OUTPUT ${NETSTREAM_ABI_LINK_SMOKE_XEX}
+            COMMAND ${MOS_ATARI8_CXX}
+                    -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra
+                    -DEDGE_ATARI_FUJINET_REALTIME_NETSTREAM=1
+                    -I${CMAKE_SOURCE_DIR}
+                    -I${CMAKE_SOURCE_DIR}/engine/platform/atari
+                    ${CMAKE_SOURCE_DIR}/tests/backends/atari/test_netstream_abi_atari_link_smoke.cpp
+                    ${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_realtime_abi.s
+                    ${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_handler.S
+                    -o ${NETSTREAM_ABI_LINK_SMOKE_XEX}
+                    -Wl,--Map=${NETSTREAM_ABI_LINK_SMOKE_MAP}
+            DEPENDS ${CMAKE_SOURCE_DIR}/tests/backends/atari/test_netstream_abi_atari_link_smoke.cpp
+                    ${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_realtime_abi.s
+                    ${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_handler.S
+                    ${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_constants.inc
+                    ${EDGE_ENGINE_HEADERS}
+            BYPRODUCTS ${NETSTREAM_ABI_LINK_SMOKE_MAP}
+            COMMENT "Building Atari Netstream ABI link smoke (netstream_abi_link_smoke.xex)"
+            VERBATIM)
+        add_custom_target(netstream_abi_link_smoke
+            DEPENDS ${NETSTREAM_ABI_LINK_SMOKE_XEX})
+    else()
+        message(STATUS
+            "Skipping netstream_abi_link_smoke custom target: requires EDGE_ATARI_FUJINET_REALTIME_NETSTREAM=ON")
     endif()
 
     # ── Dual-lane EDGE net API usage demo (net_dual_lane_demo.xex) ─────────

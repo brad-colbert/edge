@@ -9,6 +9,9 @@
 
 #include "../../net_types.h"
 #include "fujinet_session_fujinetlib.h"
+#if defined(EDGE_ATARI_FUJINET_REALTIME_NETSTREAM)
+#include "fujinet_netstream_realtime.h"
+#endif
 
 namespace atari {
 
@@ -54,28 +57,68 @@ struct NullNetwork {
 // Fujinet-capable seam stub.
 //
 // Real transport wiring points (deferred):
-// - realtime_*: Netstream / UDP-seq nonblocking path
+// - realtime_*: Netstream / UDP-seq nonblocking path (when EDGE_ATARI_FUJINET_REALTIME_NETSTREAM)
 // - session_* : fujinet-lib / CIO N: TCP client nonblocking path
 struct FujinetNetwork {
 	// Realtime lane seam.
-	static NetStatus realtime_open_udp_seq(const char* host, u16 remote_port, u16) {
+	static NetStatus realtime_open_udp_seq(const char* host, u16 remote_port, u16 local_port) {
+#if defined(EDGE_ATARI_FUJINET_REALTIME_NETSTREAM)
+		return fujinet_netstream::NetstreamRealtimeAdapter::realtime_open_udp_seq(host, remote_port, local_port);
+#else
 		if (host == nullptr || host[0] == '\0' || remote_port == 0)
 			return NetStatus::InvalidArgument;
 		return NetStatus::Ok;
+#endif
 	}
-	static NetStatus realtime_bind_udp_seq(u16) { return NetStatus::Unsupported; }
-	static void realtime_close() {}
-	static bool realtime_active() { return false; }
-	static NetStatus realtime_poll() { return NetStatus::WouldBlock; }
+	static NetStatus realtime_bind_udp_seq(u16 local_port) {
+#if defined(EDGE_ATARI_FUJINET_REALTIME_NETSTREAM)
+		return fujinet_netstream::NetstreamRealtimeAdapter::realtime_bind_udp_seq(local_port);
+#else
+		return NetStatus::Unsupported;
+#endif
+	}
+	static void realtime_close() {
+#if defined(EDGE_ATARI_FUJINET_REALTIME_NETSTREAM)
+		fujinet_netstream::NetstreamRealtimeAdapter::realtime_close();
+#endif
+	}
+	static bool realtime_active() {
+#if defined(EDGE_ATARI_FUJINET_REALTIME_NETSTREAM)
+		return fujinet_netstream::NetstreamRealtimeAdapter::realtime_active();
+#else
+		return false;
+#endif
+	}
+	static NetStatus realtime_poll() {
+#if defined(EDGE_ATARI_FUJINET_REALTIME_NETSTREAM)
+		return fujinet_netstream::NetstreamRealtimeAdapter::realtime_poll();
+#else
+		return NetStatus::WouldBlock;
+#endif
+	}
 	static NetStatus realtime_send_nb(const void* bytes, u16 size) {
+#if defined(EDGE_ATARI_FUJINET_REALTIME_NETSTREAM)
+		return fujinet_netstream::NetstreamRealtimeAdapter::realtime_send_nb(bytes, size);
+#else
 		if (bytes == nullptr && size > 0) return NetStatus::InvalidArgument;
 		return NetStatus::Ok;
+#endif
 	}
 	static NetStatus realtime_recv_nb(void* bytes, u16 size) {
+#if defined(EDGE_ATARI_FUJINET_REALTIME_NETSTREAM)
+		return fujinet_netstream::NetstreamRealtimeAdapter::realtime_recv_nb(bytes, size);
+#else
 		if (bytes == nullptr && size > 0) return NetStatus::InvalidArgument;
 		return NetStatus::WouldBlock;
+#endif
 	}
-	static NetError realtime_last_error() { return NetError{NetStatus::WouldBlock, 0}; }
+	static NetError realtime_last_error() {
+#if defined(EDGE_ATARI_FUJINET_REALTIME_NETSTREAM)
+		return fujinet_netstream::NetstreamRealtimeAdapter::realtime_last_error();
+#else
+		return NetError{NetStatus::WouldBlock, 0};
+#endif
+	}
 
 	// Session lane seam.
 	static NetStatus session_connect_tcp(const char* host, u16 port) {
