@@ -65,7 +65,11 @@ _ns_get_version:
 
 ;==========================================================================
 ; _ns_get_base  (upstream: NS_GetBase_Impl)
-; Returns A:X = address of the API jump table base. Scaffold returns null.
+; Upstream returns A:X = &NS_BeginStream (the start of its API jump table).
+; EDGE intentionally returns 0 here -- NON-PARITY by design: EDGE exposes each
+; routine as its own exported _ns_* symbol and has no API jump table, so an
+; upstream-style "base" pointer is not meaningful to EDGE callers. Revisit only
+; if a real consumer needs it.
 _ns_get_base:
     lda #0
     ldx #0
@@ -97,16 +101,26 @@ _ns_bytes_avail:
 
 ;==========================================================================
 ; _ns_get_status  (upstream: NS_GetStatus_Impl)
-; Output: A = status (cleared on read). Scaffold: no errors.
+; Output: A = sticky status, X = 0 (clobbered). CLEARS the sticky byte on read.
+; Translated verbatim from upstream, including the IRQ-critical section. The
+; php/sei/plp is inert here -- it only touches the CPU I-flag, none of the
+; prohibited hardware -- and matches upstream so it is correct once the IRQ
+; handler (a later stage) starts writing nsStatus. Until then nsStatus is always
+; 0 (nothing writes it), so this returns 0.
 _ns_get_status:
-    lda #0
+    php
+    sei
+    lda nsStatus            ; upstream serialErrors[0]
+    ldx #0
+    stx nsStatus            ; clear-on-read
+    plp
     rts
 
 ;==========================================================================
 ; _ns_get_video_std  (upstream: NS_GetVideoStd_Impl)
-; Output: A = 0 NTSC / 1 PAL. Scaffold: 0.
+; Output: A = 0 NTSC / 1 PAL. Reads translated state (0 until init writes it).
 _ns_get_video_std:
-    lda #0
+    lda nsVideoStd
     rts
 
 ;==========================================================================
@@ -122,15 +136,38 @@ _ns_init_netstream:
 ;==========================================================================
 ; _ns_get_final_flags / _ns_get_final_audf3 / _ns_get_final_audf4
 ; (upstream: NS_GetFinalFlags_Impl / AUDF3 / AUDF4)
-; Output: A = cached value. Scaffold: 0.
+; Output: A = cached value. Reads translated state (0 until init writes it).
 _ns_get_final_flags:
-    lda #0
+    lda nsFinalFlags
     rts
 
 _ns_get_final_audf3:
-    lda #0
+    lda nsFinalAudf3
     rts
 
 _ns_get_final_audf4:
-    lda #0
+    lda nsFinalAudf4
     rts
+
+;==========================================================================
+; Handler state (.bss) -- Stage 9F.
+;
+; Real Netstream-sized buffers and the minimal scalar state read by the low-risk
+; getters above. Allocated now but NOT wired to any IRQ / SIO / send-recv path
+; yet (deferred to later stages). All are internal (no .global): not part of the
+; C ABI. Zero-initialized, so the getters observe 0 until later stages write them.
+;
+; Deferred state (added when their owning stages land): serialInSize,
+; serialErrors[4] + serialConcurrentNum, in/out ring pointers + levels,
+; VCount diagnostics, port + nominal-baud values.
+.bss
+
+nsStatus:       .zero 1     ; sticky status; upstream serialErrors[0]
+nsVideoStd:     .zero 1     ; 0=NTSC, 1=PAL; upstream NetstreamVideoStd
+nsFinalFlags:   .zero 1     ; upstream NetstreamFinalFlags
+nsFinalAudf3:   .zero 1     ; upstream NetstreamFinalAUDF3
+nsFinalAudf4:   .zero 1     ; upstream NetstreamFinalAUDF4
+
+nsInputBuffer:  .zero NS_INPUT_BUFSIZE   ; RX, 128; upstream inputBuffer
+nsOutputBuffer: .zero NS_OUTPUT_BUFSIZE  ; TX, 128; upstream outputBuffer0
+nsPayloadBuf:   .zero NS_PAYLOAD_MAX     ; init payload, 64; upstream NetstreamPayloadBuf

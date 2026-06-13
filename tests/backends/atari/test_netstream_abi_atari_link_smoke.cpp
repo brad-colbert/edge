@@ -15,6 +15,20 @@
 
 #include <engine/platform/atari/fujinet_netstream_realtime_abi.h>
 
+// Stage 9F: force the low-risk diagnostic getters into the link by referencing
+// the RAW handler ABI directly. These are not part of the edge_ns_* surface (no
+// wrapper is added), so they must be declared here. Naming follows the existing
+// upstream-compatible _ns_* export convention -- do not rename the handler
+// exports. Build-only: never executed on hardware in this stage.
+extern "C" {
+    uint8_t  _ns_get_version(void);
+    uint16_t _ns_get_base(void);       // upstream A:X; 0 in EDGE (no jump table)
+    uint8_t  _ns_get_video_std(void);
+    uint8_t  _ns_get_final_flags(void);
+    uint8_t  _ns_get_final_audf3(void);
+    uint8_t  _ns_get_final_audf4(void);
+}
+
 volatile uint8_t g_sink8 = 0;
 volatile uint16_t g_sink16 = 0;
 
@@ -28,6 +42,14 @@ int main() {
 
     _edge_ns_begin_stream();
     _edge_ns_end_stream();
+
+    // Stage 9F diagnostic getters (raw _ns_* ABI).
+    g_sink8 = _ns_get_version();
+    g_sink16 = _ns_get_base();
+    g_sink8 = _ns_get_video_std();
+    g_sink8 = _ns_get_final_flags();
+    g_sink8 = _ns_get_final_audf3();
+    g_sink8 = _ns_get_final_audf4();
 
     return 0;
 }
