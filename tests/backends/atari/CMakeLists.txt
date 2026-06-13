@@ -116,4 +116,24 @@ if(EDGE_ATARI_FUJINET_REALTIME_NETSTREAM AND CMAKE_CXX_COMPILER MATCHES "mos")
 		EDGE_NETSTREAM_TEST_HOOKS=1)
 	add_test(NAME test_netstream_tx_ring
 		COMMAND mos-sim $<TARGET_FILE:test_netstream_tx_ring>)
+
+	# Stage 9J: begin/end lifecycle behavioral self-test (same gating/pattern).
+	add_executable(test_netstream_lifecycle
+		test_netstream_lifecycle.cpp
+		${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_realtime_abi.s
+		${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_handler.S)
+	set_source_files_properties(
+		${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_realtime_abi.s
+		${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_handler.S
+		PROPERTIES
+		LANGUAGE C
+		COMPILE_OPTIONS "-x;assembler-with-cpp")
+	target_include_directories(test_netstream_lifecycle PRIVATE
+		${CMAKE_SOURCE_DIR}
+		${CMAKE_SOURCE_DIR}/engine/platform/atari)
+	target_compile_definitions(test_netstream_lifecycle PRIVATE
+		EDGE_ATARI_FUJINET_REALTIME_NETSTREAM=1
+		EDGE_NETSTREAM_TEST_HOOKS=1)
+	add_test(NAME test_netstream_lifecycle
+		COMMAND mos-sim $<TARGET_FILE:test_netstream_lifecycle>)
 endif()

@@ -1,9 +1,9 @@
 // tests/backends/atari/test_netstream_rx_ring.cpp
 // Stage 9H: RX ring behavioral self-test, executed under mos-sim.
 //
-// Drives the translated RX ring through PRIVATE, test-only handler hooks
-// (ns_test_init_rx / ns_test_rx_push) -- these are NOT part of the edge_ns_*
-// ABI and are gated behind EDGE_NETSTREAM_TEST_HOOKS in the handler. The
+// Setup uses the real hardware-free _ns_begin_stream (via the shim); RX bytes are
+// injected through the PRIVATE, test-only producer hook ns_test_rx_push (gated by
+// EDGE_NETSTREAM_TEST_HOOKS, mimics the deferred input IRQ). The
 // production byte path (_ns_recv_byte / _ns_bytes_avail) is exercised via the
 // EDGE ABI shim (_edge_ns_recv_byte_packed / _edge_ns_bytes_avail), so this also
 // re-validates the carry->packed-status mapping.
@@ -19,9 +19,10 @@ extern "C" {
     // _edge_ns_recv_byte_packed: low byte = data, high byte = status (0=ok,1=empty).
     uint16_t _edge_ns_recv_byte_packed(void);
     uint16_t _edge_ns_bytes_avail(void);
+    void     _edge_ns_begin_stream(void);   // Stage 9J: real hardware-free init
 
-    // Private test-only RX hooks (handler, EDGE_NETSTREAM_TEST_HOOKS).
-    void    ns_test_init_rx(void);
+    // Private test-only RX hook (handler, EDGE_NETSTREAM_TEST_HOOKS): mimics the
+    // deferred input-IRQ producer.
     uint8_t ns_test_rx_push(uint8_t byte);  // 0 = pushed, 1 = full
 }
 
@@ -45,7 +46,7 @@ int main() {
     const unsigned CAP = 128;  // NS_INPUT_BUFSIZE
 
     // ---- empty after init ----
-    ns_test_init_rx();
+    _edge_ns_begin_stream();
     CHECK(_edge_ns_bytes_avail() == 0);
     {
         uint16_t r = _edge_ns_recv_byte_packed();
@@ -75,7 +76,7 @@ int main() {
 
     // ---- wrap across the 128 boundary ----
     // Advance both pointers near the end, then push past it so inPtr/inReadPtr wrap.
-    ns_test_init_rx();
+    _edge_ns_begin_stream();
     for (unsigned i = 0; i < 100; ++i) CHECK(ns_test_rx_push(pat(i)) == 0);
     for (unsigned i = 0; i < 100; ++i) {           // drain; pointers now at offset 100
         uint16_t r = _edge_ns_recv_byte_packed();
@@ -94,7 +95,7 @@ int main() {
     CHECK(_edge_ns_bytes_avail() == 0);
 
     // ---- capacity / full ----
-    ns_test_init_rx();
+    _edge_ns_begin_stream();
     for (unsigned i = 0; i < CAP; ++i) CHECK(ns_test_rx_push(pat(i)) == 0);
     CHECK(_edge_ns_bytes_avail() == CAP);
     CHECK(ns_test_rx_push(0xFF) == 1);             // 129th push: full

@@ -12,10 +12,13 @@
 ;   - 9I: TX enqueue -- _ns_send_byte (pure RAM ring enqueue; index-based, no SMC).
 ;         The upstream idle-prime SEROUT write is deliberately NOT done here; every
 ;         accepted byte is buffered and transmission is deferred (see _ns_send_byte).
+;   - 9J: hardware-free lifecycle -- _ns_begin_stream / _ns_end_stream initialize and
+;         reset ALL RX/TX/status RAM state (shared ns_init_ring_state) and toggle the
+;         serialConcurrentNum active flag. No hardware/OS/vector work (see below).
 ; Still INERT / deferred (later stages):
-;   - _ns_init_netstream / _ns_begin_stream / _ns_end_stream
+;   - _ns_init_netstream
 ;   - IRQ handlers + vector swap; POKEY/SKCTL/AUDCTL/PACTL/SEROUT; SIO/DCB enable
-;   - serialOutIdle idle-prime + outBuf; serialErrors[4] + serialConcurrentNum
+;   - DetectPALViaVCOUNT; idle-prime SEROUT + outBuf; serialErrors[4] overflow model
 ;   - packet framing
 ;
 ; SMC note (Option A, per Stage 9D): the RX pointers inReadPtr (in _ns_recv_byte)
@@ -57,15 +60,84 @@
 .text
 
 ;==========================================================================
-; _ns_begin_stream  (upstream: NS_BeginConcurrent_Impl)
-; Scaffold: no-op. Real version installs IRQ vectors and enables POKEY IRQs.
+; _ns_begin_stream  (upstream: NS_BeginConcurrent_Impl) -- Stage 9J, HARDWARE-FREE.
+;
+; Initializes ALL RX/TX/status RAM state to empty-ready and marks the stream
+; active. It does NOT do any of upstream's hardware/OS bring-up -- deferred to the
+; IRQ/POKEY stage:
+;   - DetectPALViaVCOUNT (VCOUNT read + spin)
+;   - POKEY/SKCTL/AUDCTL/AUDF3/AUDF4 programming
+;   - PACTL motor assert
+;   - serial IRQ vector save/install (VSERIN..VSEROC) + VIMIRQ swap
+;   - POKMSK/IRQEN enable; SEROUT idle-prime
+; No critical section is needed yet: no IRQ is installed, so nothing mutates this
+; state concurrently. (The IRQ stage will add sei-guarded vector/HW sections.)
 _ns_begin_stream:
+    jsr ns_init_ring_state      ; RX+TX+status+serialOutIdle -> empty-ready
+    lda #0
+    sta nsVideoStd              ; NTSC default; real PAL detection deferred
+    lda #1
+    sta serialConcurrentNum     ; mark active (NOT used to gate the byte API)
     rts
 
 ;==========================================================================
-; _ns_end_stream  (upstream: NS_EndConcurrent_Impl)
-; Scaffold: no-op. Real version restores vectors and deasserts the motor line.
+; _ns_end_stream  (upstream: NS_EndConcurrent_Impl) -- Stage 9J, HARDWARE-FREE.
+;
+; Leaves the handler in a safe, initialized-EMPTY state (not half-initialized):
+; full ring re-init identical to begin, but marked inactive. Does NOT touch any
+; hardware/OS state (IRQEN/POKMSK, vectors, PACTL) -- deferred to the IRQ stage.
+; The byte API is not gated on serialConcurrentNum, so after end recv/bytes_avail
+; simply read empty.
 _ns_end_stream:
+    jsr ns_init_ring_state      ; RX+TX+status+serialOutIdle -> empty-ready
+    lda #0
+    sta serialConcurrentNum     ; mark inactive
+    rts
+
+;==========================================================================
+; ns_init_ring_state (internal, not exported) -- pure-RAM reset shared by
+; _ns_begin_stream / _ns_end_stream. Sets every RX/TX/status field to the
+; empty-ready state; leaves serialConcurrentNum and nsVideoStd to the caller.
+; Touches only handler BSS + the SMC pointer operands -- no hardware/OS/vectors.
+ns_init_ring_state:
+    ; --- RX ring ---
+    lda #NS_INPUT_BUFSIZE
+    sta serialInSize
+    sta serialInSpaceLo         ; empty: free space == capacity
+    lda #0
+    sta serialInSize+1
+    sta serialInSpaceHi
+    lda #<nsInputBuffer
+    ldy #>nsInputBuffer
+    sta inBufLo
+    sta inReadPtr               ; patch SMC operand (RX consumer ptr; always present)
+    sty inBufHi
+    sty inReadPtr+1
+#if defined(EDGE_NETSTREAM_TEST_HOOKS)
+    ; inPtr is the RX PRODUCER pointer. It only exists when a producer exists --
+    ; currently the test-only ns_test_rx_push (a stand-in for the deferred input
+    ; IRQ). Non-test builds have no producer, so inPtr is absent and is not
+    ; initialized here. When the input-IRQ handler lands it will own inPtr and this
+    ; guard goes away.
+    sta inPtr
+    sty inPtr+1
+#endif
+    clc
+    adc serialInSize            ; A = <nsInputBuffer + 128
+    sta inBufEndLo
+    tya
+    adc serialInSize+1
+    sta inBufEndHi
+    ; --- TX ring ---
+    lda #0
+    sta outLevel
+    sta serialOutHead
+    sta outIndex
+    lda #0xff
+    sta serialOutIdle           ; idle (consumed later by the deferred idle-prime)
+    ; --- status ---
+    lda #0
+    sta nsStatus
     rts
 
 ;==========================================================================
@@ -260,43 +332,15 @@ _ns_get_final_audf4:
     rts
 
 ;==========================================================================
-; PRIVATE test-only hooks -- Stage 9H. Compiled only when EDGE_NETSTREAM_TEST_HOOKS
-; is defined (the mos-sim RX-ring behavioral test). These are NOT part of the
-; edge_ns_* ABI, NOT declared in fujinet_netstream_realtime_abi.h, and NOT called
-; by any production code. They exist solely to drive the RX ring under the
-; simulator while the real input-IRQ producer and begin-time init are still
-; deferred.
+; PRIVATE test-only hooks. Compiled only when EDGE_NETSTREAM_TEST_HOOKS is defined
+; (the mos-sim behavioral tests). These are NOT part of the edge_ns_* ABI, NOT
+; declared in fujinet_netstream_realtime_abi.h, and NOT called by production code.
+; They mimic the still-deferred input/output IRQ producer/consumer so the rings can
+; be driven under the simulator. (Buffer init is now done by _ns_begin_stream, so
+; the former ns_test_init_rx/ns_test_init_tx helpers were removed in Stage 9J.)
 #if defined(EDGE_NETSTREAM_TEST_HOOKS)
-.global ns_test_init_rx
 .global ns_test_rx_push
-.global ns_test_init_tx
 .global ns_test_tx_drain
-
-; void ns_test_init_rx(void)
-; Hardware-free subset of NS_BeginConcurrent_Impl's RX init: capacity, free-space,
-; buffer bounds, and both SMC pointers set to the buffer start.
-ns_test_init_rx:
-    lda #NS_INPUT_BUFSIZE
-    sta serialInSize
-    sta serialInSpaceLo        ; empty: free space == capacity
-    lda #0
-    sta serialInSize+1
-    sta serialInSpaceHi
-    lda #<nsInputBuffer
-    ldy #>nsInputBuffer
-    sta inBufLo
-    sta inReadPtr              ; patch SMC operand (consumer ptr)
-    sta inPtr                  ; patch SMC operand (producer ptr)
-    sty inBufHi
-    sty inReadPtr+1
-    sty inPtr+1
-    clc
-    adc serialInSize           ; A = <nsInputBuffer + 128
-    sta inBufEndLo
-    tya
-    adc serialInSize+1
-    sta inBufEndHi
-    rts
 
 ; uint8_t ns_test_rx_push(uint8_t byte)
 ; Mimics the future input-IRQ producer (minus the `lda serin` hardware read and
@@ -335,16 +379,6 @@ inPtr = . - 2
 .Lpush_dec_lo:
     dec serialInSpaceLo
     lda #0                     ; pushed
-    rts
-
-; void ns_test_init_tx(void)
-; Hardware-free TX reset (zeroed BSS is already a valid empty ring; this just lets
-; the test reset between cases).
-ns_test_init_tx:
-    lda #0
-    sta outLevel
-    sta serialOutHead
-    sta outIndex
     rts
 
 ; uint16_t ns_test_tx_drain(void)
@@ -407,6 +441,13 @@ inBufEndHi:      .zero 1     ; RX buffer end hi; upstream inBufEndHi
 serialOutHead:   .zero 1     ; TX producer index (send); upstream serialOutHead
 outLevel:        .zero 1     ; TX count (send++ / output-IRQ--); upstream outLevel
 outIndex:        .zero 1     ; TX consumer index; upstream outIndex (output IRQ / test drain)
+
+; Stage 9J lifecycle state (2 bytes). serialOutIdle is TX-ring init state owned by
+; begin (consumed later by the deferred idle-prime); serialConcurrentNum is the
+; active flag (begin=1/end=0) -- NOT used to gate the byte API in this stage; it
+; is forward-prep for the IRQ-stage error indexing and the adapter realtime_active().
+serialOutIdle:       .zero 1 ; 0xff = TX idle; upstream serialOutIdle
+serialConcurrentNum: .zero 1 ; 0 = inactive, 1 = active; upstream serialConcurrentNum
 
 nsInputBuffer:  .zero NS_INPUT_BUFSIZE   ; RX, 128; upstream inputBuffer
 nsOutputBuffer: .zero NS_OUTPUT_BUFSIZE  ; TX, 128; upstream outputBuffer0

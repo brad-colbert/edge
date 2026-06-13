@@ -17,10 +17,10 @@
 extern "C" {
     // Production TX path via the ABI shim: 0 = enqueued, 1 = full/not sent.
     uint8_t _edge_ns_send_byte(uint8_t byte);
+    void    _edge_ns_begin_stream(void);    // Stage 9J: real hardware-free init
 
-    // Private test-only TX hooks (handler, EDGE_NETSTREAM_TEST_HOOKS).
-    void     ns_test_init_tx(void);
-    // ns_test_tx_drain: low byte = data, high byte = status (0=ok, 1=empty).
+    // Private test-only TX hook (handler, EDGE_NETSTREAM_TEST_HOOKS): mimics the
+    // deferred output-IRQ consumer. Low byte = data, high byte = status (0=ok,1=empty).
     uint16_t ns_test_tx_drain(void);
 }
 
@@ -44,7 +44,7 @@ int main() {
     const unsigned CAP = 128;  // capacity, hardcoded as cmp #0x80
 
     // ---- initial TX empty ----
-    ns_test_init_tx();
+    _edge_ns_begin_stream();
     CHECK(drain_status(ns_test_tx_drain()) == 1);  // empty
 
     // ---- single enqueue / drain ----
@@ -66,7 +66,7 @@ int main() {
     CHECK(drain_status(ns_test_tx_drain()) == 1);
 
     // ---- wraparound across the 0x7f index boundary ----
-    ns_test_init_tx();
+    _edge_ns_begin_stream();
     for (unsigned i = 0; i < 100; ++i) CHECK(_edge_ns_send_byte(pat(i)) == 0);
     for (unsigned i = 0; i < 100; ++i) {           // drain; indices now at 100
         uint16_t d = ns_test_tx_drain();
@@ -83,7 +83,7 @@ int main() {
     CHECK(drain_status(ns_test_tx_drain()) == 1);
 
     // ---- capacity / full ----
-    ns_test_init_tx();
+    _edge_ns_begin_stream();
     for (unsigned i = 0; i < CAP; ++i) CHECK(_edge_ns_send_byte(pat(i)) == 0);
     CHECK(_edge_ns_send_byte(0xFF) == 1);          // 129th send: full/not sent
     // Drain fully, in order; the rejected byte must NOT appear.
