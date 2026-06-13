@@ -483,6 +483,49 @@ SerialInputIrqHandler:
     rti
 
 ;==========================================================================
+; DetectPALViaVCOUNT (upstream) -- PAL/NTSC detection. Stage 9M.4: TRANSLATED BUT
+; UNCALLED. begin will call it in the POKEY-activation stage (9O); nothing calls it
+; now. The only VCOUNT read in the file lives here.
+;
+; VCOUNT is ANTIC's scanline/2 counter. Sample it across (up to) one full frame:
+; track the max seen and stop early once it wraps (current < previous). NTSC tops
+; out ~131, PAL ~156, so max>=150 => PAL. The sampling loop is BOUNDED by the
+; nested 8-bit counters (<= 255*255 iterations) and also exits early on wrap, so it
+; cannot spin forever even if VCOUNT never changes (e.g. under mos-sim). Sets
+; nsVideoStd = 0 (NTSC) / 1 (PAL). Clobbers A/X/Y (ordinary subroutine, not an IRQ);
+; touches no ring/POKEY/SIO/vector state.
+DetectPALViaVCOUNT:
+    lda NS_VCOUNT
+    sta NetstreamVCountPrev
+    sta NetstreamVCountMax
+    ldx #0xff
+    ldy #0xff
+.Ldp_loop:
+    lda NS_VCOUNT
+    cmp NetstreamVCountMax
+    bcc .Ldp_no_max
+    sta NetstreamVCountMax
+.Ldp_no_max:
+    cmp NetstreamVCountPrev
+    bcc .Ldp_wrapped            ; current < previous -> frame wrapped, done
+    sta NetstreamVCountPrev
+    dey
+    bne .Ldp_loop
+    dex
+    bne .Ldp_loop               ; bounded: <= 255*255 samples
+.Ldp_wrapped:
+    lda NetstreamVCountMax
+    cmp #150
+    bcc .Ldp_ntsc
+    lda #1                      ; PAL
+    bne .Ldp_store
+.Ldp_ntsc:
+    lda #0                      ; NTSC
+.Ldp_store:
+    sta nsVideoStd
+    rts
+
+;==========================================================================
 ; PRIVATE test-only hooks. Compiled only when EDGE_NETSTREAM_TEST_HOOKS is defined
 ; (the mos-sim behavioral tests). These are NOT part of the edge_ns_* ABI, NOT
 ; declared in fujinet_netstream_realtime_abi.h, and NOT called by production code.
@@ -494,6 +537,14 @@ SerialInputIrqHandler:
 .global ns_test_tx_drain
 .global ns_test_set_status
 .global ns_test_swap_irq_vector
+.global ns_test_detect_pal
+
+; void ns_test_detect_pal(void)
+; Test-only entry to the internal DetectPALViaVCOUNT (stays unexported). The routine
+; is bounded, so the sim smoke can call it and assert it returns + nsVideoStd in 0/1.
+ns_test_detect_pal:
+    jsr DetectPALViaVCOUNT
+    rts
 
 ; void ns_test_swap_irq_vector(void)
 ; Test-only entry to the internal SwapIrqVector (which stays unexported). Lets the
