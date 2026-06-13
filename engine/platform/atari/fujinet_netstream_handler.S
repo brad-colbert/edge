@@ -526,6 +526,71 @@ DetectPALViaVCOUNT:
     rts
 
 ;==========================================================================
+; Serial IRQ vector table -- Stage 9N. Laid out to match the OS vector byte order
+; VSERIN/VSEROR/VSEROC so a single index drives both save and install. Local data
+; (not executed; reached via indexed loads only).
+serialVecs:
+    .word SerialInputIrqHandler     ; -> VSERIN  ($020A)
+    .word SerialOutputIrqHandler    ; -> VSEROR  ($020C)
+    .word SerialCompleteIrqHandler  ; -> VSEROC  ($020E)
+
+;==========================================================================
+; ns_install_vectors / ns_restore_vectors -- Stage 9N. Internal, always compiled,
+; but NOT called by begin/end yet (9O wires them in). They touch ONLY OS-vector RAM
+; ($020A-$020F via NS_VSERIN, and VIMIRQ via SwapIrqVector) + serialVecSave +
+; chain_addr + vectorInstalled -- no POKEY/SKCTL/AUDCTL/PACTL, no IRQEN/POKMSK, no
+; SEROUT, no SIOV. php/sei/plp is a CPU-only critical section (the vector swap must
+; be atomic vs any IRQ). Guarded by vectorInstalled so double-install /
+; double-restore / restore-without-install are all safe.
+
+; void ns_install_vectors(void)
+ns_install_vectors:
+    php
+    sei
+    lda vectorInstalled
+    bne .Linst_done             ; already installed -> no double-install
+    ldx #5
+.Linst_loop:
+    lda NS_VSERIN,x             ; save old VSERIN/VSEROR/VSEROC
+    sta serialVecSave,x
+    lda serialVecs,x            ; install handler vectors
+    sta NS_VSERIN,x
+    dex
+    bpl .Linst_loop
+    ; seed the chain target with our dispatcher BEFORE swapping it into VIMIRQ.
+    ; REQUIRED: IrqHandler assembles `jmp 0xffff`, so chain_addr's initial value is
+    ; 0xFFFF, not &IrqHandler -- without this seed the swap would put 0xFFFF in VIMIRQ.
+    lda #<IrqHandler
+    sta chain_addr
+    lda #>IrqHandler
+    sta chain_addr+1
+    jsr SwapIrqVector           ; VIMIRQ := &IrqHandler ; chain_addr := old VIMIRQ
+    lda #1
+    sta vectorInstalled
+.Linst_done:
+    plp
+    rts
+
+; void ns_restore_vectors(void)
+ns_restore_vectors:
+    php
+    sei
+    lda vectorInstalled
+    beq .Lrest_done             ; not installed -> safe no-op (chain_addr would be stale)
+    ldx #5
+.Lrest_loop:
+    lda serialVecSave,x         ; restore old VSERIN/VSEROR/VSEROC
+    sta NS_VSERIN,x
+    dex
+    bpl .Lrest_loop
+    jsr SwapIrqVector           ; VIMIRQ := chain_addr (old VIMIRQ) ; chain_addr := &IrqHandler
+    lda #0
+    sta vectorInstalled
+.Lrest_done:
+    plp
+    rts
+
+;==========================================================================
 ; PRIVATE test-only hooks. Compiled only when EDGE_NETSTREAM_TEST_HOOKS is defined
 ; (the mos-sim behavioral tests). These are NOT part of the edge_ns_* ABI, NOT
 ; declared in fujinet_netstream_realtime_abi.h, and NOT called by production code.
@@ -538,6 +603,18 @@ DetectPALViaVCOUNT:
 .global ns_test_set_status
 .global ns_test_swap_irq_vector
 .global ns_test_detect_pal
+.global ns_test_install_vectors
+.global ns_test_restore_vectors
+
+; void ns_test_install_vectors(void) / ns_test_restore_vectors(void)
+; Test-only entries to the internal install/restore routines (kept unexported). Let
+; the mos-sim test drive vector install/restore (OS vectors are RAM under sim).
+ns_test_install_vectors:
+    jsr ns_install_vectors
+    rts
+ns_test_restore_vectors:
+    jsr ns_restore_vectors
+    rts
 
 ; void ns_test_detect_pal(void)
 ; Test-only entry to the internal DetectPALViaVCOUNT (stays unexported). The routine
@@ -649,6 +726,13 @@ outIndex:        .zero 1     ; TX consumer index; upstream outIndex (output IRQ 
 ; is forward-prep for the IRQ-stage error indexing and the adapter realtime_active().
 serialOutIdle:       .zero 1 ; 0xff = TX idle; upstream serialOutIdle
 serialConcurrentNum: .zero 1 ; 0 = inactive, 1 = active; upstream serialConcurrentNum
+
+; Stage 9N: tracks whether the OS serial/IRQ vectors are physically installed.
+; HARDWARE state, NOT ring state: modified ONLY by ns_install_vectors (->1) and
+; ns_restore_vectors (->0). Deliberately NOT cleared by ns_init_ring_state, so a
+; hardware-free begin/end cannot desync it from the real vector state (matters once
+; 9O makes begin/end install/restore). BSS zero-init = not installed. Not a byte-API gate.
+vectorInstalled:     .zero 1 ; 0 = vectors not installed, 1 = installed
 
 nsInputBuffer:  .zero NS_INPUT_BUFSIZE   ; RX, 128; upstream inputBuffer
 nsOutputBuffer: .zero NS_OUTPUT_BUFSIZE  ; TX, 128; upstream outputBuffer0

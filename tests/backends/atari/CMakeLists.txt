@@ -197,4 +197,24 @@ if(EDGE_ATARI_FUJINET_REALTIME_NETSTREAM AND CMAKE_CXX_COMPILER MATCHES "mos")
 		EDGE_NETSTREAM_TEST_HOOKS=1)
 	add_test(NAME test_netstream_detect_pal
 		COMMAND mos-sim $<TARGET_FILE:test_netstream_detect_pal>)
+
+	# Stage 9N: serial vector install/restore self-test (OS vectors only, no POKEY).
+	add_executable(test_netstream_vectors
+		test_netstream_vectors.cpp
+		${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_realtime_abi.s
+		${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_handler.S)
+	set_source_files_properties(
+		${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_realtime_abi.s
+		${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_handler.S
+		PROPERTIES
+		LANGUAGE C
+		COMPILE_OPTIONS "-x;assembler-with-cpp")
+	target_include_directories(test_netstream_vectors PRIVATE
+		${CMAKE_SOURCE_DIR}
+		${CMAKE_SOURCE_DIR}/engine/platform/atari)
+	target_compile_definitions(test_netstream_vectors PRIVATE
+		EDGE_ATARI_FUJINET_REALTIME_NETSTREAM=1
+		EDGE_NETSTREAM_TEST_HOOKS=1)
+	add_test(NAME test_netstream_vectors
+		COMMAND mos-sim $<TARGET_FILE:test_netstream_vectors>)
 endif()
