@@ -20,6 +20,7 @@ extern "C" {
     uint16_t _edge_ns_recv_byte_packed(void);
     uint16_t _edge_ns_bytes_avail(void);
     void     _edge_ns_begin_stream(void);   // Stage 9J: real hardware-free init
+    uint8_t  _edge_ns_get_status(void);      // Stage 9M.3: serialErrors[0] read+clear
 
     // Private test-only RX hook (handler, EDGE_NETSTREAM_TEST_HOOKS): mimics the
     // deferred input-IRQ producer.
@@ -94,13 +95,17 @@ int main() {
     }
     CHECK(_edge_ns_bytes_avail() == 0);
 
-    // ---- capacity / full ----
+    // ---- capacity / full + overflow status ----
     _edge_ns_begin_stream();
+    CHECK(_edge_ns_get_status() == 0);             // begin cleared status
     for (unsigned i = 0; i < CAP; ++i) CHECK(ns_test_rx_push(pat(i)) == 0);
     CHECK(_edge_ns_bytes_avail() == CAP);
-    CHECK(ns_test_rx_push(0xFF) == 1);             // 129th push: full
+    CHECK(ns_test_rx_push(0xFF) == 1);             // 129th push: full -> overflow
     CHECK(_edge_ns_bytes_avail() == CAP);          // unchanged after a full push
-    // Drain fully, in order.
+    // Overflow set the status bit (0x10); get_status clears it on read.
+    CHECK(_edge_ns_get_status() == 0x10);
+    CHECK(_edge_ns_get_status() == 0);             // cleared on prior read
+    // Drain returns exactly the 128 accepted bytes, in order (overflow byte absent).
     for (unsigned i = 0; i < CAP; ++i) {
         uint16_t r = _edge_ns_recv_byte_packed();
         CHECK(recv_status(r) == 0);

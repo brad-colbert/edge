@@ -110,18 +110,11 @@ ns_init_ring_state:
     lda #<nsInputBuffer
     ldy #>nsInputBuffer
     sta inBufLo
-    sta inReadPtr               ; patch SMC operand (RX consumer ptr; always present)
+    sta inReadPtr               ; patch SMC operand (RX consumer ptr; in _ns_recv_byte)
+    sta inPtr                   ; patch SMC operand (RX producer ptr; in ns_rx_produce)
     sty inBufHi
     sty inReadPtr+1
-#if defined(EDGE_NETSTREAM_TEST_HOOKS)
-    ; inPtr is the RX PRODUCER pointer. It only exists when a producer exists --
-    ; currently the test-only ns_test_rx_push (a stand-in for the deferred input
-    ; IRQ). Non-test builds have no producer, so inPtr is absent and is not
-    ; initialized here. When the input-IRQ handler lands it will own inPtr and this
-    ; guard goes away.
-    sta inPtr
     sty inPtr+1
-#endif
     clc
     adc serialInSize            ; A = <nsInputBuffer + 128
     sta inBufEndLo
@@ -418,6 +411,78 @@ SOH_is_empty:
 SerialCompleteIrqHandler = SOH_xit
 
 ;==========================================================================
+; ns_rx_produce (internal, always compiled) -- shared RX producer.
+; Input:  A = received byte.
+; Output: C=0 enqueued, C=1 full/overflow. (Internal carry convention only -- NOT
+;         public ABI.) Preserves X and Y (safe to call from the input IRQ).
+;
+; This is the permanent home of the RX PRODUCER pointer inPtr (the SMC operand of
+; the `sta` below). Both the real SerialInputIrqHandler and the test-only
+; ns_test_rx_push call this -- one state model, one inPtr. Touches only RX BSS
+; (serialInSpace/inBuf*/serialErrors/serialConcurrentNum) + the inPtr operand; no
+; hardware registers.
+ns_rx_produce:
+    pha                         ; save the byte (do not lose A)
+    lda serialInSpaceLo
+    ora serialInSpaceHi
+    beq .Lprod_full
+    ; --- space available: enqueue ---
+    pla                         ; A = byte
+    sta 0xffff                  ; SMC: *inPtr = byte
+inPtr = . - 2
+    inc inPtr                   ; advance producer ptr (16-bit)
+    bne .Lprod_adv
+    inc inPtr+1
+.Lprod_adv:
+    lda inPtr                   ; wrap inPtr == inBufEnd -> inBuf
+    cmp inBufEndLo
+    bne .Lprod_nowrap
+    lda inPtr+1
+    cmp inBufEndHi
+    bne .Lprod_nowrap
+    lda inBufLo
+    sta inPtr
+    lda inBufHi
+    sta inPtr+1
+.Lprod_nowrap:
+    lda serialInSpaceLo         ; consume one free slot (16-bit dec)
+    bne .Lprod_declo
+    dec serialInSpaceHi
+.Lprod_declo:
+    dec serialInSpaceLo
+    clc                         ; enqueued
+    rts
+    ; --- full: set overflow status, ring unchanged ---
+.Lprod_full:
+    pla                         ; discard the byte (not stored)
+    txa                         ; preserve X (6502-safe; no PHX)
+    pha
+    ldx serialConcurrentNum
+    beq .Lprod_full_noerr       ; serialConcurrentNum==0: no active channel, skip (safe)
+    dex                         ; index = serialConcurrentNum - 1
+    lda serialErrors,x
+    ora #0x10                   ; upstream overflow bit (bit 4)
+    sta serialErrors,x
+.Lprod_full_noerr:
+    pla                         ; restore X
+    tax
+    sec                         ; full/overflow
+    rts
+
+;==========================================================================
+; SerialInputIrqHandler (upstream) -- RX input-ready IRQ producer.
+; Stage 9M.3: TRANSLATED BUT UNINSTALLED. Entered via VSERIN only once installed
+; (deferred to 9N); never reached now. Entry assumes the OS pushed A (balanced by
+; the `pla; rti`). Reads the received byte from SERIN and feeds ns_rx_produce
+; (which preserves X/Y). This routine contains the only SERIN read in the file;
+; it is unreachable from begin/end/production and is never sim-called.
+SerialInputIrqHandler:
+    lda NS_SERIN                ; HW read $D20D (uninstalled: never executes)
+    jsr ns_rx_produce           ; A=byte; preserves X,Y; carry status ignored here
+    pla                         ; restore A pushed by the OS IRQ dispatch
+    rti
+
+;==========================================================================
 ; PRIVATE test-only hooks. Compiled only when EDGE_NETSTREAM_TEST_HOOKS is defined
 ; (the mos-sim behavioral tests). These are NOT part of the edge_ns_* ABI, NOT
 ; declared in fujinet_netstream_realtime_abi.h, and NOT called by production code.
@@ -446,42 +511,15 @@ ns_test_set_status:
     rts
 
 ; uint8_t ns_test_rx_push(uint8_t byte)
-; Mimics the future input-IRQ producer (minus the `lda serin` hardware read and
-; the overflow-status bit): stores byte at inPtr, advances+wraps, consumes one
-; free-space slot. Returns A=0 pushed, A=1 full.
+; Thin test wrapper over the shared producer ns_rx_produce (same path the real
+; input IRQ uses). Converts the internal carry status to the existing A=0/1 return
+; (0 = pushed, 1 = full). On full, ns_rx_produce also sets the overflow status bit.
 ns_test_rx_push:
-    pha                        ; save byte arg
-    lda serialInSpaceLo
-    ora serialInSpaceHi
-    bne .Lpush_have_space
-    pla                        ; full: discard byte
+    jsr ns_rx_produce          ; C=0 pushed / C=1 full
+    lda #0
+    bcc .Lrxp_done
     lda #1
-    rts
-.Lpush_have_space:
-    pla                        ; A = byte
-    sta 0xffff                 ; SMC: *inPtr = byte
-inPtr = . - 2
-    inc inPtr                  ; advance producer ptr (16-bit)
-    bne .Lpush_adv_done
-    inc inPtr+1
-.Lpush_adv_done:
-    lda inPtr                  ; wrap inPtr == inBufEnd -> inBuf
-    cmp inBufEndLo
-    bne .Lpush_no_wrap
-    lda inPtr+1
-    cmp inBufEndHi
-    bne .Lpush_no_wrap
-    lda inBufLo
-    sta inPtr
-    lda inBufHi
-    sta inPtr+1
-.Lpush_no_wrap:
-    lda serialInSpaceLo        ; consume one free slot (16-bit dec)
-    bne .Lpush_dec_lo
-    dec serialInSpaceHi
-.Lpush_dec_lo:
-    dec serialInSpaceLo
-    lda #0                     ; pushed
+.Lrxp_done:
     rts
 
 ; uint16_t ns_test_tx_drain(void)
