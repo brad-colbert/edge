@@ -667,6 +667,235 @@ DetectPALViaVCOUNT:
     rts
 
 ;==========================================================================
+; Stage 9Q.1 -- pure / mos-sim-testable Netstream init-PREPARE path.
+;
+; This is the sim-safe half of init (upstream NS_InitNetstream_Impl, lines 451-592):
+; baud selection, PAL/TCP flag derivation, host validation, and SIO-payload build --
+; ALL pure RAM. The hardware half (SIOV/DCB, the POKEY tail, the init-while-active
+; guard, and the parameterless raw entry actually invoking this) is deferred to 9Q.2;
+; raw _ns_init_netstream stays a failing sec/rts stub until then. Nothing here writes
+; POKEY/$D200, IRQEN/POKMSK, the OS vector page, or calls SIOV -- so it runs under
+; mos-sim. These routines read the staged .bss (nsNominalBaud*, nsHostPtr*, nsInitFlags,
+; nsVideoStd) and write nsFinal* / nsPayloadBuf / nsPayloadLen.
+;
+; EDGE reorder vs upstream: upstream runs LookupBaud BEFORE DetectPAL, so the divisor
+; row could reflect a stale VideoStd while the 0x10 flag is fresh. ns_init_prepare
+; (production order) detects PAL/NTSC FIRST, then prepare-core, so the row and the flag
+; always agree. The test path skips detect and stages nsVideoStd directly for
+; determinism (mos-sim does not model VCOUNT).
+
+;--------------------------------------------------------------------------
+; ns_select_baud (internal) -- translate upstream LookupBaudFromNominal (lines 618-657).
+; Reads the staged key nsNominalBaudLo/Hi and nsVideoStd. On a hit, writes the selected
+; NTSC or PAL AUDF3/AUDF4 pair to nsFinalAudf3/nsFinalAudf4 and returns C=0. On a miss,
+; returns C=1 and leaves nsFinalAudf3/nsFinalAudf4 UNTOUCHED (no partial write). Carry
+; only (internal convention); the test wrapper converts it to A=0/1.
+ns_select_baud:
+    ldx #0
+.Lsb_scan:
+    lda BaudTable,x
+    ora BaudTable+1,x
+    beq .Lsb_fail               ; 0,0 terminator -> not found
+    lda BaudTable,x
+    cmp nsNominalBaudLo
+    bne .Lsb_next
+    lda BaudTable+1,x
+    cmp nsNominalBaudHi
+    bne .Lsb_next
+    ; matched row: select NTSC (videoStd==0) or PAL pair
+    lda nsVideoStd
+    beq .Lsb_ntsc
+    lda BaudTable+4,x           ; pal_audf3
+    sta nsFinalAudf3
+    lda BaudTable+5,x           ; pal_audf4
+    sta nsFinalAudf4
+    clc
+    rts
+.Lsb_ntsc:
+    lda BaudTable+2,x           ; ntsc_audf3
+    sta nsFinalAudf3
+    lda BaudTable+3,x           ; ntsc_audf4
+    sta nsFinalAudf4
+    clc
+    rts
+.Lsb_next:
+    txa
+    clc
+    adc #6                      ; 6-byte rows
+    tax
+    bne .Lsb_scan               ; (faithful: terminator check above ends the scan)
+.Lsb_fail:
+    sec
+    rts
+
+;--------------------------------------------------------------------------
+; ns_seed_host_src / ns_load_host_y (internal) -- host dereference via a single SMC
+; base operand (upstream hostPtr). ns_seed_host_src copies the staged nsHostPtr into the
+; nsHostSrc operand of the `lda abs,y` below; ns_load_host_y returns A = host[Y]. The
+; base is fixed and Y indexes (upstream `lda $ffff,y / hostPtr=*-2`), so no pointer inc.
+; One SMC home, shared by ns_validate_host (empty peek) and ns_build_payload (copy loop).
+ns_seed_host_src:
+    lda nsHostPtrLo
+    sta nsHostSrc
+    lda nsHostPtrHi
+    sta nsHostSrc+1
+    rts
+ns_load_host_y:
+    lda 0xffff,y                ; SMC: A = host[Y] (base operand patched by ns_seed_host_src)
+nsHostSrc = . - 2
+    rts
+
+;--------------------------------------------------------------------------
+; ns_validate_host (internal) -- fail closed on null/empty host BEFORE any nsFinal* is
+; touched (so a rejected host leaves the finals untouched, per the failure policy). Null
+; pointer (nsHostPtr == 0) -> C=1. Empty string (host[0] == 0) -> C=1. Otherwise C=0.
+ns_validate_host:
+    lda nsHostPtrLo
+    ora nsHostPtrHi
+    beq .Lvh_fail               ; null host pointer
+    jsr ns_seed_host_src
+    ldy #0
+    jsr ns_load_host_y          ; A = host[0]
+    beq .Lvh_fail               ; empty host string
+    clc
+    rts
+.Lvh_fail:
+    sec
+    rts
+
+;--------------------------------------------------------------------------
+; ns_derive_flags (internal) -- translate upstream flag derivation (lines 482-501).
+; Starts from the untouched caller seed nsInitFlags (upstream reads FinalFlags, which it
+; had loaded with the caller flags; EDGE keeps the seed separate). Sets/clears the PAL
+; bit 0x10 from nsVideoStd, then clears the UDP-sequencing bit 0x20 if TCP (bit 0x01) is
+; selected. Result -> nsFinalFlags. Called only AFTER baud selection succeeds.
+ns_derive_flags:
+    lda nsInitFlags
+    ldx nsVideoStd
+    beq .Ldf_ntsc
+    ora #0x10                   ; PAL -> set bit 0x10 (result >= 0x10, so Z clear)
+    bne .Ldf_store
+.Ldf_ntsc:
+    and #0xef                   ; NTSC -> clear bit 0x10
+.Ldf_store:
+    sta nsFinalFlags
+    ; TCP (bit 0x01) has no UDP sequencing -> clear bit 0x20
+    lda nsFinalFlags
+    and #0x01
+    beq .Ldf_done               ; UDP -> leave 0x20 as seeded
+    lda nsFinalFlags
+    and #0xdf                   ; clear UDP-seq bit 0x20
+    sta nsFinalFlags
+.Ldf_done:
+    rts
+
+;--------------------------------------------------------------------------
+; ns_build_payload (internal) -- translate upstream payload build (lines 503-536).
+; Layout in nsPayloadBuf (64 bytes): host\0, then nsFinalFlags, then nsFinalAudf3, then
+; zero pad to 64; nsPayloadLen = 64. Host copy is capped at NS_HOST_MAX (61) with a
+; forced NUL at the cap. Host is already validated non-empty by ns_validate_host. Always
+; returns C=0 (the failure cases are handled up front in ns_prepare_core).
+ns_build_payload:
+    jsr ns_seed_host_src
+    ldy #0
+.Lbp_copy:
+    jsr ns_load_host_y          ; A = host[y]
+    sta nsPayloadBuf,y
+    beq .Lbp_append             ; reached the host NUL
+    iny
+    cpy #NS_HOST_MAX            ; 61
+    bcc .Lbp_copy
+    lda #0                      ; host maxed -> force NUL at index 61
+    sta nsPayloadBuf,y
+.Lbp_append:
+    ; y = index of the NUL terminator
+    iny
+    lda nsFinalFlags
+    sta nsPayloadBuf,y
+    iny
+    lda nsFinalAudf3
+    sta nsPayloadBuf,y
+    iny
+.Lbp_pad:
+    cpy #NS_PAYLOAD_MAX         ; 64
+    bcs .Lbp_done
+    lda #0
+    sta nsPayloadBuf,y
+    iny
+    bne .Lbp_pad
+.Lbp_done:
+    lda #NS_PAYLOAD_MAX
+    sta nsPayloadLen
+    clc
+    rts
+
+;--------------------------------------------------------------------------
+; ns_prepare_core (internal) -- the pure, detect-free heart of init. Validates the host
+; (null/empty fail closed), selects the baud divisors (miss fails closed, nsFinal*
+; untouched), derives nsFinalFlags (only after baud succeeds), then builds the payload.
+; Returns C=0 success / C=1 failure (carry only). nsVideoStd must already be set (by
+; DetectPAL in the production wrapper, or staged directly by tests).
+ns_prepare_core:
+    jsr ns_validate_host        ; null/empty -> C=1 (nsFinal* untouched)
+    bcs .Lpc_fail
+    jsr ns_select_baud          ; miss     -> C=1 (nsFinal* untouched)
+    bcs .Lpc_fail
+    jsr ns_derive_flags         ; derive nsFinalFlags AFTER baud success
+    jsr ns_build_payload        ; build nsPayloadBuf / nsPayloadLen (C=0)
+    clc
+    rts
+.Lpc_fail:
+    sec
+    rts
+
+;--------------------------------------------------------------------------
+; ns_init_prepare (internal) -- production prepare order: DetectPAL/NTSC FIRST so the
+; baud row and the 0x10 flag are coherent (the EDGE reorder), THEN ns_prepare_core.
+; Added now for 9Q.2 to call; NOT yet invoked by raw _ns_init_netstream. Returns the
+; prepare-core carry. NOTE: DetectPALViaVCOUNT reads VCOUNT (a benign read, no write),
+; but mos-sim does not model VCOUNT, so tests use the no-detect path instead.
+ns_init_prepare:
+    jsr DetectPALViaVCOUNT
+    jsr ns_prepare_core
+    rts
+
+;--------------------------------------------------------------------------
+; BaudTable (rodata, in .text -- NOT .bss; it is constant). Verbatim translation of the
+; upstream BaudTable (netstream.s lines 659-687) in GNU/llvm-mos syntax (0x.. hex). Each
+; row is 6 bytes: nominal_lo, nominal_hi, ntsc_audf3, ntsc_audf4, pal_audf3, pal_audf4;
+; terminated by a 0,0 nominal. 26 rows + terminator = 158 bytes. Scanned by ns_select_baud
+; via indexed loads only (never executed).
+BaudTable:
+    ; nominal_lo, nominal_hi, ntsc_audf3, ntsc_audf4, pal_audf3, pal_audf4
+    .byte 0x2c,0x01,159,11,132,11   ; 300
+    .byte 0x58,0x02,204,5,190,5     ; 600
+    .byte 0xee,0x02,162,4,151,4     ; 750
+    .byte 0xb0,0x04,226,2,219,2     ; 1200
+    .byte 0x60,0x09,109,1,106,1     ; 2400
+    .byte 0xc0,0x12,179,0,177,0     ; 4800
+    .byte 0x80,0x25,86,0,85,0       ; 9600
+    .byte 0x00,0x4b,39,0,39,0       ; 19200
+    .byte 0x12,0x7a,21,0,21,0       ; 31250
+    .byte 0x00,0x96,16,0,16,0       ; 38400
+    .byte 0x34,0x9e,15,0,15,0       ; ~40500
+    .byte 0x58,0xa6,14,0,14,0       ; ~42600
+    .byte 0x9c,0xae,13,0,13,0       ; ~44700
+    .byte 0xfc,0xb7,12,0,12,0       ; ~47100
+    .byte 0x24,0xc2,11,0,11,0       ; ~49700
+    .byte 0x88,0xcd,10,0,10,0       ; ~52600
+    .byte 0x5c,0xda,9,0,9,0         ; ~55900
+    .byte 0x00,0xe1,8,0,8,0         ; 57600
+    .byte 0x78,0xf8,7,0,7,0         ; ~63600
+    .byte 0x90,0x0b,6,0,6,0         ; ~68400
+    .byte 0x18,0x12,5,0,5,0         ; ~74200
+    .byte 0x24,0x1f,4,0,4,0         ; ~81400
+    .byte 0x94,0x23,3,0,3,0         ; ~90500
+    .byte 0x70,0x8d,2,0,2,0         ; ~102000
+    .byte 0x30,0xcd,1,0,1,0         ; ~118000
+    .byte 0x30,0xec,0,0,0,0         ; ~126000
+    .byte 0,0                       ; terminator
+
+;==========================================================================
 ; Serial IRQ vector table -- Stage 9N. Laid out to match the OS vector byte order
 ; VSERIN/VSEROR/VSEROC so a single index drives both save and install. Local data
 ; (not executed; reached via indexed loads only).
@@ -820,6 +1049,8 @@ ns_disable_serial_irqs:
 .global ns_test_begin_soft
 .global ns_test_end_soft
 .global ns_test_set_hw_activated
+.global ns_test_select_baud_staged
+.global ns_test_init_prepare_no_detect_staged
 ; 9P: expose the idle-prime mirror + the TX/gate state so the mos-sim test and the
 ; Altirra probe can snapshot the prime via RAM (a CPU read of $D20D returns SERIN,
 ; not the SEROUT latch). Declarations only -- no behavior change.
@@ -829,6 +1060,22 @@ ns_disable_serial_irqs:
 .global outLevel
 .global outIndex
 .global hardwareActivated
+; 9Q.1: expose the staged init .bss + the final/payload state so C++ tests can stage
+; inputs and read results directly (the test-hook pattern: parameterless asm hooks read
+; staged BSS; C++ writes the staged bytes / nsVideoStd, and reads nsFinal* / nsPayload*).
+.global nsNominalBaudLo
+.global nsNominalBaudHi
+.global nsPortLo
+.global nsPortHi
+.global nsHostPtrLo
+.global nsHostPtrHi
+.global nsInitFlags
+.global nsPayloadLen
+.global nsPayloadBuf
+.global nsVideoStd
+.global nsFinalFlags
+.global nsFinalAudf3
+.global nsFinalAudf4
 
 ; void ns_test_begin_soft(void) / ns_test_end_soft(void)
 ; Test-only entries to the HARDWARE-FREE begin/end bodies. Sim tests use these for
@@ -928,6 +1175,33 @@ ns_test_tx_drain:
     pla                        ; A = byte
     ldx #0                     ; ok
     rts
+
+; uint8_t ns_test_select_baud_staged(void)
+; 9Q.1 deterministic hook: run ns_select_baud against the already-staged nsNominalBaud*
+; and nsVideoStd (C++ writes those bytes first; no DetectPAL, no VCOUNT dependency).
+; Converts the internal carry to a normal uint8_t status: 0 = success (row found,
+; nsFinalAudf3/4 written), 1 = failure (no row; nsFinal* untouched). Carry-only
+; semantics stay internal to ns_select_baud; the C++ test sees A only.
+ns_test_select_baud_staged:
+    jsr ns_select_baud
+    lda #0
+    bcc .Lsbs_done
+    lda #1
+.Lsbs_done:
+    rts
+
+; uint8_t ns_test_init_prepare_no_detect_staged(void)
+; 9Q.1 deterministic hook: run the FULL prepare body (host validation, baud select, flag
+; derivation, payload build) but SKIP DetectPALViaVCOUNT, using the caller-staged
+; nsVideoStd -- so divisor row and the 0x10 PAL flag are driven deterministically (no
+; VCOUNT under mos-sim). Returns 0 = success, 1 = failure (carry converted to A).
+ns_test_init_prepare_no_detect_staged:
+    jsr ns_prepare_core
+    lda #0
+    bcc .Lipnd_done
+    lda #1
+.Lipnd_done:
+    rts
 #endif // EDGE_NETSTREAM_TEST_HOOKS
 
 ;==========================================================================
@@ -950,6 +1224,24 @@ nsVideoStd:     .zero 1     ; 0=NTSC, 1=PAL; upstream NetstreamVideoStd
 nsFinalFlags:   .zero 1     ; upstream NetstreamFinalFlags
 nsFinalAudf3:   .zero 1     ; upstream NetstreamFinalAUDF3
 nsFinalAudf4:   .zero 1     ; upstream NetstreamFinalAUDF4
+
+; Stage 9Q.1 init staging (8 bytes). These hold the marshaled init arguments that
+; the (future, 9Q.2) C wrapper / the test hooks stage into RAM before the parameterless
+; prepare path reads them -- upstream NetstreamNominalBaud / NetstreamPort / hostPtr /
+; the caller flags seed (upstream stores the caller flags straight into FinalFlags; EDGE
+; keeps the untouched caller seed in nsInitFlags and derives the working value into
+; nsFinalFlags). nsPayloadLen is the built payload length (upstream NetstreamPayloadLen).
+; nsPayloadBuf already exists below (do NOT duplicate it). Read by ns_select_baud /
+; ns_prepare_core / the payload builder; written by C/tests. (.global gated under the
+; test-hooks block at the top of the file, following the existing convention.)
+nsNominalBaudLo: .zero 1    ; upstream NetstreamNominalBaudLo (select_baud key, lo)
+nsNominalBaudHi: .zero 1    ; upstream NetstreamNominalBaudHi (select_baud key, hi)
+nsPortLo:        .zero 1    ; upstream NetstreamPortLo (DCB daux1, staged for 9Q.2)
+nsPortHi:        .zero 1    ; upstream NetstreamPortHi (DCB daux2, staged for 9Q.2)
+nsHostPtrLo:     .zero 1    ; hostname pointer lo (payload-builder SMC seed; upstream hostPtr)
+nsHostPtrHi:     .zero 1    ; hostname pointer hi
+nsInitFlags:     .zero 1    ; caller flags seed (untouched); derived -> nsFinalFlags
+nsPayloadLen:    .zero 1    ; built payload length (=64); upstream NetstreamPayloadLen
 
 ; Stage 9L hardware-lifecycle state (declared ahead of its consumers; no HW yet):
 ; serialVecSave saves vserin..vseroc before the (deferred) vector install;

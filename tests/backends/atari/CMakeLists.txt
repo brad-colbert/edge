@@ -259,4 +259,27 @@ if(EDGE_ATARI_FUJINET_REALTIME_NETSTREAM AND CMAKE_CXX_COMPILER MATCHES "mos")
 		EDGE_NETSTREAM_TEST_HOOKS=1)
 	add_test(NAME test_netstream_tx_prime
 		COMMAND mos-sim $<TARGET_FILE:test_netstream_tx_prime>)
+
+	# Stage 9Q.1: init-prepare behavioral self-test. Pure-RAM prepare path (baud
+	# select, flag derivation, host validation, payload build) via parameterless,
+	# deterministic test hooks -- no SIOV/$D200/POKMSK/OS-vector writes, no VCOUNT
+	# dependency (DetectPAL is skipped). Same gating/pattern as the rings above.
+	add_executable(test_netstream_init_prepare
+		test_netstream_init_prepare.cpp
+		${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_realtime_abi.s
+		${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_handler.S)
+	set_source_files_properties(
+		${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_realtime_abi.s
+		${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_handler.S
+		PROPERTIES
+		LANGUAGE C
+		COMPILE_OPTIONS "-x;assembler-with-cpp")
+	target_include_directories(test_netstream_init_prepare PRIVATE
+		${CMAKE_SOURCE_DIR}
+		${CMAKE_SOURCE_DIR}/engine/platform/atari)
+	target_compile_definitions(test_netstream_init_prepare PRIVATE
+		EDGE_ATARI_FUJINET_REALTIME_NETSTREAM=1
+		EDGE_NETSTREAM_TEST_HOOKS=1)
+	add_test(NAME test_netstream_init_prepare
+		COMMAND mos-sim $<TARGET_FILE:test_netstream_init_prepare>)
 endif()

@@ -3,6 +3,16 @@
 //
 // Reports exact compile-time size of NetstreamRealtimeAdapter::State
 // and verifies storage minimization goals (target: <= 8 bytes).
+//
+// This is a HOST build measuring the C++ adapter State struct; it cannot read the
+// EDGE-owned assembly handler's .bss (a separate translation unit / mos object). That
+// figure is tracked separately and measured with `size` on the production handler
+// object (built WITHOUT EDGE_NETSTREAM_TEST_HOOKS):
+//   build .../edge_netstream_abi_shim.dir/.../fujinet_netstream_handler.S.obj
+// Handler .bss history: 9P = 351 bytes; Stage 9Q.1 = 359 bytes (+8 staging fields:
+// nsNominalBaudLo/Hi, nsPortLo/Hi, nsHostPtrLo/Hi, nsInitFlags, nsPayloadLen;
+// nsPayloadBuf was already counted). BaudTable (158 bytes) lives in .text/rodata, not
+// .bss. These are reference figures for this audit, not host-testable assertions.
 
 #include <cstdio>
 #include <cstddef>
