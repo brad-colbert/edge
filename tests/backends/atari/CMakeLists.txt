@@ -237,4 +237,26 @@ if(EDGE_ATARI_FUJINET_REALTIME_NETSTREAM AND CMAKE_CXX_COMPILER MATCHES "mos")
 		EDGE_NETSTREAM_TEST_HOOKS=1)
 	add_test(NAME test_netstream_irq_arm
 		COMMAND mos-sim $<TARGET_FILE:test_netstream_irq_arm>)
+
+	# Stage 9P: SEROUT idle-prime behavioral self-test. Observes the prime via the
+	# RAM mirror (ns_test_last_prime_byte / ns_test_prime_count), never $D20D (a CPU
+	# read of $D20D returns SERIN, not the SEROUT latch).
+	add_executable(test_netstream_tx_prime
+		test_netstream_tx_prime.cpp
+		${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_realtime_abi.s
+		${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_handler.S)
+	set_source_files_properties(
+		${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_realtime_abi.s
+		${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_handler.S
+		PROPERTIES
+		LANGUAGE C
+		COMPILE_OPTIONS "-x;assembler-with-cpp")
+	target_include_directories(test_netstream_tx_prime PRIVATE
+		${CMAKE_SOURCE_DIR}
+		${CMAKE_SOURCE_DIR}/engine/platform/atari)
+	target_compile_definitions(test_netstream_tx_prime PRIVATE
+		EDGE_ATARI_FUJINET_REALTIME_NETSTREAM=1
+		EDGE_NETSTREAM_TEST_HOOKS=1)
+	add_test(NAME test_netstream_tx_prime
+		COMMAND mos-sim $<TARGET_FILE:test_netstream_tx_prime>)
 endif()

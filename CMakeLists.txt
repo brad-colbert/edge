@@ -643,7 +643,10 @@ if(MOS_ATARI8_CXX)
         # _ns_begin_stream/_ns_end_stream (which write the OS-vector page + PACTL and
         # so cannot run under mos-sim) and snapshots PACTL / serial vectors / VIMIRQ /
         # POKMSK / nsVideoStd into page 6 ($0600/$0610/$0620) for debugger inspection.
-        # Altirra-only; intentionally NOT a CTest.
+        # Stage 9P adds an IRQ-fenced post-begin send -> SEROUT-prime snapshot at $0640,
+        # read from the test-only RAM mirror -- so the probe is built WITH
+        # EDGE_NETSTREAM_TEST_HOOKS to expose ns_test_last_prime_byte / ns_test_prime_count
+        # and the TX/gate state symbols. Altirra-only; intentionally NOT a CTest.
         set(NETSTREAM_VEC_PROBE_XEX ${CMAKE_BINARY_DIR}/netstream_vectors_altirra_probe.xex)
         set(NETSTREAM_VEC_PROBE_MAP ${CMAKE_BINARY_DIR}/netstream_vectors_altirra_probe.map)
         add_custom_command(
@@ -651,6 +654,7 @@ if(MOS_ATARI8_CXX)
             COMMAND ${MOS_ATARI8_CXX}
                     -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra
                     -DEDGE_ATARI_FUJINET_REALTIME_NETSTREAM=1
+                    -DEDGE_NETSTREAM_TEST_HOOKS=1
                     -I${CMAKE_SOURCE_DIR}
                     -I${CMAKE_SOURCE_DIR}/engine/platform/atari
                     ${CMAKE_SOURCE_DIR}/tests/backends/atari/netstream_vectors_altirra_probe.cpp

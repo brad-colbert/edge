@@ -22,8 +22,12 @@
 ;         0x28, SKCTL/SSKCTL) -- WITHOUT enabling POKMSK/IRQEN serial IRQs.
 ;   - 9O.4: begin ARMS the POKMSK/IRQEN serial-IRQ bits (LAST) + a hardwareActivated
 ;         re-entry guard; end DISARMS them (FIRST). Serial IRQs are now live.
+;   - 9P: _ns_send_byte idle-primes -- on the idle->active edge (hardwareActivated &&
+;         serialOutIdle) it writes the first queued byte to SEROUT to kick the output
+;         IRQ chain, consumes it, and clears serialOutIdle. begin/end are UNTOUCHED
+;         and SerialOutputIrqHandler is byte-for-byte unchanged.
 ; Still INERT / deferred (later stages):
-;   - 9P: idle-prime SEROUT + outBuf
+;   - outBuf consumer-base SMC (EDGE stays index-based; not needed)
 ;   - _ns_init_netstream / SIO baud selection (9Q)
 ;   - packet framing
 ;
@@ -234,7 +238,7 @@ ns_init_ring_state:
     sta serialOutHead
     sta outIndex
     lda #0xff
-    sta serialOutIdle           ; idle (consumed later by the deferred idle-prime)
+    sta serialOutIdle           ; idle (0xff); consumed by the 9P idle-prime in _ns_send_byte
     ; --- status: clear all four serialErrors bytes ---
     lda #0
     ldx #3
@@ -272,13 +276,23 @@ _ns_get_base:
 ; The carry status is set AFTER plp (the 9H fix: plp reloads the entry carry, so
 ; setting it earlier would be discarded).
 ;
-; STAGED SEMANTIC DIFFERENCE vs upstream: upstream, when serial output is idle,
-; primes the FIRST byte directly into POKEY SEROUT to kick off transmission.
-; Stage 9I deliberately does NOT do that -- it enqueues EVERY accepted byte into
-; the RAM ring and touches no POKEY/SEROUT. Real idle-prime + serialOutIdle + the
-; output-IRQ drain are deferred to the IRQ/POKEY stage. Bytes are truthfully
-; buffered (carry clear); actual transmission is deferred. Zeroed BSS is already a
-; valid empty ring (outLevel=0, serialOutHead=0), so TX needs no explicit init.
+; Stage 9P IDLE-PRIME: after enqueuing the byte, if serial IRQs are armed
+; (hardwareActivated) AND the transmitter is idle (serialOutIdle bit7 set), prime
+; the FIRST queued byte directly into POKEY SEROUT to kick off transmission -- one
+; inline SerialOutputIrqHandler drain iteration (dec outLevel, sta SEROUT, advance
+; outIndex) plus clear serialOutIdle. The installed output-ready IRQ then drains the
+; rest; when the ring empties SerialOutputIrqHandler re-sets serialOutIdle and stops
+; (no further SEROUT write), matching the 9O.4-validated no-storm quiescence. When
+; NOT armed/idle the byte is simply buffered (carry clear), exactly as in 9I. This is
+; the ONLY SEROUT write outside SerialOutputIrqHandler. The php/sei critical section
+; keeps the outLevel/outIndex/serialOutIdle RMW atomic vs the output IRQ; carry is
+; set AFTER plp (the 9H fix). Zeroed BSS is already a valid empty ring (outLevel=0,
+; serialOutHead=0), so TX needs no explicit init.
+;
+; A test-only mirror (ns_test_last_prime_byte / ns_test_prime_count, compiled only
+; under EDGE_NETSTREAM_TEST_HOOKS) records the primed byte right next to the
+; sta SEROUT so tests/probe observe the prime via RAM -- a CPU read of $D20D returns
+; SERIN, not the SEROUT latch, so it cannot prove what was primed.
 _ns_send_byte:
     php
     sei
@@ -295,6 +309,26 @@ _ns_send_byte:
     and #0x7f               ; wrap producer index
     sta serialOutHead
     inc outLevel
+    ; --- 9P idle-prime (inside the php/sei critical section) ---
+    lda hardwareActivated
+    beq .Lsend_done         ; serial IRQs not armed -> just buffer (no prime)
+    bit serialOutIdle
+    bpl .Lsend_done         ; bit7 clear -> output chain already running, no prime
+    dec outLevel            ; consume the byte we are about to prime
+    ldx outIndex
+    lda nsOutputBuffer,x
+    sta NS_SEROUT           ; HW $D20D: prime first byte -> kicks the output-ready IRQ chain
+#if defined(EDGE_NETSTREAM_TEST_HOOKS)
+    sta ns_test_last_prime_byte ; mirror primed byte (A still = byte); $D20D reads are SERIN
+    inc ns_test_prime_count
+#endif
+    inx
+    txa
+    and #0x7f               ; advance consumer index, wrapped
+    sta outIndex
+    lda #0
+    sta serialOutIdle       ; transmitter now active (output IRQ drains the rest)
+.Lsend_done:
     plp                     ; end critical section, THEN set carry
     clc                     ; enqueued
     rts
@@ -785,6 +819,16 @@ ns_disable_serial_irqs:
 .global ns_test_disable_serial_irqs
 .global ns_test_begin_soft
 .global ns_test_end_soft
+.global ns_test_set_hw_activated
+; 9P: expose the idle-prime mirror + the TX/gate state so the mos-sim test and the
+; Altirra probe can snapshot the prime via RAM (a CPU read of $D20D returns SERIN,
+; not the SEROUT latch). Declarations only -- no behavior change.
+.global ns_test_last_prime_byte
+.global ns_test_prime_count
+.global serialOutIdle
+.global outLevel
+.global outIndex
+.global hardwareActivated
 
 ; void ns_test_begin_soft(void) / ns_test_end_soft(void)
 ; Test-only entries to the HARDWARE-FREE begin/end bodies. Sim tests use these for
@@ -840,6 +884,14 @@ ns_test_swap_irq_vector:
 ; place of the still-deferred input-IRQ overflow path.
 ns_test_set_status:
     sta serialErrors
+    rts
+
+; void ns_test_set_hw_activated(uint8_t value)
+; Sets the hardwareActivated gate (RAM-only) so the sim test / probe can arm the 9P
+; idle-prime WITHOUT calling ns_enable_serial_irqs (which writes POKMSK/IRQEN --
+; unsafe under mos-sim). Touches no hardware.
+ns_test_set_hw_activated:
+    sta hardwareActivated
     rts
 
 ; uint8_t ns_test_rx_push(uint8_t byte)
@@ -918,14 +970,15 @@ inBufEndHi:      .zero 1     ; RX buffer end hi; upstream inBufEndHi
 
 ; Stage 9I TX ring scalars (3 bytes). TX is index-based (no pointers/SMC): both
 ; indices wrap with `and #0x7f` into nsOutputBuffer via absolute,X. Capacity is the
-; constant 0x80, so there is no TX size variable. serialOutIdle (idle-prime flag)
-; and outBuf (consumer base ptr) are deferred to the IRQ/POKEY stage.
+; constant 0x80, so there is no TX size variable. serialOutIdle (idle-prime flag) is
+; consumed by the 9P idle-prime in _ns_send_byte; outBuf (consumer base ptr) is not
+; used (EDGE stays index-based).
 serialOutHead:   .zero 1     ; TX producer index (send); upstream serialOutHead
 outLevel:        .zero 1     ; TX count (send++ / output-IRQ--); upstream outLevel
 outIndex:        .zero 1     ; TX consumer index; upstream outIndex (output IRQ / test drain)
 
 ; Stage 9J lifecycle state (2 bytes). serialOutIdle is TX-ring init state owned by
-; begin (consumed later by the deferred idle-prime); serialConcurrentNum is the
+; begin (consumed by the 9P idle-prime in _ns_send_byte); serialConcurrentNum is the
 ; active flag (begin=1/end=0) -- NOT used to gate the byte API in this stage; it
 ; is forward-prep for the IRQ-stage error indexing and the adapter realtime_active().
 serialOutIdle:       .zero 1 ; 0xff = TX idle; upstream serialOutIdle
@@ -949,3 +1002,11 @@ hardwareActivated:   .zero 1 ; 0 = serial IRQs disarmed, 1 = armed
 nsInputBuffer:  .zero NS_INPUT_BUFSIZE   ; RX, 128; upstream inputBuffer
 nsOutputBuffer: .zero NS_OUTPUT_BUFSIZE  ; TX, 128; upstream outputBuffer0
 nsPayloadBuf:   .zero NS_PAYLOAD_MAX     ; init payload, 64; upstream NetstreamPayloadBuf
+
+#if defined(EDGE_NETSTREAM_TEST_HOOKS)
+; 9P test-only mirror: the idle-prime in _ns_send_byte writes the primed byte here
+; (right next to the sta SEROUT) and bumps the counter, so tests/probe observe the
+; prime through RAM instead of reading $D20D (a CPU read of $D20D returns SERIN).
+ns_test_last_prime_byte: .zero 1
+ns_test_prime_count:     .zero 1
+#endif // EDGE_NETSTREAM_TEST_HOOKS
