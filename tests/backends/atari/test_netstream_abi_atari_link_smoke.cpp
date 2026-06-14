@@ -40,6 +40,7 @@ int main() {
     g_sink8 = _edge_ns_send_byte(0x00);
     g_sink16 = _edge_ns_recv_byte_packed();
     g_sink16 = _edge_ns_bytes_avail();
+    g_sink8 = _edge_ns_tx_space();   // Stage 9R.2 TX free-space query
     g_sink8 = _edge_ns_get_status();
 
     // Stage 9Q.2: force the new 4-arg init wrapper + its asm carry shim into the link.

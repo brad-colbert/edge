@@ -320,4 +320,26 @@ if(EDGE_ATARI_FUJINET_REALTIME_NETSTREAM AND CMAKE_CXX_COMPILER MATCHES "mos")
 		EDGE_ATARI_FUJINET_REALTIME_NETSTREAM=1)
 	add_test(NAME test_netstream_adapter_lifecycle
 		COMMAND mos-sim $<TARGET_FILE:test_netstream_adapter_lifecycle>)
+
+	# Stage 9R.2a: low-level TX free-space query (_ns_tx_space) ring test. Links the real
+	# handler/ABI and drives _edge_ns_tx_space + _edge_ns_send_byte under mos-sim (no SIOV;
+	# idle-prime disabled via ns_test_set_hw_activated for deterministic outLevel).
+	add_executable(test_netstream_tx_space
+		test_netstream_tx_space.cpp
+		${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_realtime_abi.s
+		${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_handler.S)
+	set_source_files_properties(
+		${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_realtime_abi.s
+		${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_handler.S
+		PROPERTIES
+		LANGUAGE C
+		COMPILE_OPTIONS "-x;assembler-with-cpp")
+	target_include_directories(test_netstream_tx_space PRIVATE
+		${CMAKE_SOURCE_DIR}
+		${CMAKE_SOURCE_DIR}/engine/platform/atari)
+	target_compile_definitions(test_netstream_tx_space PRIVATE
+		EDGE_ATARI_FUJINET_REALTIME_NETSTREAM=1
+		EDGE_NETSTREAM_TEST_HOOKS=1)
+	add_test(NAME test_netstream_tx_space
+		COMMAND mos-sim $<TARGET_FILE:test_netstream_tx_space>)
 endif()

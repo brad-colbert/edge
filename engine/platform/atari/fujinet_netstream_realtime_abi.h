@@ -45,6 +45,12 @@ extern uint16_t _edge_ns_recv_byte_packed(void);
 // Direct passthrough; no carry-flag conversion.
 extern uint16_t _edge_ns_bytes_avail(void);
 
+// uint8_t edge_ns_tx_space(void)
+// Stage 9R.2: bytes free in the TX output ring (range 0..128 -- treat as unsigned, it can
+// equal 128). Used by the realtime adapter to pre-check room for a whole 16-byte packet
+// before an all-or-nothing send. Direct passthrough; no carry-flag conversion.
+extern uint8_t _edge_ns_tx_space(void);
+
 // uint8_t edge_ns_get_status(void)
 // Returns raw Netstream status byte.
 // Direct passthrough; no carry-flag conversion.

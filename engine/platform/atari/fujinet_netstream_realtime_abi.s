@@ -24,6 +24,7 @@
 .global _edge_ns_send_byte
 .global _edge_ns_recv_byte_packed
 .global _edge_ns_bytes_avail
+.global _edge_ns_tx_space
 .global _edge_ns_get_status
 .global _edge_ns_init_run
 .global _edge_ns_begin_stream
@@ -67,6 +68,14 @@ _edge_ns_recv_byte_packed:
 _edge_ns_bytes_avail:
 	jsr _ns_bytes_avail
 	; Assume ns_bytes_avail returns u16 in X:A (big-endian 6502 style).
+	rts
+
+; uint8_t edge_ns_tx_space(void)
+; Stage 9R.2: wrapper for ns_tx_space. Returns TX-ring free bytes (0..128) in A.
+; No carry flag; direct passthrough. Used by the adapter's all-or-nothing send_nb.
+_edge_ns_tx_space:
+	jsr _ns_tx_space
+	; A contains the free-byte count (uint8_t, 0..128)
 	rts
 
 ; uint8_t edge_ns_get_status(void)

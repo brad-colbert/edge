@@ -69,7 +69,11 @@ struct RealNetstreamOps {
     static void begin() { _edge_ns_begin_stream(); }
     static void end()   { _edge_ns_end_stream(); }
     static u8   status(){ return _edge_ns_get_status(); }
-    // 9R.2 will add: send_byte / recv_packed / bytes_avail for the data path.
+    // 9R.2 data path.
+    static u8   send_byte(u8 b) { return _edge_ns_send_byte(b); }       // 0 sent / 1 full
+    static u16  recv_packed()   { return _edge_ns_recv_byte_packed(); } // lo=data, hi=status
+    static u16  bytes_avail()   { return _edge_ns_bytes_avail(); }      // RX bytes buffered
+    static u8   tx_space()      { return _edge_ns_tx_space(); }         // TX free 0..128
 };
 
 // ── Ops-policy realtime adapter ─────────────────────────────────────────────────────────
@@ -151,17 +155,54 @@ struct NetstreamRealtimeAdapterT {
         return NetStatus::Ok;
     }
 
-    // 9R.1: data path not pumped yet (no Ops calls -> safe to reference without the ABI).
-    // Zero-length is a safe no-op (Ok); nonzero holds (WouldBlock). Real pumping is 9R.2.
+    // Fixed realtime packet size (engine::net::default_realtime_packet_bytes). The lane only
+    // ever calls send_nb/recv_nb with exactly this many bytes; any other nonzero size is a
+    // defensive InvalidArgument.
+    static constexpr u16 kPacketBytes = 16;
+
+    // Stage 9R.2: ALL-OR-NOTHING TX. Send a whole 16-byte packet or nothing -- the engine
+    // RealtimeLane drops the packet only on Ok, retries on WouldBlock, so a partial write
+    // would corrupt the implicit fixed-length packet boundary. Pre-check tx_space() so the
+    // 16 byte sends cannot hit a full ring (the output IRQ only DRAINS the ring, so free
+    // space can only grow during the loop). send_nb/recv_nb do NOT touch state.last_error
+    // (it stays owned by open/poll, keeping init/serial errors distinct from backpressure).
     static NetStatus realtime_send_nb(const void* bytes, u16 size) {
+        if (!state().active) return NetStatus::Closed;
         if (bytes == nullptr && size > 0) return NetStatus::InvalidArgument;
         if (size == 0) return NetStatus::Ok;
-        return NetStatus::WouldBlock;
+        if (size != kPacketBytes) return NetStatus::InvalidArgument;
+        if (Ops::tx_space() < kPacketBytes) return NetStatus::WouldBlock;  // write nothing
+        const u8* p = static_cast<const u8*>(bytes);
+        for (u16 i = 0; i < kPacketBytes; ++i) {
+            if (Ops::send_byte(p[i]) != 0) {
+                // Impossible under the concurrency model (free space only grows after the
+                // pre-check); a bug/race. Bytes may already have been accepted, so this is
+                // NOT a clean write-nothing -- surface it, never report success.
+                return NetStatus::TransportError;
+            }
+        }
+        return NetStatus::Ok;  // exactly 16 bytes committed, in order
     }
+
+    // Stage 9R.2: FULL-PACKET RX. Deliver a whole 16-byte packet or nothing. Pre-check
+    // bytes_avail() so the 16 reads cannot underrun (the input IRQ only ADDS bytes; this is
+    // the only consumer). Bytes beyond 16 stay in the RX ring for the next drain iteration.
     static NetStatus realtime_recv_nb(void* bytes, u16 size) {
+        if (!state().active) return NetStatus::Closed;
         if (bytes == nullptr && size > 0) return NetStatus::InvalidArgument;
         if (size == 0) return NetStatus::Ok;
-        return NetStatus::WouldBlock;
+        if (size != kPacketBytes) return NetStatus::InvalidArgument;
+        if (Ops::bytes_avail() < kPacketBytes) return NetStatus::WouldBlock;  // consume nothing
+        u8* p = static_cast<u8*>(bytes);
+        for (u16 i = 0; i < kPacketBytes; ++i) {
+            const u16 packed = Ops::recv_packed();   // low = data, high = status (0 ok/1 empty)
+            if ((packed >> 8) != 0) {
+                // Impossible after the pre-check (only this consumer drains RX); a bug/race.
+                return NetStatus::TransportError;
+            }
+            p[i] = static_cast<u8>(packed & 0xff);
+        }
+        return NetStatus::Ok;  // exactly 16 bytes copied
     }
 
     static NetError realtime_last_error() { return state().last_error; }

@@ -29,6 +29,18 @@ struct FakeOps {
     static uint8_t  status_val;   // scripted get_status byte
     static int init_calls, begin_calls, end_calls, status_calls;
 
+    // 9R.2 data-path model.
+    static uint8_t  tx_free;          // scripted tx_space() return (0..128)
+    static uint8_t  tx_captured[64];  // bytes written via send_byte, in order
+    static int      tx_count;         // number captured
+    static int      send_fail_at;     // -1 = never; else send_byte returns full once
+                                      // tx_count >= send_fail_at (mid-packet failure)
+    static uint16_t rx_avail;         // scripted bytes_avail() return
+    static uint8_t  rx_data[64];      // RX bytes to deliver via recv_packed()
+    static int      rx_pos;           // next index into rx_data (bytes consumed so far)
+    static int      rx_empty_at;      // -1 = never; else recv_packed() returns empty once
+                                      // rx_pos >= rx_empty_at (mid-packet empty)
+
     static uint8_t init(const char* host, uint8_t flags, uint16_t baud, uint16_t port) {
         last_host = host; last_flags = flags; last_baud = baud; last_port = port;
         ++init_calls; return init_rc;
@@ -36,6 +48,19 @@ struct FakeOps {
     static void    begin()  { ++begin_calls; }
     static void    end()    { ++end_calls; }
     static uint8_t status() { ++status_calls; return status_val; }
+
+    static uint8_t  tx_space()    { return tx_free; }
+    static uint8_t  send_byte(uint8_t b) {
+        if (send_fail_at >= 0 && tx_count >= send_fail_at) return 1;  // full
+        tx_captured[tx_count++] = b;
+        return 0;  // accepted
+    }
+    static uint16_t bytes_avail() { return rx_avail; }
+    static uint16_t recv_packed() {
+        if (rx_empty_at >= 0 && rx_pos >= rx_empty_at) return (uint16_t)(1u << 8);  // empty
+        const uint8_t d = rx_data[rx_pos++];
+        return d;  // status byte (high) = 0
+    }
 };
 const char* FakeOps::last_host = nullptr;
 uint8_t  FakeOps::last_flags = 0;
@@ -45,6 +70,14 @@ uint8_t  FakeOps::init_rc = 0;
 uint8_t  FakeOps::status_val = 0;
 int FakeOps::init_calls = 0, FakeOps::begin_calls = 0, FakeOps::end_calls = 0,
     FakeOps::status_calls = 0;
+uint8_t  FakeOps::tx_free = 0;
+uint8_t  FakeOps::tx_captured[64] = {};
+int      FakeOps::tx_count = 0;
+int      FakeOps::send_fail_at = -1;
+uint16_t FakeOps::rx_avail = 0;
+uint8_t  FakeOps::rx_data[64] = {};
+int      FakeOps::rx_pos = 0;
+int      FakeOps::rx_empty_at = -1;
 
 using A = nsr::NetstreamRealtimeAdapterT<FakeOps>;
 
@@ -151,8 +184,98 @@ int main() {
         CHECK(A::realtime_last_error().status == n::NetStatus::TransportError);
     }
 
+    // ================= 9R.2 data path (TX all-or-nothing / RX full-packet) =================
+    uint8_t pkt[16];
+    for (int i = 0; i < 16; ++i) pkt[i] = static_cast<uint8_t>(0xA0 + i);
+    uint8_t out[16] = {};
+
+    // ----- send/recv while inactive -> Closed (state still inactive from init-fail above) -----
+    CHECK(!A::realtime_active());
+    CHECK(A::realtime_send_nb(pkt, 16) == n::NetStatus::Closed);
+    CHECK(A::realtime_recv_nb(out, 16) == n::NetStatus::Closed);
+
+    // activate for the data-path cases
+    FakeOps::init_rc = 0;
+    CHECK(A::realtime_open_udp_seq(host, 0x1234, 0) == n::NetStatus::Ok);
+    CHECK(A::realtime_active());
+
+    // ----- arg validation (active): null / zero / wrong length -----
+    CHECK(A::realtime_send_nb(nullptr, 16) == n::NetStatus::InvalidArgument);
+    CHECK(A::realtime_send_nb(pkt, 0) == n::NetStatus::Ok);
+    CHECK(A::realtime_send_nb(pkt, 8) == n::NetStatus::InvalidArgument);   // n != 16
+    CHECK(A::realtime_recv_nb(nullptr, 16) == n::NetStatus::InvalidArgument);
+    CHECK(A::realtime_recv_nb(out, 0) == n::NetStatus::Ok);
+    CHECK(A::realtime_recv_nb(out, 8) == n::NetStatus::InvalidArgument);
+
+    // ----- TX: tx_space < 16 -> WouldBlock, NOTHING written -----
+    FakeOps::tx_count = 0; FakeOps::send_fail_at = -1; FakeOps::tx_free = 15;
+    CHECK(A::realtime_send_nb(pkt, 16) == n::NetStatus::WouldBlock);
+    CHECK(FakeOps::tx_count == 0);
+
+    // ----- TX: tx_space == 16 -> Ok, EXACTLY 16 bytes in order -----
+    FakeOps::tx_count = 0; FakeOps::tx_free = 16;
+    CHECK(A::realtime_send_nb(pkt, 16) == n::NetStatus::Ok);
+    CHECK(FakeOps::tx_count == 16);
+    { int ok = 1; for (int i = 0; i < 16; ++i) if (FakeOps::tx_captured[i] != pkt[i]) ok = 0;
+      CHECK(ok); }
+
+    // ----- TX: tx_space > 16 -> Ok, EXACTLY 16 bytes -----
+    FakeOps::tx_count = 0; FakeOps::tx_free = 100;
+    CHECK(A::realtime_send_nb(pkt, 16) == n::NetStatus::Ok);
+    CHECK(FakeOps::tx_count == 16);
+
+    // ----- TX: unexpected mid-packet full after pre-check -> TransportError (NOT Ok) -----
+    FakeOps::tx_count = 0; FakeOps::tx_free = 16; FakeOps::send_fail_at = 8;
+    {
+        const n::NetStatus r = A::realtime_send_nb(pkt, 16);
+        CHECK(r == n::NetStatus::TransportError);
+        CHECK(r != n::NetStatus::Ok);          // never reported as success
+        CHECK(FakeOps::tx_count == 8);         // 8 accepted before the (impossible) failure
+    }
+    FakeOps::send_fail_at = -1;
+
+    // RX data fixture: 0x10,0x11,...
+    for (int i = 0; i < 32; ++i) FakeOps::rx_data[i] = static_cast<uint8_t>(0x10 + i);
+
+    // ----- RX: bytes_avail < 16 -> WouldBlock, NOTHING consumed -----
+    FakeOps::rx_pos = 0; FakeOps::rx_empty_at = -1; FakeOps::rx_avail = 15;
+    for (int i = 0; i < 16; ++i) out[i] = 0;
+    CHECK(A::realtime_recv_nb(out, 16) == n::NetStatus::WouldBlock);
+    CHECK(FakeOps::rx_pos == 0);
+
+    // ----- RX: bytes_avail == 16 -> Ok, EXACTLY 16 copied -----
+    FakeOps::rx_pos = 0; FakeOps::rx_avail = 16;
+    CHECK(A::realtime_recv_nb(out, 16) == n::NetStatus::Ok);
+    CHECK(FakeOps::rx_pos == 16);
+    { int ok = 1; for (int i = 0; i < 16; ++i) if (out[i] != FakeOps::rx_data[i]) ok = 0;
+      CHECK(ok); }
+
+    // ----- RX: bytes_avail > 16 -> Ok, first 16 copied, REMAINING preserved -----
+    FakeOps::rx_pos = 0; FakeOps::rx_avail = 20;
+    CHECK(A::realtime_recv_nb(out, 16) == n::NetStatus::Ok);
+    CHECK(FakeOps::rx_pos == 16);                                  // exactly 16 consumed
+    CHECK(FakeOps::rx_data[16] == static_cast<uint8_t>(0x10 + 16)); // 17th byte preserved
+    { int ok = 1; for (int i = 0; i < 16; ++i) if (out[i] != FakeOps::rx_data[i]) ok = 0;
+      CHECK(ok); }
+
+    // ----- RX: unexpected mid-packet empty after pre-check -> TransportError -----
+    FakeOps::rx_pos = 0; FakeOps::rx_avail = 16; FakeOps::rx_empty_at = 8;
+    CHECK(A::realtime_recv_nb(out, 16) == n::NetStatus::TransportError);
+    CHECK(FakeOps::rx_pos == 8);
+    FakeOps::rx_empty_at = -1;
+
+    // ----- poll overflow status survives a send (send/recv do not clobber last_error) -----
+    FakeOps::status_val = 0x10;
+    CHECK(A::realtime_poll() == n::NetStatus::Ok);
+    CHECK(A::realtime_last_error().status == n::NetStatus::Overflow);
+    FakeOps::tx_count = 0; FakeOps::tx_free = 16;
+    CHECK(A::realtime_send_nb(pkt, 16) == n::NetStatus::Ok);
+    CHECK(A::realtime_last_error().status == n::NetStatus::Overflow);  // unchanged by send_nb
+
+    A::realtime_close();
+
     if (g_failures == 0) {
-        printf("\nALL TESTS PASSED (Netstream adapter lifecycle 9R.1)\n");
+        printf("\nALL TESTS PASSED (Netstream adapter lifecycle + data path 9R.2)\n");
     } else {
         printf("\n%u FAILURES\n", g_failures);
     }

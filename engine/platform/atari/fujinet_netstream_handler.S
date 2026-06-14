@@ -66,6 +66,7 @@
 .global _ns_get_final_flags
 .global _ns_get_final_audf3
 .global _ns_get_final_audf4
+.global _ns_tx_space
 
 ;==========================================================================
 ; Stage 9Q.2: the seven staged init INPUTS are exported in PRODUCTION (not just
@@ -560,6 +561,26 @@ _ns_get_final_audf3:
 
 _ns_get_final_audf4:
     lda nsFinalAudf4
+    rts
+
+;==========================================================================
+; _ns_tx_space -- Stage 9R.2a. Bytes free in the TX output ring (range 0..128).
+; Output: A = 128 - outLevel. Read-only getter; touches no hardware, adds no .bss.
+;
+; The realtime adapter's all-or-nothing send_nb (9R.2b) pre-checks this before writing a
+; whole 16-byte packet. The php/sei critical section makes the read atomic vs the output
+; IRQ, which is the only concurrent mutator of outLevel (it DRAINS the ring, so free space
+; can only INCREASE under us -- a >=16 pre-check stays valid for the whole packet loop).
+; A is preserved across plp, so the result survives the I-flag restore. TX capacity is the
+; constant 0x80 (= the full threshold in _ns_send_byte); outLevel is bounded 0..128, so the
+; subtraction never underflows. Returns a uint8_t in 0..128 (NOT a signed value).
+_ns_tx_space:
+    php
+    sei
+    lda #0x80               ; TX capacity (128)
+    sec
+    sbc outLevel            ; A = 128 - outLevel (0..128)
+    plp                     ; A preserved across plp
     rts
 
 ;==========================================================================
