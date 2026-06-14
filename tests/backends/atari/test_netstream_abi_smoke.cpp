@@ -138,18 +138,19 @@ void test_adapter_remains_stubbed() {
     // OFF mode: returns Ok for valid input, InvalidArgument for invalid input.
     auto result = atari::FujinetNetwork::realtime_open_udp_seq("host", 9000, 5000);
     CHECK(result == NetStatus::Ok);
-    
+
     auto bad_result = atari::FujinetNetwork::realtime_open_udp_seq("", 9000, 5000);
     CHECK(bad_result == NetStatus::InvalidArgument);
 #else
-    // ON mode: returns Unsupported (scaffolding phase, not wired yet).
-    auto result = atari::FujinetNetwork::realtime_open_udp_seq("host", 9000, 5000);
-    CHECK(result == NetStatus::Unsupported);
+    // Stage 9R.1: ON-mode open() now drives the REAL backend (SIOV/begin) and must not be
+    // ODR-used in this add_engine_test (no handler.S/abi.s linked). Adapter open/close/poll
+    // behavior is covered by test_netstream_adapter_lifecycle (FakeOps). Here we only touch
+    // realtime_active(), which reads cached state (no backend call).
 #endif
-    
-    // realtime_active should always return false during scaffolding.
+
+    // realtime_active reads cached state only (no backend op); false before any open.
     CHECK(!atari::FujinetNetwork::realtime_active());
-    
+
     printf("  Adapter behavior verified.\n");
 }
 

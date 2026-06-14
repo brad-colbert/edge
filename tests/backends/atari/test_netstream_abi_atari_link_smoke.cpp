@@ -14,6 +14,8 @@
 #endif
 
 #include <engine/platform/atari/fujinet_netstream_realtime_abi.h>
+// Stage 9R.1: also force the REAL adapter (RealNetstreamOps) symbols into the link.
+#include <engine/platform/atari/fujinet_netstream_realtime.h>
 
 // Stage 9F: force the low-risk diagnostic getters into the link by referencing
 // the RAW handler ABI directly. These are not part of the edge_ns_* surface (no
@@ -45,6 +47,12 @@ int main() {
     static const char host[] = "edge";
     g_sink8 = edge_ns_init_netstream(host, /*flags=*/0x00, /*nominal_baud=*/9600,
                                      /*port_swapped=*/0x0000);
+
+    // Stage 9R.1: force the REAL adapter path (RealNetstreamOps -> ABI) into the link.
+    // Build-only; never executed, so no SIOV/begin runs here.
+    g_sink8 = (uint8_t)atari::fujinet_netstream::NetstreamRealtimeAdapter::
+                  realtime_open_udp_seq(host, 9000, 0);
+    atari::fujinet_netstream::NetstreamRealtimeAdapter::realtime_close();
 
     _edge_ns_begin_stream();
     _edge_ns_end_stream();

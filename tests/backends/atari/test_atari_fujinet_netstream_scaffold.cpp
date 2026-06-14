@@ -67,32 +67,17 @@ static void test_on_mode_safety() {
     printf("test_on_mode_safety (EDGE_ATARI_FUJINET_REALTIME_NETSTREAM=ON)...\n");
 
 #if defined(EDGE_ATARI_FUJINET_REALTIME_NETSTREAM)
-    // CRITICAL: open() must NOT mark active during scaffolding.
-    CHECK(FujiPlatform::hal::realtime_open_udp_seq("localhost", 9000, 5000) ==
-          n::NetStatus::Unsupported);
-    CHECK(!FujiPlatform::hal::realtime_active());  // Must remain false.
-
-    // Invalid input still rejected.
-    CHECK(FujiPlatform::hal::realtime_open_udp_seq("", 9000, 5000) ==
-          n::NetStatus::InvalidArgument);
+    // Stage 9R.1: the realtime seam now wires the REAL backend (RealNetstreamOps ->
+    // SIOV/begin), which cannot run under mos-sim and must not be ODR-used in this
+    // add_engine_test (no handler.S/abi.s linked). So we do NOT drive open/close/poll
+    // through FujiPlatform::hal here. realtime_active() reads cached state only (no backend
+    // call) and is safe: before any successful open it must be false.
     CHECK(!FujiPlatform::hal::realtime_active());
 
-    CHECK(FujiPlatform::hal::realtime_open_udp_seq("host", 0, 5000) ==
-          n::NetStatus::InvalidArgument);
-    CHECK(!FujiPlatform::hal::realtime_active());
-
-    CHECK(FujiPlatform::hal::realtime_open_udp_seq(nullptr, 9000, 5000) ==
-          n::NetStatus::InvalidArgument);
-    CHECK(!FujiPlatform::hal::realtime_active());
-
-    // close() is a no-op (safe when not active).
-    FujiPlatform::hal::realtime_close();
-    CHECK(!FujiPlatform::hal::realtime_active());
-
-    // poll() returns Unsupported when not active (scaffolding).
-    CHECK(FujiPlatform::hal::realtime_poll() == n::NetStatus::Unsupported);
-
-    printf("  ON mode safety tests passed.\n");
+    // Full lifecycle (open->init->begin, close->end, poll/status, errors, port byte order)
+    // is validated deterministically by test_netstream_adapter_lifecycle (FakeOps) and on
+    // hardware by the Altirra adapter probe.
+    printf("  ON mode safety: active()==false (lifecycle covered by FakeOps test).\n");
 #else
     printf("  (Skipped: OFF mode; this test requires EDGE_ATARI_FUJINET_REALTIME_NETSTREAM=ON)\n");
 #endif
@@ -109,15 +94,13 @@ static void test_on_mode_send_recv() {
     CHECK(FujiPlatform::hal::realtime_send_nb(&io, 0) == n::NetStatus::Ok);
     CHECK(FujiPlatform::hal::realtime_recv_nb(&io, 0) == n::NetStatus::Ok);
 
-    // Nonzero send must NOT return Ok (scaffolding, not wired).
-    // SAFETY: must return Unsupported or WouldBlock, never Ok.
-    CHECK(FujiPlatform::hal::realtime_send_nb(&io, 1) == n::NetStatus::Unsupported);
-    CHECK(FujiPlatform::hal::realtime_send_nb(&io, 16) == n::NetStatus::Unsupported);
-
-    // Nonzero recv must NOT return Ok (scaffolding, not wired).
-    // SAFETY: must return Unsupported or WouldBlock, never Ok.
-    CHECK(FujiPlatform::hal::realtime_recv_nb(&io, 1) == n::NetStatus::Unsupported);
-    CHECK(FujiPlatform::hal::realtime_recv_nb(&io, 16) == n::NetStatus::Unsupported);
+    // Stage 9R.1: send/recv are wired but NON-PUMPING (data path is 9R.2). They touch no
+    // backend ops, so they are safe to call here. Nonzero -> WouldBlock (lane holds), never
+    // Ok (nothing is actually transmitted/received yet).
+    CHECK(FujiPlatform::hal::realtime_send_nb(&io, 1) == n::NetStatus::WouldBlock);
+    CHECK(FujiPlatform::hal::realtime_send_nb(&io, 16) == n::NetStatus::WouldBlock);
+    CHECK(FujiPlatform::hal::realtime_recv_nb(&io, 1) == n::NetStatus::WouldBlock);
+    CHECK(FujiPlatform::hal::realtime_recv_nb(&io, 16) == n::NetStatus::WouldBlock);
 
     // Invalid pointers still rejected.
     CHECK(FujiPlatform::hal::realtime_send_nb(nullptr, 1) ==
@@ -154,17 +137,12 @@ static void test_error_tracking() {
     printf("test_error_tracking...\n");
 
 #if defined(EDGE_ATARI_FUJINET_REALTIME_NETSTREAM)
-    // Invalid host should set last_error.
-    FujiPlatform::hal::realtime_open_udp_seq("", 9000, 5000);
+    // Stage 9R.1: error tracking that requires driving open() (a real-backend call) is
+    // covered by test_netstream_adapter_lifecycle (FakeOps) — not here, where the real
+    // adapter must not be ODR-used. realtime_last_error() reads cached state only (safe).
     auto err = FujiPlatform::hal::realtime_last_error();
-    CHECK(err.status == n::NetStatus::InvalidArgument);
-
-    // Valid host (but unsupported) should set last_error.
-    FujiPlatform::hal::realtime_open_udp_seq("host", 9000, 5000);
-    err = FujiPlatform::hal::realtime_last_error();
-    CHECK(err.status == n::NetStatus::Unsupported);
-
-    printf("  Error tracking tests passed.\n");
+    (void)err;
+    printf("  Error tracking covered by FakeOps lifecycle test.\n");
 #else
     printf("  (Skipped: OFF mode)\n");
 #endif

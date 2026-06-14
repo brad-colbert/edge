@@ -305,4 +305,19 @@ if(EDGE_ATARI_FUJINET_REALTIME_NETSTREAM AND CMAKE_CXX_COMPILER MATCHES "mos")
 		EDGE_NETSTREAM_TEST_HOOKS=1)
 	add_test(NAME test_netstream_init_marshal
 		COMMAND mos-sim $<TARGET_FILE:test_netstream_init_marshal>)
+
+	# Stage 9R.1: realtime adapter lifecycle self-test. Drives
+	# NetstreamRealtimeAdapterT<FakeOps> (scripted backend) -- so it links and runs WITHOUT
+	# handler.S/abi.s and never instantiates RealNetstreamOps / executes SIOV/begin. The
+	# forced define makes the templated adapter available; no EDGE_NETSTREAM_TEST_HOOKS and
+	# no assembly sources.
+	add_executable(test_netstream_adapter_lifecycle
+		test_netstream_adapter_lifecycle.cpp)
+	target_include_directories(test_netstream_adapter_lifecycle PRIVATE
+		${CMAKE_SOURCE_DIR}
+		${CMAKE_SOURCE_DIR}/engine/platform/atari)
+	target_compile_definitions(test_netstream_adapter_lifecycle PRIVATE
+		EDGE_ATARI_FUJINET_REALTIME_NETSTREAM=1)
+	add_test(NAME test_netstream_adapter_lifecycle
+		COMMAND mos-sim $<TARGET_FILE:test_netstream_adapter_lifecycle>)
 endif()

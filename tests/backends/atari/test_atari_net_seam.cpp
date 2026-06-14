@@ -44,29 +44,37 @@ static void test_none_seam_surface() {
 static void test_fujinet_seam_surface() {
     char io = 0;
 
+#if !defined(EDGE_ATARI_FUJINET_REALTIME_NETSTREAM)
+    // OFF-mode realtime seam stubs. In ON mode the seam delegates to the real
+    // NetstreamRealtimeAdapter (RealNetstreamOps -> SIOV/begin), which cannot run here and
+    // must not be ODR-used in this add_engine_test (no handler.S/abi.s linked). ON-mode
+    // adapter lifecycle is covered by test_netstream_adapter_lifecycle (FakeOps) + the
+    // Altirra adapter probe.
     CHECK(FujiPlatform::hal::realtime_open_udp_seq("host", 1234, 0) ==
           n::NetStatus::Ok);
         CHECK(!FujiPlatform::hal::realtime_active());
     CHECK(FujiPlatform::hal::realtime_open_udp_seq("", 1234, 0) ==
           n::NetStatus::InvalidArgument);
 
+    CHECK(FujiPlatform::hal::realtime_send_nb(nullptr, 1) ==
+          n::NetStatus::InvalidArgument);
+    CHECK(FujiPlatform::hal::realtime_send_nb(&io, 1) == n::NetStatus::Ok);
+    CHECK(FujiPlatform::hal::realtime_recv_nb(&io, 1) == n::NetStatus::WouldBlock);
+    CHECK(FujiPlatform::hal::realtime_last_error().status == n::NetStatus::WouldBlock);
+#endif
+
+    // Session seam is independent of the netstream realtime wiring (both modes).
     CHECK(FujiPlatform::hal::session_connect_tcp("host", 5000) ==
           n::NetStatus::Ok);
         CHECK(!FujiPlatform::hal::session_connected());
     CHECK(FujiPlatform::hal::session_connect_tcp(nullptr, 5000) ==
           n::NetStatus::InvalidArgument);
 
-    CHECK(FujiPlatform::hal::realtime_send_nb(nullptr, 1) ==
-          n::NetStatus::InvalidArgument);
-    CHECK(FujiPlatform::hal::realtime_send_nb(&io, 1) == n::NetStatus::Ok);
-    CHECK(FujiPlatform::hal::realtime_recv_nb(&io, 1) == n::NetStatus::WouldBlock);
-
     CHECK(FujiPlatform::hal::session_recv_nb(nullptr, 1) ==
           n::NetStatus::InvalidArgument);
     CHECK(FujiPlatform::hal::session_send_nb(&io, 1) == n::NetStatus::Ok);
     CHECK(FujiPlatform::hal::session_recv_nb(&io, 1) == n::NetStatus::WouldBlock);
 
-        CHECK(FujiPlatform::hal::realtime_last_error().status == n::NetStatus::WouldBlock);
         CHECK(FujiPlatform::hal::session_last_error().status == n::NetStatus::WouldBlock);
 }
 
