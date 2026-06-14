@@ -62,23 +62,30 @@
 ;==========================================================================
 ; _ns_begin_stream  (upstream: NS_BeginConcurrent_Impl).
 ;
-; Stage 9O.1: the hardware-free body is factored into ns_begin_soft. begin is
-; still hardware-free THIS stage; the hardware bring-up (DetectPAL, POKEY/SKCTL/
-; AUDCTL/AUDF, PACTL motor, vector install, POKMSK/IRQEN) is wired in by later 9O
-; sub-stages between the soft call and rts.
+; Stage 9O.2: begin initializes RAM state (ns_begin_soft) then installs the OS
+; serial/IRQ vectors (ns_install_vectors). NO POKEY/SKCTL/AUDCTL/AUDF, NO PACTL, NO
+; POKMSK/IRQEN serial enable yet (later 9O sub-stages), so the installed handlers do
+; not receive serial IRQs from Netstream activation in this stage. ns_install_vectors
+; is idempotent (vectorInstalled guard). NOTE: from this stage on, _ns_begin_stream
+; writes the OS-vector page ($020A-$0216) -- under mos-sim that is the loaded program
+; image, so it must NOT be called from sim tests (they use ns_test_begin_soft);
+; runtime validation of real begin is Altirra/hardware only.
 _ns_begin_stream:
     jsr ns_begin_soft
-    ; (9O.2+: jsr ns_install_vectors / POKEY / IRQEN go here)
+    jsr ns_install_vectors
+    ; (9O.3+: DetectPAL / POKEY / PACTL ; 9O.4: POKMSK/IRQEN enable go here)
     rts
 
 ;==========================================================================
 ; _ns_end_stream  (upstream: NS_EndConcurrent_Impl).
 ;
-; Stage 9O.1: the hardware-free reset is factored into ns_end_soft. end is still
-; hardware-free this stage; the hardware teardown (disable POKMSK/IRQEN, restore
-; vectors, motor off) is wired in by later 9O sub-stages before the soft call.
+; Stage 9O.2: end removes the OS serial/IRQ vectors (ns_restore_vectors) first, then
+; resets RAM state (ns_end_soft). NO POKMSK/IRQEN disable, NO PACTL, NO POKEY yet.
+; ns_restore_vectors is a safe no-op if vectors were never installed (vectorInstalled
+; guard). Same mos-sim caveat as begin: do not call from sim tests.
 _ns_end_stream:
-    ; (9O.2+: disable IRQEN / jsr ns_restore_vectors / motor off go here)
+    ; (9O.4: disable POKMSK/IRQEN serial bits ; 9O.3: motor off go here, before restore/after)
+    jsr ns_restore_vectors
     jsr ns_end_soft
     rts
 
