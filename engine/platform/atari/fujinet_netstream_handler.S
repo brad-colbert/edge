@@ -15,10 +15,14 @@
 ;   - 9J: hardware-free lifecycle -- _ns_begin_stream / _ns_end_stream initialize and
 ;         reset ALL RX/TX/status RAM state (shared ns_init_ring_state) and toggle the
 ;         serialConcurrentNum active flag. No hardware/OS/vector work (see below).
+;   - 9M/9N: IRQ dispatcher + serial IRQ handlers + vector swap/install/restore,
+;         DetectPALViaVCOUNT (all translated; install/restore wired into begin/end).
+;   - 9O.3a: begin/end do PAL detect + PACTL motor line + OS-vector install/restore.
+;   - 9O.3b: begin programs POKEY serial mode (pokey_init copy, AUDF3/AUDF4, AUDCTL
+;         0x28, SKCTL/SSKCTL) -- WITHOUT enabling POKMSK/IRQEN serial IRQs.
 ; Still INERT / deferred (later stages):
-;   - _ns_init_netstream
-;   - IRQ handlers + vector swap; POKEY/SKCTL/AUDCTL/PACTL/SEROUT; SIO/DCB enable
-;   - DetectPALViaVCOUNT; idle-prime SEROUT + outBuf; serialErrors[4] overflow model
+;   - _ns_init_netstream / SIO baud selection (9Q); idle-prime SEROUT + outBuf
+;   - 9O.4: POKMSK/IRQEN serial-IRQ enable (begin) + disable (end)
 ;   - packet framing
 ;
 ; SMC note (Option A, per Stage 9D): the RX pointers inReadPtr (in _ns_recv_byte)
@@ -62,22 +66,81 @@
 ;==========================================================================
 ; _ns_begin_stream  (upstream: NS_BeginConcurrent_Impl).
 ;
-; Stage 9O.3a: begin = RAM init (ns_begin_soft) -> PAL/NTSC detect -> assert the
-; PACTL motor/control line -> install OS vectors. PACTL 0x34 is the staged
-; translation of upstream's motor-on value (cassette/SIO motor line asserted for the
-; concurrent session). STILL NO POKEY/SKCTL/AUDCTL/AUDF and NO POKMSK/IRQEN serial
-; enable (9O.3b / 9O.4), so installed handlers receive no serial IRQs yet.
+; Stage 9O.3b: begin = RAM init (ns_begin_soft) -> PAL/NTSC detect -> assert the
+; PACTL motor/control line -> program POKEY for serial mode (AUDF/AUDCTL/SKCTL) ->
+; install OS vectors. PACTL 0x34 is the staged translation of upstream's motor-on
+; value (cassette/SIO motor line asserted for the concurrent session). The POKEY
+; block configures the serial/audio timing registers but STILL does NOT enable the
+; POKMSK/IRQEN serial-IRQ bits (deferred to 9O.4), so the installed handlers receive
+; no serial IRQs yet -- the timing registers are inert until 9O.4 arms the IRQs.
 ; ns_install_vectors is idempotent (vectorInstalled). NOTE: _ns_begin_stream writes
-; the OS-vector page + PACTL -- under mos-sim the vector page is the loaded program
-; image, so it must NOT be called from sim tests (they use ns_test_begin_soft);
+; the OS-vector page + PACTL + POKEY -- under mos-sim the vector page is the loaded
+; program image, so it must NOT be called from sim tests (they use ns_test_begin_soft);
 ; runtime validation of real begin is Altirra/hardware only.
 _ns_begin_stream:
     jsr ns_begin_soft
     jsr DetectPALViaVCOUNT       ; sets nsVideoStd (overrides ns_begin_soft's 0 default)
     lda #0x34
     sta NS_PACTL                 ; motor/control line ON (upstream 0x34)
+    ; --- 9O.3b: POKEY serial-mode config (NO serial-IRQ enable; that is 9O.4) ---
+    ; Program POKEY for concurrent serial mode without touching POKMSK/IRQEN. Copy the
+    ; 9-byte pokey_init table to AUDF1..AUDCTL ($D200..$D208), then override the joined
+    ; channel-3/4 divisors and AUDCTL.
+    ldx #8
+.Lbegin_pokey:
+    lda pokey_init,x            ; 9 zero bytes -> NS_POKEY_BASE+0..8 ($D200..$D208)
+    sta NS_POKEY_BASE,x
+    dex
+    bpl .Lbegin_pokey
+    ; AUDF3/AUDF4 are the per-stream baud divisors (joined 16-bit ch3+4 timer).
+    ; TRANSITIONAL (9O.3b): nsFinalAudf3 / nsFinalAudf4 / nsFinalFlags are ALL 0 today
+    ; because _ns_init_netstream / SIO / baud selection is deferred to 9Q. Stage 9O.3b
+    ; intentionally writes the CURRENT (zero) values verbatim -- it does NOT invent a
+    ; placeholder baud default. This is safe in the staged build because the POKMSK /
+    ; IRQEN serial enable remains deferred to 9O.4, so no serial transfer is clocked
+    ; from these timing values yet. Production use MUST call _ns_init_netstream (once
+    ; 9Q exists) before _ns_begin_stream so these hold the real selected baud.
+    lda nsFinalAudf3
+    sta NS_AUDF3
+    lda nsFinalAudf4
+    sta NS_AUDF4
+    lda #0x28                   ; 1.79MHz clock, join ch3+4 (upstream audctl value)
+    sta NS_AUDCTL
+    ; SKCTL/SSKCTL serial timing selected from nsFinalFlags bits 0x0c (upstream-equiv):
+    ;   flags & 0x0c == 0x00 -> 0x30  (RX internal, TX internal)
+    ;                == 0x04 -> 0x10  (RX internal, TX external)
+    ;                == 0x08 -> 0x40  (RX external, TX internal)
+    ;                == 0x0c -> 0x00  (RX external, TX external)  [see UPSTREAM QUIRK]
+    ; The mapped bits are OR'd into the existing SKCTL OS shadow (NS_SSKCTL) and the
+    ; result stored to both the shadow and the hardware SKCTL.
+    lda nsFinalFlags
+    and #0x0c
+    beq .Lsk_int_int            ; 0x00: RX int, TX int
+    cmp #0x04
+    beq .Lsk_int_ext            ; 0x04: RX int, TX ext
+    cmp #0x08
+    beq .Lsk_ext_int            ; 0x08: RX ext, TX int
+    ; 0x0c (RX ext, TX ext): UPSTREAM QUIRK preserved. Upstream codes this as
+    ; `lda #$00 / bne skctl_apply`, but `lda #$00` sets Z, so the `bne` is never taken
+    ; and execution falls through into the int/int case -- so upstream actually applies
+    ; 0x30 here, not 0x00. We translate that literal behavior. It is unreachable at this
+    ; stage anyway (nsFinalFlags == 0 until 9Q), so only the int/int path runs today.
+    lda #0x00
+    bne .Lsk_apply              ; A==0 -> not taken -> falls through (as upstream)
+.Lsk_int_int:
+    lda #0x30                   ; %011 RX int, TX int
+    bne .Lsk_apply
+.Lsk_int_ext:
+    lda #0x10                   ; %001 RX int, TX ext
+    bne .Lsk_apply
+.Lsk_ext_int:
+    lda #0x40                   ; %100 RX ext, TX int
+.Lsk_apply:
+    ora NS_SSKCTL               ; merge with existing SKCTL OS shadow ($0232)
+    sta NS_SSKCTL               ; update shadow
+    sta NS_SKCTL                ; HW write $D20F serial port control
     jsr ns_install_vectors
-    ; (9O.3b: POKEY/SKCTL/AUDCTL/AUDF ; 9O.4: POKMSK/IRQEN enable go here, IRQEN LAST)
+    ; (9O.4: POKMSK/IRQEN serial enable go here, AFTER install, IRQEN LAST)
     rts
 
 ;==========================================================================
@@ -560,6 +623,23 @@ serialVecs:
     .word SerialCompleteIrqHandler  ; -> VSEROC  ($020E)
 
 ;==========================================================================
+; pokey_init -- Stage 9O.3b. The 9-byte POKEY serial-mode init image copied to
+; AUDF1..AUDCTL ($D200..$D208) by _ns_begin_stream. All zero (upstream pokey_init):
+; AUDF3/AUDF4/AUDCTL are overridden immediately after the copy with the per-stream
+; baud divisors and the 0x28 AUDCTL value. Read-only data in .text (indexed loads
+; only) -- NOT .bss; keeps the handler .bss footprint unchanged.
+pokey_init:
+    .byte 0x00      ; AUDF1  ($D200)
+    .byte 0x00      ; AUDC1  ($D201)
+    .byte 0x00      ; AUDF2  ($D202)
+    .byte 0x00      ; AUDC2  ($D203)
+    .byte 0x00      ; AUDF3  ($D204, overridden from nsFinalAudf3)
+    .byte 0x00      ; AUDC3  ($D205)
+    .byte 0x00      ; AUDF4  ($D206, overridden from nsFinalAudf4)
+    .byte 0x00      ; AUDC4  ($D207)
+    .byte 0x00      ; AUDCTL ($D208, overridden to 0x28)
+
+;==========================================================================
 ; ns_install_vectors / ns_restore_vectors -- Stage 9N. Internal, always compiled,
 ; but NOT called by begin/end yet (9O wires them in). They touch ONLY OS-vector RAM
 ; ($020A-$020F via NS_VSERIN, and VIMIRQ via SwapIrqVector) + serialVecSave +
@@ -720,8 +800,8 @@ ns_test_tx_drain:
 ; yet (deferred to later stages). All are internal (no .global): not part of the
 ; C ABI. Zero-initialized, so the getters observe 0 until later stages write them.
 ;
-; Deferred state (added when their owning stages land): chain_addr (with the IRQ
-; dispatcher), serialVecs/pokey_init tables, port + nominal-baud + BaudTable (SIO).
+; Deferred state (added when their owning stages land): port + nominal-baud +
+; BaudTable (SIO). (chain_addr, serialVecs and pokey_init now exist in .text.)
 .bss
 
 ; Status/error model (Stage 9L): serialErrors[4] replaces the former 1-byte
