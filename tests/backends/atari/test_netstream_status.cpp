@@ -11,8 +11,8 @@
 #include <stdio.h>
 
 extern "C" {
-    void    _edge_ns_begin_stream(void);
-    void    _edge_ns_end_stream(void);
+    void    ns_test_begin_soft(void);
+    void    ns_test_end_soft(void);
     uint8_t _edge_ns_get_status(void);          // read + clear serialErrors[0]
 
     // Private test-only hook: seed serialErrors[0].
@@ -32,7 +32,7 @@ static unsigned g_failures = 0;
 int main() {
     // begin clears status.
     ns_test_set_status(0x99);
-    _edge_ns_begin_stream();
+    ns_test_begin_soft();
     CHECK(_edge_ns_get_status() == 0);
 
     // Setting status makes get_status return that value...
@@ -48,7 +48,7 @@ int main() {
 
     // end clears status.
     ns_test_set_status(0x7F);
-    _edge_ns_end_stream();
+    ns_test_end_soft();
     CHECK(_edge_ns_get_status() == 0);
 
     if (g_failures == 0) {

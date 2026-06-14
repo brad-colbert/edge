@@ -19,7 +19,7 @@ extern "C" {
     // _edge_ns_recv_byte_packed: low byte = data, high byte = status (0=ok,1=empty).
     uint16_t _edge_ns_recv_byte_packed(void);
     uint16_t _edge_ns_bytes_avail(void);
-    void     _edge_ns_begin_stream(void);   // Stage 9J: real hardware-free init
+    void     ns_test_begin_soft(void);  // 9O.1: hardware-free begin body (test setup)
     uint8_t  _edge_ns_get_status(void);      // Stage 9M.3: serialErrors[0] read+clear
 
     // Private test-only RX hook (handler, EDGE_NETSTREAM_TEST_HOOKS): mimics the
@@ -47,7 +47,7 @@ int main() {
     const unsigned CAP = 128;  // NS_INPUT_BUFSIZE
 
     // ---- empty after init ----
-    _edge_ns_begin_stream();
+    ns_test_begin_soft();
     CHECK(_edge_ns_bytes_avail() == 0);
     {
         uint16_t r = _edge_ns_recv_byte_packed();
@@ -77,7 +77,7 @@ int main() {
 
     // ---- wrap across the 128 boundary ----
     // Advance both pointers near the end, then push past it so inPtr/inReadPtr wrap.
-    _edge_ns_begin_stream();
+    ns_test_begin_soft();
     for (unsigned i = 0; i < 100; ++i) CHECK(ns_test_rx_push(pat(i)) == 0);
     for (unsigned i = 0; i < 100; ++i) {           // drain; pointers now at offset 100
         uint16_t r = _edge_ns_recv_byte_packed();
@@ -96,7 +96,7 @@ int main() {
     CHECK(_edge_ns_bytes_avail() == 0);
 
     // ---- capacity / full + overflow status ----
-    _edge_ns_begin_stream();
+    ns_test_begin_soft();
     CHECK(_edge_ns_get_status() == 0);             // begin cleared status
     for (unsigned i = 0; i < CAP; ++i) CHECK(ns_test_rx_push(pat(i)) == 0);
     CHECK(_edge_ns_bytes_avail() == CAP);

@@ -60,35 +60,46 @@
 .text
 
 ;==========================================================================
-; _ns_begin_stream  (upstream: NS_BeginConcurrent_Impl) -- Stage 9J, HARDWARE-FREE.
+; _ns_begin_stream  (upstream: NS_BeginConcurrent_Impl).
 ;
-; Initializes ALL RX/TX/status RAM state to empty-ready and marks the stream
-; active. It does NOT do any of upstream's hardware/OS bring-up -- deferred to the
-; IRQ/POKEY stage:
-;   - DetectPALViaVCOUNT (VCOUNT read + spin)
-;   - POKEY/SKCTL/AUDCTL/AUDF3/AUDF4 programming
-;   - PACTL motor assert
-;   - serial IRQ vector save/install (VSERIN..VSEROC) + VIMIRQ swap
-;   - POKMSK/IRQEN enable; SEROUT idle-prime
-; No critical section is needed yet: no IRQ is installed, so nothing mutates this
-; state concurrently. (The IRQ stage will add sei-guarded vector/HW sections.)
+; Stage 9O.1: the hardware-free body is factored into ns_begin_soft. begin is
+; still hardware-free THIS stage; the hardware bring-up (DetectPAL, POKEY/SKCTL/
+; AUDCTL/AUDF, PACTL motor, vector install, POKMSK/IRQEN) is wired in by later 9O
+; sub-stages between the soft call and rts.
 _ns_begin_stream:
+    jsr ns_begin_soft
+    ; (9O.2+: jsr ns_install_vectors / POKEY / IRQEN go here)
+    rts
+
+;==========================================================================
+; _ns_end_stream  (upstream: NS_EndConcurrent_Impl).
+;
+; Stage 9O.1: the hardware-free reset is factored into ns_end_soft. end is still
+; hardware-free this stage; the hardware teardown (disable POKMSK/IRQEN, restore
+; vectors, motor off) is wired in by later 9O sub-stages before the soft call.
+_ns_end_stream:
+    ; (9O.2+: disable IRQEN / jsr ns_restore_vectors / motor off go here)
+    jsr ns_end_soft
+    rts
+
+;==========================================================================
+; ns_begin_soft (internal) -- the HARDWARE-FREE part of begin: initialize ALL
+; RX/TX/status RAM to empty-ready and mark the stream active. No hardware/OS/vector
+; writes. Shared by _ns_begin_stream and the test-only ns_test_begin_soft so mos-sim
+; tests can set up rings without triggering the (later) vector install, which would
+; write the OS-vector page (= the sim program image) and crash.
+ns_begin_soft:
     jsr ns_init_ring_state      ; RX+TX+status+serialOutIdle -> empty-ready
     lda #0
-    sta nsVideoStd              ; NTSC default; real PAL detection deferred
+    sta nsVideoStd              ; NTSC default; real PAL detection deferred (9O.3)
     lda #1
     sta serialConcurrentNum     ; mark active (NOT used to gate the byte API)
     rts
 
 ;==========================================================================
-; _ns_end_stream  (upstream: NS_EndConcurrent_Impl) -- Stage 9J, HARDWARE-FREE.
-;
-; Leaves the handler in a safe, initialized-EMPTY state (not half-initialized):
-; full ring re-init identical to begin, but marked inactive. Does NOT touch any
-; hardware/OS state (IRQEN/POKMSK, vectors, PACTL) -- deferred to the IRQ stage.
-; The byte API is not gated on serialConcurrentNum, so after end recv/bytes_avail
-; simply read empty.
-_ns_end_stream:
+; ns_end_soft (internal) -- the HARDWARE-FREE part of end: full ring re-init to a
+; safe empty state, marked inactive. No hardware/OS/vector writes.
+ns_end_soft:
     jsr ns_init_ring_state      ; RX+TX+status+serialOutIdle -> empty-ready
     lda #0
     sta serialConcurrentNum     ; mark inactive
@@ -605,6 +616,19 @@ ns_restore_vectors:
 .global ns_test_detect_pal
 .global ns_test_install_vectors
 .global ns_test_restore_vectors
+.global ns_test_begin_soft
+.global ns_test_end_soft
+
+; void ns_test_begin_soft(void) / ns_test_end_soft(void)
+; Test-only entries to the HARDWARE-FREE begin/end bodies. Sim tests use these for
+; ring setup/reset instead of _ns_begin_stream/_ns_end_stream, which (from 9O.2 on)
+; install the OS vectors -- writing the OS-vector page that mos-sim loads code into.
+ns_test_begin_soft:
+    jsr ns_begin_soft
+    rts
+ns_test_end_soft:
+    jsr ns_end_soft
+    rts
 
 ; void ns_test_install_vectors(void) / ns_test_restore_vectors(void)
 ; Test-only entries to the internal install/restore routines (kept unexported). Let

@@ -1,18 +1,22 @@
 // tests/backends/atari/test_netstream_lifecycle.cpp
-// Stage 9J: begin/end lifecycle behavioral self-test, executed under mos-sim.
+// Netstream HARDWARE-FREE lifecycle state self-test, executed under mos-sim.
 //
-// Validates the HARDWARE-FREE _ns_begin_stream / _ns_end_stream (via the ABI shim):
-// begin initializes the RX/TX rings + status to empty-ready; begin re-initializes a
-// dirty ring; end leaves the handler in a safe initialized-empty state. RX/TX are
-// driven via the private test-only IRQ-side hooks (ns_test_rx_push / ns_test_tx_drain,
-// gated by EDGE_NETSTREAM_TEST_HOOKS). No hardware registers are touched.
+// As of Stage 9O.1 this validates the hardware-free lifecycle STATE PATH via the
+// internal soft bodies ns_test_begin_soft / ns_test_end_soft (the part begin/end
+// perform in RAM): begin-soft initializes the RX/TX rings + status to empty-ready
+// and re-initializes a dirty ring; end-soft leaves a safe initialized-empty state.
+// It does NOT exercise full _ns_begin_stream/_ns_end_stream, which from 9O.2 on also
+// install OS vectors / program POKEY -- that hardware path writes the OS-vector page
+// (the sim program image) and is validated on Altirra/hardware, not mos-sim. RX/TX
+// are driven via the private test-only IRQ-side hooks (ns_test_rx_push /
+// ns_test_tx_drain, gated by EDGE_NETSTREAM_TEST_HOOKS). No hardware registers touched.
 
 #include <stdint.h>
 #include <stdio.h>
 
 extern "C" {
-    void     _edge_ns_begin_stream(void);
-    void     _edge_ns_end_stream(void);
+    void     ns_test_begin_soft(void);
+    void     ns_test_end_soft(void);
     uint16_t _edge_ns_bytes_avail(void);
     uint16_t _edge_ns_recv_byte_packed(void);  // low=data, high=status (0=ok,1=empty)
     uint8_t  _edge_ns_send_byte(uint8_t byte);  // 0=enqueued, 1=full
@@ -44,7 +48,7 @@ static void expect_empty() {
 
 int main() {
     // ---- begin initializes to empty-ready (RX cap 128, both rings empty) ----
-    _edge_ns_begin_stream();
+    ns_test_begin_soft();
     expect_empty();
     CHECK(_edge_ns_get_status() == 0);            // status cleared
 
@@ -57,7 +61,7 @@ int main() {
     // Dirty both rings, then begin() must reset everything to empty-ready.
     for (unsigned i = 0; i < 10; ++i) (void)_edge_ns_send_byte((uint8_t)i);  // dirty TX
     // RX already full from above.
-    _edge_ns_begin_stream();
+    ns_test_begin_soft();
     expect_empty();
     CHECK(_edge_ns_get_status() == 0);
     // Rings are usable again after re-init.
@@ -67,7 +71,7 @@ int main() {
 
     // ---- end leaves a safe initialized-empty state ----
     // (RX has 1 byte buffered, TX has 1 byte queued from above.)
-    _edge_ns_end_stream();
+    ns_test_end_soft();
     expect_empty();
     CHECK(_edge_ns_get_status() == 0);
 
