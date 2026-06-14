@@ -62,30 +62,37 @@
 ;==========================================================================
 ; _ns_begin_stream  (upstream: NS_BeginConcurrent_Impl).
 ;
-; Stage 9O.2: begin initializes RAM state (ns_begin_soft) then installs the OS
-; serial/IRQ vectors (ns_install_vectors). NO POKEY/SKCTL/AUDCTL/AUDF, NO PACTL, NO
-; POKMSK/IRQEN serial enable yet (later 9O sub-stages), so the installed handlers do
-; not receive serial IRQs from Netstream activation in this stage. ns_install_vectors
-; is idempotent (vectorInstalled guard). NOTE: from this stage on, _ns_begin_stream
-; writes the OS-vector page ($020A-$0216) -- under mos-sim that is the loaded program
+; Stage 9O.3a: begin = RAM init (ns_begin_soft) -> PAL/NTSC detect -> assert the
+; PACTL motor/control line -> install OS vectors. PACTL 0x34 is the staged
+; translation of upstream's motor-on value (cassette/SIO motor line asserted for the
+; concurrent session). STILL NO POKEY/SKCTL/AUDCTL/AUDF and NO POKMSK/IRQEN serial
+; enable (9O.3b / 9O.4), so installed handlers receive no serial IRQs yet.
+; ns_install_vectors is idempotent (vectorInstalled). NOTE: _ns_begin_stream writes
+; the OS-vector page + PACTL -- under mos-sim the vector page is the loaded program
 ; image, so it must NOT be called from sim tests (they use ns_test_begin_soft);
 ; runtime validation of real begin is Altirra/hardware only.
 _ns_begin_stream:
     jsr ns_begin_soft
+    jsr DetectPALViaVCOUNT       ; sets nsVideoStd (overrides ns_begin_soft's 0 default)
+    lda #0x34
+    sta NS_PACTL                 ; motor/control line ON (upstream 0x34)
     jsr ns_install_vectors
-    ; (9O.3+: DetectPAL / POKEY / PACTL ; 9O.4: POKMSK/IRQEN enable go here)
+    ; (9O.3b: POKEY/SKCTL/AUDCTL/AUDF ; 9O.4: POKMSK/IRQEN enable go here, IRQEN LAST)
     rts
 
 ;==========================================================================
 ; _ns_end_stream  (upstream: NS_EndConcurrent_Impl).
 ;
-; Stage 9O.2: end removes the OS serial/IRQ vectors (ns_restore_vectors) first, then
-; resets RAM state (ns_end_soft). NO POKMSK/IRQEN disable, NO PACTL, NO POKEY yet.
-; ns_restore_vectors is a safe no-op if vectors were never installed (vectorInstalled
-; guard). Same mos-sim caveat as begin: do not call from sim tests.
+; Stage 9O.3a: end = remove OS vectors (ns_restore_vectors) -> deassert the PACTL
+; motor line -> reset RAM state (ns_end_soft). PACTL 0x3c is the staged translation
+; of upstream's motor-off value. NO POKMSK/IRQEN disable, NO POKEY yet.
+; ns_restore_vectors is a safe no-op if vectors were never installed. Same mos-sim
+; caveat as begin: do not call from sim tests.
 _ns_end_stream:
-    ; (9O.4: disable POKMSK/IRQEN serial bits ; 9O.3: motor off go here, before restore/after)
+    ; (9O.4: disable POKMSK/IRQEN serial bits go here, BEFORE restore)
     jsr ns_restore_vectors
+    lda #0x3c
+    sta NS_PACTL                 ; motor/control line OFF (upstream 0x3c)
     jsr ns_end_soft
     rts
 
