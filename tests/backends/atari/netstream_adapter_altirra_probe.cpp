@@ -46,6 +46,7 @@
 #include <stdint.h>
 
 #include <engine/platform/atari/fujinet_netstream_realtime.h>
+#include "atari_hostdump.h"   // edge_host_dump() -> H: host file (Altirra auto-capture)
 
 extern "C" {
     uint8_t _ns_get_final_flags(void);
@@ -95,6 +96,12 @@ int main() {
     nsr::NetstreamRealtimeAdapter::realtime_close();
     r[8] = nsr::NetstreamRealtimeAdapter::realtime_active() ? 1 : 0;
     r[9] = u8st(nsr::NetstreamRealtimeAdapter::realtime_last_error().status);
+
+    // Self-dump the whole page-6 snapshot ($0600..$064F, 0x50 bytes) to the host via H:,
+    // so scripts/altirra_probe.sh can read it back automatically (== what `db $0600 $50`
+    // shows in the debugger). Harmless if H: is not mounted (CIO just errors). The page-6
+    // rows are fully populated by this point (open/poll/DCB/close above).
+    edge_host_dump("H1:NSDUMP.BIN", (const void*)0x0600, 0x50);
 
     // Heartbeat: proves the machine survived open(+poll)+close without hanging.
     for (;;) {

@@ -727,6 +727,7 @@ if(MOS_ATARI8_CXX)
                     -o ${NETSTREAM_ADAPTER_PROBE_XEX}
                     -Wl,--Map=${NETSTREAM_ADAPTER_PROBE_MAP}
             DEPENDS ${CMAKE_SOURCE_DIR}/tests/backends/atari/netstream_adapter_altirra_probe.cpp
+                    ${CMAKE_SOURCE_DIR}/tests/backends/atari/atari_hostdump.h
                     ${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_realtime_abi.s
                     ${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_handler.S
                     ${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_realtime.h

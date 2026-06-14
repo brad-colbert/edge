@@ -535,6 +535,52 @@ See `demo/net_dual_lane/net_dual_lane.cpp` for the full demo and
 [API Reference — Network API](./API_REFERENCE.md#network-api) for the complete
 method list.
 
+## Altirra headless probe runner
+
+Atari `.xex` "probes" (e.g. `netstream_adapter_altirra_probe`) validate real hardware
+behaviour that can't run under mos-sim (SIOV, POKEY, the OS vector page). `scripts/altirra_probe.sh`
+runs one in Altirra (under wine) and captures its result **automatically** — no manual
+debugger interaction:
+
+```bash
+scripts/altirra_probe.sh build-test-9p/netstream_adapter_altirra_probe.xex A   # Mode A: no FujiNet
+scripts/altirra_probe.sh build-test-9p/netstream_adapter_altirra_probe.xex B   # Mode B: FujiNet present
+```
+
+It prints the captured bytes (and keeps the last capture at `/tmp/altirra_probe_last.bin`).
+Example Mode A output for the adapter probe (page 6 `$0600..$064F`):
+
+```
+000010 07 00 8a 20 27 00 00 02 ...   # $0610: open=TransportError, active=0, DSTATS=$8A, AUDF3=39
+000020 70 01 f0 8a c7 28 0f 00 40 00 23 28   # $0620 DCB: $70/1/$F0, buf, timeout, 64 bytes, DAUX=swap(9000)
+```
+
+### How it works (each piece is load-bearing)
+
+- **Capture channel = the H: device, not the debugger.** Altirra's CLI `/debugcmd:` accepts
+  only a *single space-free token*, so the debugger memory-dump commands (`.run <file>`,
+  `ba w <addr> …`, `.writemem …`) cannot be driven from the command line. Instead the probe
+  **self-dumps** its snapshot to `H1:NSDUMP.BIN` via CIO (`tests/backends/atari/atari_hostdump.h`,
+  `edge_host_dump()`), and the script mounts H: to a temp host dir with `/hdpathrw <dir>` and
+  reads the file back (Altirra lowercases it to `nsdump.bin`). Add `edge_host_dump(...)` at the
+  end of any new probe to make it capturable.
+- **False-crash bypass.** Altirra spuriously traps a fine `.xex` at the crt0 RUN entry
+  ("emulated system has stopped due to a program error"). `/debug /debugbrkrun /debugcmd:g`
+  breaks at the run address and resumes with `g` (which is space-free, so it passes through
+  `/debugcmd:`). Without this the modal error dialog hangs the run.
+- **Mode A vs Mode B.** Mode B keeps the saved profile's devices — including the user's NetSIO
+  FujiNet bridge (`netsio.atdevice`, registered as device tag `custom`), which acks SIO. Mode A
+  must drop *only* that device with `/removedevice custom` (override via `$ALTIRRA_FUJINET_TAG`).
+  **Do not use `/cleardevices`** — it also removes the H: host device even when `/hdpathrw`
+  follows it, so the capture silently fails.
+- **Path mapping.** wine exposes Linux `/` as drive `Z:\`; the script converts paths.
+- **Never `pkill -f Altirra`** from a shell whose own command line contains "Altirra" — it
+  kills the shell. Use `wineserver -k` to stop the emulator.
+- **Cross-check Fujisan** if an `.xex` dies at startup in Altirra but you suspect the build —
+  Altirra's startup trap is often the false-crash, not a real bug.
+
+The script paths assume Altirra 4.50 at the location in `$ALTIRRA_DIR`; adjust for your install.
+
 ## Current Limits
 
 - display layouts still use the Atari mode enum (`atari::Mode`) as the concrete backend token, supplied
