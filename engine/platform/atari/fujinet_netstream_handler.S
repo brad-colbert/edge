@@ -20,9 +20,11 @@
 ;   - 9O.3a: begin/end do PAL detect + PACTL motor line + OS-vector install/restore.
 ;   - 9O.3b: begin programs POKEY serial mode (pokey_init copy, AUDF3/AUDF4, AUDCTL
 ;         0x28, SKCTL/SSKCTL) -- WITHOUT enabling POKMSK/IRQEN serial IRQs.
+;   - 9O.4: begin ARMS the POKMSK/IRQEN serial-IRQ bits (LAST) + a hardwareActivated
+;         re-entry guard; end DISARMS them (FIRST). Serial IRQs are now live.
 ; Still INERT / deferred (later stages):
-;   - _ns_init_netstream / SIO baud selection (9Q); idle-prime SEROUT + outBuf
-;   - 9O.4: POKMSK/IRQEN serial-IRQ enable (begin) + disable (end)
+;   - 9P: idle-prime SEROUT + outBuf
+;   - _ns_init_netstream / SIO baud selection (9Q)
 ;   - packet framing
 ;
 ; SMC note (Option A, per Stage 9D): the RX pointers inReadPtr (in _ns_recv_byte)
@@ -66,18 +68,33 @@
 ;==========================================================================
 ; _ns_begin_stream  (upstream: NS_BeginConcurrent_Impl).
 ;
-; Stage 9O.3b: begin = RAM init (ns_begin_soft) -> PAL/NTSC detect -> assert the
-; PACTL motor/control line -> program POKEY for serial mode (AUDF/AUDCTL/SKCTL) ->
-; install OS vectors. PACTL 0x34 is the staged translation of upstream's motor-on
-; value (cassette/SIO motor line asserted for the concurrent session). The POKEY
-; block configures the serial/audio timing registers but STILL does NOT enable the
-; POKMSK/IRQEN serial-IRQ bits (deferred to 9O.4), so the installed handlers receive
-; no serial IRQs yet -- the timing registers are inert until 9O.4 arms the IRQs.
+; Stage 9O.4: begin = [re-entry guard] -> RAM init (ns_begin_soft) -> PAL/NTSC detect
+; -> assert the PACTL motor/control line -> program POKEY for serial mode
+; (AUDF/AUDCTL/SKCTL) -> install OS vectors -> ARM the POKMSK/IRQEN serial-IRQ bits
+; (LAST). PACTL 0x34 is the staged translation of upstream's motor-on value (cassette/
+; SIO motor line asserted for the concurrent session). ns_enable_serial_irqs is the
+; final step so the handlers are installed before any serial IRQ can fire. The early
+; hardwareActivated guard makes a second begin (while a stream is live) a no-op rather
+; than letting ns_begin_soft reset the rings under the running IRQ handlers.
 ; ns_install_vectors is idempotent (vectorInstalled). NOTE: _ns_begin_stream writes
-; the OS-vector page + PACTL + POKEY -- under mos-sim the vector page is the loaded
-; program image, so it must NOT be called from sim tests (they use ns_test_begin_soft);
-; runtime validation of real begin is Altirra/hardware only.
+; the OS-vector page + PACTL + POKEY + IRQEN -- under mos-sim the vector page is the
+; loaded program image, so it must NOT be called from sim tests (they use
+; ns_test_begin_soft); runtime validation of real begin is Altirra/hardware only.
 _ns_begin_stream:
+    ; --- 9O.4: early re-entry guard ---
+    ; If serial IRQs are already armed (a stream is live), return immediately WITHOUT
+    ; re-running ns_begin_soft -- ns_init_ring_state would reset the RX/TX rings out
+    ; from under the running input/output IRQ handlers (double-begin race). The
+    ; hardwareActivated guard inside ns_enable_serial_irqs alone is not enough because
+    ; ns_begin_soft runs before it; this guard protects the soft init too.
+    php
+    sei
+    lda hardwareActivated
+    beq .Lbegin_not_active
+    plp                          ; already streaming -> no-op, leave rings/hardware intact
+    rts
+.Lbegin_not_active:
+    plp
     jsr ns_begin_soft
     jsr DetectPALViaVCOUNT       ; sets nsVideoStd (overrides ns_begin_soft's 0 default)
     lda #0x34
@@ -140,19 +157,21 @@ _ns_begin_stream:
     sta NS_SSKCTL               ; update shadow
     sta NS_SKCTL                ; HW write $D20F serial port control
     jsr ns_install_vectors
-    ; (9O.4: POKMSK/IRQEN serial enable go here, AFTER install, IRQEN LAST)
+    jsr ns_enable_serial_irqs   ; 9O.4: POKMSK/IRQEN serial enable LAST, after vectors+POKEY
     rts
 
 ;==========================================================================
 ; _ns_end_stream  (upstream: NS_EndConcurrent_Impl).
 ;
-; Stage 9O.3a: end = remove OS vectors (ns_restore_vectors) -> deassert the PACTL
-; motor line -> reset RAM state (ns_end_soft). PACTL 0x3c is the staged translation
-; of upstream's motor-off value. NO POKMSK/IRQEN disable, NO POKEY yet.
-; ns_restore_vectors is a safe no-op if vectors were never installed. Same mos-sim
-; caveat as begin: do not call from sim tests.
+; Stage 9O.4: end = DISARM the POKMSK/IRQEN serial-IRQ bits (FIRST) -> remove OS
+; vectors (ns_restore_vectors) -> deassert the PACTL motor line -> reset RAM state
+; (ns_end_soft). ns_disable_serial_irqs runs first so no serial IRQ can vector through
+; handlers that are about to be torn down. PACTL 0x3c is the staged translation of
+; upstream's motor-off value. ns_disable_serial_irqs / ns_restore_vectors are safe
+; no-ops if never armed/installed (hardwareActivated / vectorInstalled guards), so a
+; double-end is stable. Same mos-sim caveat as begin: do not call from sim tests.
 _ns_end_stream:
-    ; (9O.4: disable POKMSK/IRQEN serial bits go here, BEFORE restore)
+    jsr ns_disable_serial_irqs   ; 9O.4: disable serial IRQs FIRST, before vector teardown
     jsr ns_restore_vectors
     lda #0x3c
     sta NS_PACTL                 ; motor/control line OFF (upstream 0x3c)
@@ -696,6 +715,58 @@ ns_restore_vectors:
     rts
 
 ;==========================================================================
+; ns_enable_serial_irqs / ns_disable_serial_irqs -- Stage 9O.4. Internal, always
+; compiled. Arm / disarm the POKEY serial-IRQ bits in the POKMSK shadow ($0010) and
+; the hardware IRQEN register ($D20E), gated by hardwareActivated (a re-entry guard
+; that mirrors vectorInstalled). These are the FINAL hardware step of begin and the
+; FIRST of end: _ns_begin_stream calls enable AFTER ns_install_vectors (so the
+; handlers are in place before any serial IRQ can fire), _ns_end_stream calls disable
+; BEFORE ns_restore_vectors (so no serial IRQ can vector through torn-down handlers).
+;
+; php/sei/plp is a CPU-only critical section that makes the POKMSK read-modify-write +
+; IRQEN write atomic vs an IRQ. Deliberate deviation from upstream's unconditional
+; `cli`: plp RESTORES the caller's I-flag (enabled in normal C context), so serial
+; IRQs are live on return without forcing them on regardless of caller state.
+;
+; Upstream asymmetry preserved: enable ORs 0x30 (SerInputReady + SerOutputReady);
+; disable ANDs 0xc7 (clears bits 3,4,5 = 0x38, incl. SerOutputComplete) and leaves
+; every other IRQ bit untouched. NS_POKMSK ($0010) is the only zero-page write here;
+; NS_IRQEN ($D20E) is the only IRQEN write in begin/end (the IrqHandler break path
+; also writes IRQEN, but it is uninstalled).
+
+; void ns_enable_serial_irqs(void) -- arm serial IRQs. Guarded by hardwareActivated.
+ns_enable_serial_irqs:
+    php
+    sei
+    lda hardwareActivated
+    bne .Len_done               ; already armed -> no double-enable
+    lda NS_POKMSK
+    ora #0x30                   ; SerInputReady + SerOutputReady (upstream ora #$30)
+    sta NS_POKMSK               ; OS shadow $0010
+    sta NS_IRQEN                ; HW $D20E (write-only)
+    lda #1
+    sta hardwareActivated
+.Len_done:
+    plp
+    rts
+
+; void ns_disable_serial_irqs(void) -- disarm serial IRQs. Guarded by hardwareActivated.
+ns_disable_serial_irqs:
+    php
+    sei
+    lda hardwareActivated
+    beq .Ldis_done              ; not armed -> safe no-op (touches nothing)
+    lda NS_POKMSK
+    and #0xc7                   ; clear serial bits 0x38; preserve all other IRQ bits (upstream and #$c7)
+    sta NS_POKMSK
+    sta NS_IRQEN
+    lda #0
+    sta hardwareActivated
+.Ldis_done:
+    plp
+    rts
+
+;==========================================================================
 ; PRIVATE test-only hooks. Compiled only when EDGE_NETSTREAM_TEST_HOOKS is defined
 ; (the mos-sim behavioral tests). These are NOT part of the edge_ns_* ABI, NOT
 ; declared in fujinet_netstream_realtime_abi.h, and NOT called by production code.
@@ -710,6 +781,8 @@ ns_restore_vectors:
 .global ns_test_detect_pal
 .global ns_test_install_vectors
 .global ns_test_restore_vectors
+.global ns_test_enable_serial_irqs
+.global ns_test_disable_serial_irqs
 .global ns_test_begin_soft
 .global ns_test_end_soft
 
@@ -732,6 +805,19 @@ ns_test_install_vectors:
     rts
 ns_test_restore_vectors:
     jsr ns_restore_vectors
+    rts
+
+; void ns_test_enable_serial_irqs(void) / ns_test_disable_serial_irqs(void)
+; Test-only entries to the internal 9O.4 arm/disarm routines (kept unexported). NOTE:
+; the full arm path writes IRQEN ($D20E) and the POKMSK shadow ($0010, which collides
+; with llvm-mos zero-page usage under mos-sim), so the ENABLE wrapper is for Altirra
+; use only -- do NOT call it from sim tests. The DISABLE wrapper with hardwareActivated
+; == 0 early-returns before touching any hardware, so it is the sim-safe guard smoke.
+ns_test_enable_serial_irqs:
+    jsr ns_enable_serial_irqs
+    rts
+ns_test_disable_serial_irqs:
+    jsr ns_disable_serial_irqs
     rts
 
 ; void ns_test_detect_pal(void)
@@ -851,6 +937,14 @@ serialConcurrentNum: .zero 1 ; 0 = inactive, 1 = active; upstream serialConcurre
 ; hardware-free begin/end cannot desync it from the real vector state (matters once
 ; 9O makes begin/end install/restore). BSS zero-init = not installed. Not a byte-API gate.
 vectorInstalled:     .zero 1 ; 0 = vectors not installed, 1 = installed
+
+; Stage 9O.4: tracks whether the POKEY serial IRQs are armed in POKMSK/IRQEN.
+; HARDWARE state, NOT ring state: written ONLY by ns_enable_serial_irqs (->1) and
+; ns_disable_serial_irqs (->0). Deliberately NOT cleared by ns_init_ring_state /
+; ns_begin_soft / ns_end_soft, so the hardware-free soft path cannot desync it from
+; the real IRQEN state -- that would defeat the early re-entry guard in _ns_begin_stream
+; (and let a double-begin reset the rings under live IRQ handlers). BSS zero = disarmed.
+hardwareActivated:   .zero 1 ; 0 = serial IRQs disarmed, 1 = armed
 
 nsInputBuffer:  .zero NS_INPUT_BUFSIZE   ; RX, 128; upstream inputBuffer
 nsOutputBuffer: .zero NS_OUTPUT_BUFSIZE  ; TX, 128; upstream outputBuffer0

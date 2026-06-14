@@ -22,8 +22,10 @@
 //   +6  VSEROC  hi   ($020F)
 //   +7  VIMIRQ  lo   ($0216)        after begin -> &IrqHandler
 //   +8  VIMIRQ  hi   ($0217)
-//   +9  POKMSK       ($0010)        MUST be identical across all 3 rows (no serial
-//                                   IRQ enable in 9O.3a -- that is 9O.4)
+//   +9  POKMSK       ($0010)        9O.4: serial bits 0x30 SET after begin, CLEAR after
+//                                   end (these bits are EDGE-owned; the OS never touches
+//                                   them, so they read reliably even though bits 6-7 are
+//                                   noisy OS keyboard/break housekeeping)
 //   +A  nsVideoStd   (_ns_get_video_std)   0=NTSC / 1=PAL after begin's DetectPAL
 //
 // Rows:  $0600 = before begin   $0610 = after begin   $0620 = after end
@@ -31,11 +33,23 @@
 // PASS criteria:
 //   - $0610: PACTL=0x34; the four vectors point at the EDGE handlers (cross-ref the
 //     .map for SerialInputIrqHandler / SerialOutputIrqHandler /
-//     SerialCompleteIrqHandler / IrqHandler); POKMSK == $0600's POKMSK; videoStd in {0,1}.
-//   - $0620: PACTL=0x3c; the four vectors == $0600's vectors (restored); POKMSK
-//     still unchanged.
+//     SerialCompleteIrqHandler / IrqHandler); (POKMSK & 0x30) == 0x30 (9O.4 armed);
+//     videoStd in {0,1}.
+//   - $0620: PACTL=0x3c; the four vectors == $0600's vectors (restored);
+//     (POKMSK & 0x30) == 0x00 (9O.4 disarmed); other POKMSK bits preserved.
 //   - $0630 keeps incrementing (heartbeat) -- proves the system stayed alive across
-//     begin->end and IrqHandler chains correctly with serial IRQs still disabled.
+//     begin->end with serial IRQs LIVE (any spurious POKEY output-ready IRQ is absorbed
+//     by SerialOutputIrqHandler draining the empty TX ring) and IrqHandler chains the
+//     old handler correctly.
+//
+// IRQEN itself is write-only (reads return IRQST), so it is NOT in the page-6 snapshot;
+// confirm it via the Altirra `.pokey` dump -- expect IRQEN=0xF0 (0xC0|0x30) after begin
+// and 0xC0 after end.
+//
+// 9O.4 re-entry note: to validate the early hardwareActivated guard, drive begin/end
+// twice in the debugger (or extend main below) -- a 2nd begin while armed must return
+// without re-installing/re-arming (vectors + POKMSK 0x30 unchanged, rings intact); a
+// 2nd end must be a safe no-op (system stable, heartbeat alive).
 
 #include <stdint.h>
 
