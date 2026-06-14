@@ -282,4 +282,27 @@ if(EDGE_ATARI_FUJINET_REALTIME_NETSTREAM AND CMAKE_CXX_COMPILER MATCHES "mos")
 		EDGE_NETSTREAM_TEST_HOOKS=1)
 	add_test(NAME test_netstream_init_prepare
 		COMMAND mos-sim $<TARGET_FILE:test_netstream_init_prepare>)
+
+	# Stage 9Q.2: marshal-only init wrapper self-test. Calls edge_ns_init_marshal()
+	# (the C half of the safe 4-arg wrapper) and asserts the seven staged init inputs
+	# in .bss. Does NOT call edge_ns_init_netstream / _edge_ns_init_run / raw
+	# _ns_init_netstream, so it never executes SIOV -- safe under mos-sim.
+	add_executable(test_netstream_init_marshal
+		test_netstream_init_marshal.cpp
+		${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_realtime_abi.s
+		${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_handler.S)
+	set_source_files_properties(
+		${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_realtime_abi.s
+		${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_handler.S
+		PROPERTIES
+		LANGUAGE C
+		COMPILE_OPTIONS "-x;assembler-with-cpp")
+	target_include_directories(test_netstream_init_marshal PRIVATE
+		${CMAKE_SOURCE_DIR}
+		${CMAKE_SOURCE_DIR}/engine/platform/atari)
+	target_compile_definitions(test_netstream_init_marshal PRIVATE
+		EDGE_ATARI_FUJINET_REALTIME_NETSTREAM=1
+		EDGE_NETSTREAM_TEST_HOOKS=1)
+	add_test(NAME test_netstream_init_marshal
+		COMMAND mos-sim $<TARGET_FILE:test_netstream_init_marshal>)
 endif()

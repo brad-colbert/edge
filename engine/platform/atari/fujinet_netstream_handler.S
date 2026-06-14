@@ -67,6 +67,22 @@
 .global _ns_get_final_audf3
 .global _ns_get_final_audf4
 
+;==========================================================================
+; Stage 9Q.2: the seven staged init INPUTS are exported in PRODUCTION (not just
+; under EDGE_NETSTREAM_TEST_HOOKS) so the C wrapper edge_ns_init_netstream /
+; edge_ns_init_marshal (fujinet_netstream_realtime_abi.h) can marshal the 4 init
+; args into them before calling the parameterless raw _ns_init_netstream. These
+; export NAMES only -- the .bss already exists below, so the footprint is unchanged.
+; The derived outputs (nsFinal*, nsPayloadBuf/Len, nsVideoStd) stay reachable via the
+; _ns_get_final_*/_ns_get_video_std getters and remain test-hooks-global below.
+.global nsHostPtrLo
+.global nsHostPtrHi
+.global nsInitFlags
+.global nsNominalBaudLo
+.global nsNominalBaudHi
+.global nsPortLo
+.global nsPortHi
+
 .text
 
 ;==========================================================================
@@ -443,13 +459,91 @@ _ns_get_video_std:
     rts
 
 ;==========================================================================
-; _ns_init_netstream  (upstream: NS_InitNetstream_Impl)
-; Output: C=0 success / C=1 failure (upstream contract).
-; Scaffold: always failure (C=1) -- nothing is wired, and arg marshaling under
-; the llvm-mos calling convention is deferred. Keeping carry=fail lets the
-; future EDGE init wrapper surface success/failure (do NOT collapse to void).
+; _ns_init_netstream  (upstream: NS_InitNetstream_Impl, lines 451-592)
+; Output: C=0 success / C=1 failure (upstream carry contract).
+;
+; Stage 9Q.2: the REAL raw init hardware path. Parameterless -- it reads the staged
+; init inputs from .bss (nsHostPtr*, nsInitFlags, nsNominalBaud*, nsPort*) that the
+; C wrapper (edge_ns_init_netstream) marshals in beforehand; it does NOT decode the
+; cc65 ($82) fastcall args upstream uses (EDGE keeps multi-arg marshaling in C).
+;
+; Sequence: [init-while-active guard] -> ns_init_prepare (DetectPAL + host validate +
+; baud select + flag derive + payload build) -> fill the Atari SIO DCB for the
+; $70/$F0 FujiNet enable-netstream command -> SIOV -> check DSTATS == $01.
+;
+; Two deliberate EDGE deviations from upstream:
+;  (1) upstream returns clc UNCONDITIONALLY after siov; EDGE re-reads DSTATS ($0303)
+;      and only succeeds on $01 (a real completion check, not assumed success).
+;  (2) NO POKEY tail. Upstream programs AUDF3/AUDF4/AUDCTL after siov; EDGE already
+;      does that in _ns_begin_stream (9O.3b), which is left UNTOUCHED. Init never
+;      arms IRQs (hardwareActivated stays 0) and never calls begin/end.
+;
+; Interrupt nesting: php/sei open an IRQ-masked envelope over the guard + prepare +
+; DCB fill; cli/jsr SIOV/sei sits strictly INSIDE that envelope (SIO needs the
+; serial-complete IRQ serviced during the blocking transfer, then we re-mask). The
+; terminal plp restores the caller's ORIGINAL I-flag; the result carry (clc/sec) is
+; set AFTER plp because plp reloads carry from the entry status (same fix as
+; _ns_recv_byte/_ns_send_byte). A (the #0/#1 result code) is unaffected by plp.
+;
+; Failure policy: guard fail and host/baud prepare fail leave nsFinal* untouched
+; (the guard returns before prepare; ns_validate_host/ns_select_baud fail before any
+; nsFinal* write). A SIOV/DSTATS failure may leave nsFinal*/payload computed by
+; prepare, but init still returns C=1. _ns_get_status reports serial-IRQ errors only,
+; never init errors. This is the ONLY reference to SIOV in the file.
 _ns_init_netstream:
-    sec
+    php                          ; save caller I-flag (+ rest of P)
+    sei                          ; mask IRQs for guard + prepare + DCB fill
+    ; --- init-while-active guard (BEFORE prepare / any nsFinal* / SIOV) ---
+    lda hardwareActivated
+    beq .Linit_guard_ok
+    lda #1                       ; already streaming -> fail closed, nsFinal* untouched
+    plp                          ; restore caller I-flag
+    sec                          ; carry set AFTER plp (plp reloads carry)
+    rts
+.Linit_guard_ok:
+    jsr ns_init_prepare          ; DetectPAL + prepare_core; C=1 = host/baud fail (nsFinal* untouched)
+    bcs .Linit_fail
+    ; --- fill the Atari SIO DCB ($0300-$030B) for $70/$F0 enable-netstream ---
+    lda #0x70
+    sta NS_DDEVIC                ; $0300 device = $70 (FujiNet)
+    lda #1
+    sta NS_DUNIT                 ; $0301 unit = 1
+    lda #0xf0
+    sta NS_DCOMND               ; $0302 command = $F0 enable-netstream
+    lda #0x80
+    sta NS_DSTATS               ; $0303 direction = $80 (write to peripheral)
+    lda #<nsPayloadBuf
+    sta NS_DBUFLO               ; $0304 buffer lo
+    lda #>nsPayloadBuf
+    sta NS_DBUFHI               ; $0305 buffer hi
+    lda nsPayloadLen
+    sta NS_DBYTLO               ; $0308 byte count lo = payload len (64)
+    lda #0
+    sta NS_DBYTHI               ; $0309 byte count hi = 0
+    lda nsPortLo
+    sta NS_DAUX1                ; $030A aux1 = staged port lo
+    lda nsPortHi
+    sta NS_DAUX2                ; $030B aux2 = staged port hi
+    lda #0x0f
+    sta NS_DTIMLO               ; $0306 timeout lo = $0F
+    lda #0
+    sta NS_DTIMLO+1             ; $0307 timeout hi = 0
+    ; --- SIO: enable IRQs only across the blocking transfer ---
+    cli                          ; <-- INSIDE php/plp: serial-complete IRQ must be serviced
+    jsr NS_SIOV                 ; $E459 OS SIO vector (DCB-driven)
+    sei                          ; <-- re-mask immediately after SIOV returns
+    ; --- EDGE completion check (upstream omits this) ---
+    lda NS_DSTATS               ; re-read $0303 (auditable; not Y across the sei)
+    cmp #0x01                    ; SIO success == $01
+    bne .Linit_fail
+    lda #0                       ; success
+    plp                          ; restore caller I-flag
+    clc                          ; carry clear AFTER plp
+    rts
+.Linit_fail:
+    lda #1                       ; failure (prepare fail, or SIOV/DSTATS != $01)
+    plp                          ; restore caller I-flag
+    sec                          ; carry set AFTER plp
     rts
 
 ;==========================================================================
@@ -1063,13 +1157,9 @@ ns_disable_serial_irqs:
 ; 9Q.1: expose the staged init .bss + the final/payload state so C++ tests can stage
 ; inputs and read results directly (the test-hook pattern: parameterless asm hooks read
 ; staged BSS; C++ writes the staged bytes / nsVideoStd, and reads nsFinal* / nsPayload*).
-.global nsNominalBaudLo
-.global nsNominalBaudHi
-.global nsPortLo
-.global nsPortHi
-.global nsHostPtrLo
-.global nsHostPtrHi
-.global nsInitFlags
+; NOTE (9Q.2): the seven staged INPUTS (nsHostPtr*, nsInitFlags, nsNominalBaud*, nsPort*)
+; are now exported in PRODUCTION near the top of the file, so they are NOT re-listed here.
+; Only the derived OUTPUTS / payload buffer remain test-hooks-only globals.
 .global nsPayloadLen
 .global nsPayloadBuf
 .global nsVideoStd

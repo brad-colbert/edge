@@ -25,7 +25,7 @@
 .global _edge_ns_recv_byte_packed
 .global _edge_ns_bytes_avail
 .global _edge_ns_get_status
-.global _edge_ns_init_netstream
+.global _edge_ns_init_run
 .global _edge_ns_begin_stream
 .global _edge_ns_end_stream
 
@@ -78,12 +78,20 @@ _edge_ns_get_status:
 	; A contains status byte
 	rts
 
-; void edge_ns_init_netstream(const char* host, uint16_t flags, uint16_t port)
-; Declared for future integration. Parameter marshaling is not yet proven
-; against upstream init expectations, so this remains unused by production code.
-_edge_ns_init_netstream:
-	; Deferred ABI proof for init marshaling.
+; uint8_t edge_ns_init_run(void)
+; Stage 9Q.2: parameterless carry-to-status dispatcher for the raw init path.
+; The 4-arg marshaling (host/flags/nominal_baud/port_swapped -> staging .bss) is done
+; in C (edge_ns_init_netstream, fujinet_netstream_realtime_abi.h) BEFORE this is called;
+; this shim just runs the raw handler and converts its carry result into a normal
+; uint8_t (0 = success, 1 = failure), mirroring _edge_ns_send_byte. NOTE: this drives
+; the real SIOV path, so it must NOT be called from mos-sim CTests.
+_edge_ns_init_run:
 	jsr _ns_init_netstream
+	bcc .Linit_ok    ; carry clear = success
+	lda #1           ; carry set = failure, return 1
+	rts
+.Linit_ok:
+	lda #0           ; success, return 0
 	rts
 
 ; void edge_ns_begin_stream(void)

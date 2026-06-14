@@ -672,6 +672,38 @@ if(MOS_ATARI8_CXX)
             VERBATIM)
         add_custom_target(netstream_vectors_altirra_probe
             DEPENDS ${NETSTREAM_VEC_PROBE_XEX})
+
+        # Stage 9Q.2 Altirra/hardware validation probe (.xex) for the REAL init path.
+        # Runs edge_ns_init_netstream (DCB fill + SIOV + DSTATS check) -- which cannot run
+        # under mos-sim -- and snapshots the init result / DSTATS / nsFinal* / payload
+        # prefix / pre+post DCB into page 6 for debugger inspection (Mode A no-FujiNet,
+        # Mode B FujiNet present). Built WITH EDGE_NETSTREAM_TEST_HOOKS to read nsPayloadBuf.
+        # Altirra-only; intentionally NOT a CTest. Keeps the 9P vectors probe untouched.
+        set(NETSTREAM_INIT_PROBE_XEX ${CMAKE_BINARY_DIR}/netstream_init_altirra_probe.xex)
+        set(NETSTREAM_INIT_PROBE_MAP ${CMAKE_BINARY_DIR}/netstream_init_altirra_probe.map)
+        add_custom_command(
+            OUTPUT ${NETSTREAM_INIT_PROBE_XEX}
+            COMMAND ${MOS_ATARI8_CXX}
+                    -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra
+                    -DEDGE_ATARI_FUJINET_REALTIME_NETSTREAM=1
+                    -DEDGE_NETSTREAM_TEST_HOOKS=1
+                    -I${CMAKE_SOURCE_DIR}
+                    -I${CMAKE_SOURCE_DIR}/engine/platform/atari
+                    ${CMAKE_SOURCE_DIR}/tests/backends/atari/netstream_init_altirra_probe.cpp
+                    ${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_realtime_abi.s
+                    ${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_handler.S
+                    -o ${NETSTREAM_INIT_PROBE_XEX}
+                    -Wl,--Map=${NETSTREAM_INIT_PROBE_MAP}
+            DEPENDS ${CMAKE_SOURCE_DIR}/tests/backends/atari/netstream_init_altirra_probe.cpp
+                    ${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_realtime_abi.s
+                    ${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_handler.S
+                    ${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_constants.inc
+                    ${EDGE_ENGINE_HEADERS}
+            BYPRODUCTS ${NETSTREAM_INIT_PROBE_MAP}
+            COMMENT "Building Atari Netstream init probe (netstream_init_altirra_probe.xex)"
+            VERBATIM)
+        add_custom_target(netstream_init_altirra_probe
+            DEPENDS ${NETSTREAM_INIT_PROBE_XEX})
     else()
         message(STATUS
             "Skipping netstream_abi_link_smoke custom target: requires EDGE_ATARI_FUJINET_REALTIME_NETSTREAM=ON")

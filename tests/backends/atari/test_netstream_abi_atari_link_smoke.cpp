@@ -40,6 +40,12 @@ int main() {
     g_sink16 = _edge_ns_bytes_avail();
     g_sink8 = _edge_ns_get_status();
 
+    // Stage 9Q.2: force the new 4-arg init wrapper + its asm carry shim into the link.
+    // Build-only target (never executed at test time), so SIOV is not run here.
+    static const char host[] = "edge";
+    g_sink8 = edge_ns_init_netstream(host, /*flags=*/0x00, /*nominal_baud=*/9600,
+                                     /*port_swapped=*/0x0000);
+
     _edge_ns_begin_stream();
     _edge_ns_end_stream();
 
