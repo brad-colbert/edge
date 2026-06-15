@@ -581,6 +581,47 @@ Example Mode A output for the adapter probe (page 6 `$0600..$064F`):
 
 The script paths assume Altirra 4.50 at the location in `$ALTIRRA_DIR`; adjust for your install.
 
+## Netstream Mode B emulator validation
+
+The FujiNet **Netstream** realtime data path is validated end-to-end against a real FujiNet
+responder — the **fujinet-pc firmware** bridged to Altirra by the **NetSIO hub** — plus a UDP
+**echo peer**. This is *emulator / FujiNet-PC* validation, **not** physical FujiNet hardware
+(which remains future work; see Current Limits). Stage 9R.3 proved a byte-perfect bidirectional
+round trip this way.
+
+The stack (Atari side → network):
+
+```
+probe.xex (Altirra)  →  netsio.atdevice  →  NetSIO hub (python -m netsiohub, TCP 9996 / UDP 9997)
+                     →  fujinet-pc firmware  →  UDP :9000  →  echo peer (172.30.0.2)
+```
+
+**Peer (in this repo):** `tests/backends/atari/netstream_peer_echo.py` records inbound datagrams
+and, once the probe's outbound pattern `A0..AF` has arrived (after the firmware's REGISTER
+packet, possibly split across datagrams), replies exactly once with `50..5F`. It must run on a
+**distinct IP** — the firmware binds `0.0.0.0:9000` *and* sends to `host:9000`, so a `127.0.0.1`
+peer self-loops. `scripts/netstream_modeb_peer.sh` runs it in a Docker container at a fixed IP:
+
+```bash
+scripts/netstream_modeb_peer.sh up        # docker network 172.30.0.0/24 + echo @ 172.30.0.2:9000
+# (start your NetSIO hub + fujinet-pc; Altirra's netsio "custom" device connects to the hub)
+cmake --build <dir> --target netstream_datapath_altirra_probe   # NS_PEER_HOST cache var = 172.30.0.2
+scripts/altirra_probe.sh <dir>/netstream_datapath_altirra_probe.xex B   # Mode B keeps the netsio device
+scripts/netstream_modeb_peer.sh status     # shows recv.bin (expect REGISTER + A0..AF)
+scripts/netstream_modeb_peer.sh down       # tear down container + network
+```
+
+**Pass criteria** (probe page-6 dump + peer file): open `Ok`, DSTATS `$01`, `active`; send `Ok`;
+peer `recv.bin` == `A0..AF`; recv `Ok` with `$0630` == `50..5F`; close inactive; no overflow. The
+fujinet-pc log shows `STREAM-OUT: A0..AF` and `STREAM-IN: 50..5F`.
+
+**Adapter policy that makes it work** (`fujinet_netstream_realtime.h`): FujiNet netstream uses an
+**external TX clock** — `kNetstreamFlags = 0x26` (UDP-seq + TX_EXT `0x04` + REGISTER `0x02`),
+`kNetstreamNominalBaud = 31250`. The adapter also waits `kNetstreamSettleFrames` (~0.5 s) after
+begin (`RealNetstreamOps::settle()`) so the external clock renegotiates before the first
+transmit — without it the first ~5–9 stream bytes corrupt. `netstream_txirq_diag_probe` (built
+with `EDGE_NETSTREAM_TEST_HOOKS`) dumps the serial-IRQ counters if the TX path regresses.
+
 ## Current Limits
 
 - display layouts still use the Atari mode enum (`atari::Mode`) as the concrete backend token, supplied
