@@ -598,6 +598,15 @@ _ns_tx_space:
 ; If the BREAK-key IRQ is pending, ack it; otherwise chain to the previously
 ; installed handler via the self-modified jmp operand (chain_addr).
 IrqHandler:
+#if defined(EDGE_NETSTREAM_TEST_HOOKS)
+    ; 9R.3 TX-IRQ diagnostic (test-only): count dispatcher entries + sample IRQST,
+    ; preserving A (the chain path treats A as scratch, but the break path returns it).
+    inc ns_test_irq_disp_count
+    pha
+    lda NS_IRQST
+    sta ns_test_last_irqst
+    pla
+#endif
     bit NS_IRQST            ; HW read $D20E
     bpl IH_is_break
     jmp 0xffff              ; SMC: chain to old handler (operand patched by SwapIrqVector)
@@ -641,6 +650,9 @@ SwapIrqVector:
 ; state outLevel/outIndex/serialOutIdle is touched. This routine contains the only
 ; SEROUT write in the file; it is unreachable from begin/end/production.
 SerialOutputIrqHandler:
+#if defined(EDGE_NETSTREAM_TEST_HOOKS)
+    inc ns_test_soh_count       ; 9R.3: count serial-output IRQ handler entries
+#endif
     lda outLevel
     beq SOH_is_empty
     dec outLevel
@@ -649,6 +661,10 @@ SerialOutputIrqHandler:
     ldx outIndex
     lda nsOutputBuffer,x
     sta NS_SEROUT               ; HW write $D20D (uninstalled: never executes)
+#if defined(EDGE_NETSTREAM_TEST_HOOKS)
+    sta ns_test_last_serout_irq ; A still = the byte just written to SEROUT
+    inc ns_test_serout_irq_count
+#endif
     inx
     txa
     and #0x7f                   ; advance consumer index, wrapped
@@ -733,6 +749,9 @@ inPtr = . - 2
 ; (which preserves X/Y). This routine contains the only SERIN read in the file;
 ; it is unreachable from begin/end/production and is never sim-called.
 SerialInputIrqHandler:
+#if defined(EDGE_NETSTREAM_TEST_HOOKS)
+    inc ns_test_sih_count       ; 9R.3: count serial-input IRQ handler entries
+#endif
     lda NS_SERIN                ; HW read $D20D (uninstalled: never executes)
     jsr ns_rx_produce           ; A=byte; preserves X,Y; carry status ignored here
     pla                         ; restore A pushed by the OS IRQ dispatch
@@ -1175,6 +1194,14 @@ ns_disable_serial_irqs:
 .global outLevel
 .global outIndex
 .global hardwareActivated
+; 9R.3 TX-IRQ diagnostic mirrors (test-only; see the .bss block below).
+.global ns_test_irq_disp_count
+.global ns_test_soh_count
+.global ns_test_sih_count
+.global ns_test_serout_irq_count
+.global ns_test_last_serout_irq
+.global ns_test_last_irqst
+.global vectorInstalled
 ; 9Q.1: expose the staged init .bss + the final/payload state so C++ tests can stage
 ; inputs and read results directly (the test-hook pattern: parameterless asm hooks read
 ; staged BSS; C++ writes the staged bytes / nsVideoStd, and reads nsFinal* / nsPayload*).
@@ -1412,4 +1439,11 @@ nsPayloadBuf:   .zero NS_PAYLOAD_MAX     ; init payload, 64; upstream NetstreamP
 ; prime through RAM instead of reading $D20D (a CPU read of $D20D returns SERIN).
 ns_test_last_prime_byte: .zero 1
 ns_test_prime_count:     .zero 1
+; 9R.3 TX-IRQ diagnostic counters/mirrors (test-only; production .bss unchanged when hooks off).
+ns_test_irq_disp_count:   .zero 1  ; IrqHandler (VIMIRQ dispatcher) entries
+ns_test_soh_count:        .zero 1  ; SerialOutputIrqHandler entries
+ns_test_sih_count:        .zero 1  ; SerialInputIrqHandler entries
+ns_test_serout_irq_count: .zero 1  ; SEROUT writes from the output IRQ handler
+ns_test_last_serout_irq:  .zero 1  ; last byte the output IRQ handler wrote to SEROUT
+ns_test_last_irqst:       .zero 1  ; IRQST sampled at dispatcher entry
 #endif // EDGE_NETSTREAM_TEST_HOOKS

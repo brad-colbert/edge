@@ -738,6 +738,42 @@ if(MOS_ATARI8_CXX)
             VERBATIM)
         add_custom_target(netstream_adapter_altirra_probe
             DEPENDS ${NETSTREAM_ADAPTER_PROBE_XEX})
+
+        # Stage 9R.3a TX serial-output-IRQ diagnostic probe (.xex). Drives open->send and
+        # snapshots the EDGE_NETSTREAM_TEST_HOOKS IRQ counters (dispatcher / output-IRQ / SEROUT)
+        # to prove where the serial-output path is/was broken. Peer host compiled in via
+        # NS_PEER_HOST (default 172.30.0.2 = the Docker echo). Altirra-only; intentionally NOT a CTest.
+        if(NOT DEFINED NS_PEER_HOST)
+            set(NS_PEER_HOST "172.30.0.2")
+        endif()
+        set(NETSTREAM_TXIRQ_PROBE_XEX ${CMAKE_BINARY_DIR}/netstream_txirq_diag_probe.xex)
+        set(NETSTREAM_TXIRQ_PROBE_MAP ${CMAKE_BINARY_DIR}/netstream_txirq_diag_probe.map)
+        add_custom_command(
+            OUTPUT ${NETSTREAM_TXIRQ_PROBE_XEX}
+            COMMAND ${MOS_ATARI8_CXX}
+                    -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra
+                    -DEDGE_ATARI_FUJINET_REALTIME_NETSTREAM=1
+                    -DEDGE_NETSTREAM_TEST_HOOKS=1
+                    -DNS_PEER_HOST="${NS_PEER_HOST}"
+                    -I${CMAKE_SOURCE_DIR}
+                    -I${CMAKE_SOURCE_DIR}/engine/platform/atari
+                    ${CMAKE_SOURCE_DIR}/tests/backends/atari/netstream_txirq_diag_probe.cpp
+                    ${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_realtime_abi.s
+                    ${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_handler.S
+                    -o ${NETSTREAM_TXIRQ_PROBE_XEX}
+                    -Wl,--Map=${NETSTREAM_TXIRQ_PROBE_MAP}
+            DEPENDS ${CMAKE_SOURCE_DIR}/tests/backends/atari/netstream_txirq_diag_probe.cpp
+                    ${CMAKE_SOURCE_DIR}/tests/backends/atari/atari_hostdump.h
+                    ${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_realtime_abi.s
+                    ${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_handler.S
+                    ${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_realtime.h
+                    ${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_constants.inc
+                    ${EDGE_ENGINE_HEADERS}
+            BYPRODUCTS ${NETSTREAM_TXIRQ_PROBE_MAP}
+            COMMENT "Building Atari Netstream TX-IRQ diagnostic probe (netstream_txirq_diag_probe.xex, peer=${NS_PEER_HOST})"
+            VERBATIM)
+        add_custom_target(netstream_txirq_diag_probe
+            DEPENDS ${NETSTREAM_TXIRQ_PROBE_XEX})
     else()
         message(STATUS
             "Skipping netstream_abi_link_smoke custom target: requires EDGE_ATARI_FUJINET_REALTIME_NETSTREAM=ON")
