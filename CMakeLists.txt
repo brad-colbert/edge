@@ -774,6 +774,39 @@ if(MOS_ATARI8_CXX)
             VERBATIM)
         add_custom_target(netstream_txirq_diag_probe
             DEPENDS ${NETSTREAM_TXIRQ_PROBE_XEX})
+
+        # Stage 9R.3 Mode B end-to-end data-path probe (.xex). Drives the adapter
+        # open->send->recv->close against a real FujiNet responder (fujinet-pc + NetSIO hub +
+        # UDP echo peer) and self-dumps page 6 via H:. Peer host compiled in via NS_PEER_HOST
+        # (default 172.30.0.2 = the Docker echo). Altirra-only; intentionally NOT a CTest.
+        set(NETSTREAM_DATAPATH_PROBE_XEX ${CMAKE_BINARY_DIR}/netstream_datapath_altirra_probe.xex)
+        set(NETSTREAM_DATAPATH_PROBE_MAP ${CMAKE_BINARY_DIR}/netstream_datapath_altirra_probe.map)
+        add_custom_command(
+            OUTPUT ${NETSTREAM_DATAPATH_PROBE_XEX}
+            COMMAND ${MOS_ATARI8_CXX}
+                    -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra
+                    -DEDGE_ATARI_FUJINET_REALTIME_NETSTREAM=1
+                    -DEDGE_NETSTREAM_TEST_HOOKS=1
+                    -DNS_PEER_HOST="${NS_PEER_HOST}"
+                    -I${CMAKE_SOURCE_DIR}
+                    -I${CMAKE_SOURCE_DIR}/engine/platform/atari
+                    ${CMAKE_SOURCE_DIR}/tests/backends/atari/netstream_datapath_altirra_probe.cpp
+                    ${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_realtime_abi.s
+                    ${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_handler.S
+                    -o ${NETSTREAM_DATAPATH_PROBE_XEX}
+                    -Wl,--Map=${NETSTREAM_DATAPATH_PROBE_MAP}
+            DEPENDS ${CMAKE_SOURCE_DIR}/tests/backends/atari/netstream_datapath_altirra_probe.cpp
+                    ${CMAKE_SOURCE_DIR}/tests/backends/atari/atari_hostdump.h
+                    ${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_realtime_abi.s
+                    ${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_handler.S
+                    ${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_realtime.h
+                    ${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_constants.inc
+                    ${EDGE_ENGINE_HEADERS}
+            BYPRODUCTS ${NETSTREAM_DATAPATH_PROBE_MAP}
+            COMMENT "Building Atari Netstream data-path probe (netstream_datapath_altirra_probe.xex, peer=${NS_PEER_HOST})"
+            VERBATIM)
+        add_custom_target(netstream_datapath_altirra_probe
+            DEPENDS ${NETSTREAM_DATAPATH_PROBE_XEX})
     else()
         message(STATUS
             "Skipping netstream_abi_link_smoke custom target: requires EDGE_ATARI_FUJINET_REALTIME_NETSTREAM=ON")

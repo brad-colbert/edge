@@ -41,13 +41,19 @@ using engine::net::NetStatus;
 // The public realtime API (Game::net.realtime.open_udp_seq) carries no baud/flags, so the
 // adapter picks them. These are internal constants (no user-facing API change); retune here.
 //
-// kNetstreamNominalBaud: a BaudTable entry (19200 = row 0x4B00, AUDF3=39). ~2400 B/s ->
-//   ~120x 16-byte packets/s: comfortable headroom for one packet/frame at 60fps.
-// kNetstreamFlags: UDP (bit0=0) + UDP-seq (0x20, the lane is open_udp_seq) + internal RX/TX
-//   clocks (bits 0x0c=0). The PAL bit 0x10 is left 0 in the seed — ns_init_prepare derives
-//   it from DetectPAL; do NOT pre-set it. No register / external-clock bits.
-inline constexpr u16 kNetstreamNominalBaud = 19200;
-inline constexpr u8  kNetstreamFlags       = 0x20;
+// Values match the proven-working upstream reference
+// (fujinet-atari-netstream/examples/udp-sequence/atari_udp_sequence.c: flags 0x26, baud 31250),
+// validated against fujinet-pc + NetSIO in 9R.3. The earlier 0x20 / 19200 (internal TX clock)
+// never transmitted: FujiNet/NetSIO drives an EXTERNAL transmit clock, so TX_EXT (0x04) is required
+// or POKEY never clocks the serial output and the output-ready IRQ never fires.
+//
+// kNetstreamNominalBaud: a BaudTable entry (31250 = row 0x7A12, AUDF3=21).
+// kNetstreamFlags: UDP (bit0=0) + UDP-seq (0x20, the lane is open_udp_seq) + TX external clock
+//   (0x04) + register (0x02). RX stays internal (0x08 clear). The PAL bit 0x10 is left 0 in the
+//   seed — ns_init_prepare derives it from DetectPAL; do NOT pre-set it. The handler maps
+//   flags & 0x0c == 0x04 -> SKCTL 0x10 (RX int, TX ext).
+inline constexpr u16 kNetstreamNominalBaud = 31250;
+inline constexpr u8  kNetstreamFlags       = 0x26;
 
 // Host-order remote port -> the byte-swapped value edge_ns_init_netstream() expects in
 // port_swapped (low byte -> DCB DAUX1, high byte -> DAUX2). This is the adapter's single,
@@ -57,6 +63,12 @@ static constexpr u16 to_netstream_port_arg(u16 remote_port) {
     return static_cast<u16>(((remote_port & 0x00ffu) << 8) |
                             ((remote_port & 0xff00u) >> 8));
 }
+
+// Frames to wait AFTER begin before the first transmit, so FujiNet/NetSIO can renegotiate the
+// external SIO clock to the netstream baud. Validated against fujinet-pc in 9R.3: sending
+// immediately after begin corrupts the first ~5-9 bytes (the firmware reports the new peer
+// baudrate ~475 ms after the baud switch); ~30 frames (~0.5 s NTSC) makes the stream byte-perfect.
+inline constexpr u8 kNetstreamSettleFrames = 30;
 
 // ── Real backend ops: the 9Q.2 ABI. Linked only where handler.S/abi.s are linked ────────
 // (the Atari .xex / Altirra probe). ODR-used only when NetstreamRealtimeAdapterT<RealNetstreamOps>
@@ -69,6 +81,17 @@ struct RealNetstreamOps {
     static void begin() { _edge_ns_begin_stream(); }
     static void end()   { _edge_ns_end_stream(); }
     static u8   status(){ return _edge_ns_get_status(); }
+    // Wait kNetstreamSettleFrames OS frames (RTCLOK low byte $14) for the external TX clock to
+    // renegotiate after begin, before the first transmit. Atari-specific; only compiled into
+    // the real backend (FakeOps::settle is a no-op, so unit tests never block here).
+    static void settle() {
+        volatile u8* const rtclok = (volatile u8*)0x0014;
+        u8 last = *rtclok, frames = 0;
+        while (frames < kNetstreamSettleFrames) {
+            const u8 v = *rtclok, d = (u8)(v - last);
+            if (d) { frames = (u8)(frames + d); last = v; }
+        }
+    }
     // 9R.2 data path.
     static u8   send_byte(u8 b) { return _edge_ns_send_byte(b); }       // 0 sent / 1 full
     static u16  recv_packed()   { return _edge_ns_recv_byte_packed(); } // lo=data, hi=status
@@ -115,6 +138,9 @@ struct NetstreamRealtimeAdapterT {
 
         // begin is void (no failure channel; Altirra-validated). Active after init+begin.
         Ops::begin();
+        // Settle the external TX clock before any transmit (9R.3); without this the first
+        // ~5-9 stream bytes are corrupted. FakeOps::settle is a no-op (tests don't block).
+        Ops::settle();
         s.active = true;
         s.last_error = NetError{NetStatus::Ok, 0};
         return NetStatus::Ok;

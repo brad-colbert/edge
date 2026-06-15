@@ -27,7 +27,7 @@ struct FakeOps {
     static uint16_t last_port;
     static uint8_t  init_rc;      // scripted init result (0 = success, 1 = failure)
     static uint8_t  status_val;   // scripted get_status byte
-    static int init_calls, begin_calls, end_calls, status_calls;
+    static int init_calls, begin_calls, end_calls, status_calls, settle_calls;
 
     // 9R.2 data-path model.
     static uint8_t  tx_free;          // scripted tx_space() return (0..128)
@@ -47,6 +47,7 @@ struct FakeOps {
     }
     static void    begin()  { ++begin_calls; }
     static void    end()    { ++end_calls; }
+    static void    settle() { ++settle_calls; }   // no-op delay stand-in (must not block tests)
     static uint8_t status() { ++status_calls; return status_val; }
 
     static uint8_t  tx_space()    { return tx_free; }
@@ -69,7 +70,7 @@ uint16_t FakeOps::last_port = 0;
 uint8_t  FakeOps::init_rc = 0;
 uint8_t  FakeOps::status_val = 0;
 int FakeOps::init_calls = 0, FakeOps::begin_calls = 0, FakeOps::end_calls = 0,
-    FakeOps::status_calls = 0;
+    FakeOps::status_calls = 0, FakeOps::settle_calls = 0;
 uint8_t  FakeOps::tx_free = 0;
 uint8_t  FakeOps::tx_captured[64] = {};
 int      FakeOps::tx_count = 0;
@@ -100,14 +101,15 @@ int main() {
     CHECK(!A::realtime_active());
     CHECK(A::realtime_last_error().status == n::NetStatus::InvalidArgument);
 
-    // ----- open success: init+begin, active, exact args (incl. converted port) -----
-    FakeOps::init_calls = FakeOps::begin_calls = 0;
+    // ----- open success: init+begin+settle, active, exact args (incl. converted port) -----
+    FakeOps::init_calls = FakeOps::begin_calls = FakeOps::settle_calls = 0;
     FakeOps::init_rc = 0;
     static const char host[] = "host";
     CHECK(A::realtime_open_udp_seq(host, 0x1234, 5000) == n::NetStatus::Ok);
     CHECK(A::realtime_active());
     CHECK(FakeOps::init_calls == 1);
     CHECK(FakeOps::begin_calls == 1);
+    CHECK(FakeOps::settle_calls == 1);    // settle runs once on a successful open
     CHECK(FakeOps::last_host == host);                 // exact host pointer
     CHECK(FakeOps::last_flags == nsr::kNetstreamFlags);
     CHECK(FakeOps::last_baud == nsr::kNetstreamNominalBaud);
@@ -178,9 +180,11 @@ int main() {
     {
         FakeOps::init_rc = 1;
         const int begin_before = FakeOps::begin_calls;
+        const int settle_before = FakeOps::settle_calls;
         CHECK(A::realtime_open_udp_seq(host, 1234, 1) == n::NetStatus::TransportError);
         CHECK(!A::realtime_active());
         CHECK(FakeOps::begin_calls == begin_before);    // begin not entered on init failure
+        CHECK(FakeOps::settle_calls == settle_before);  // settle not entered either
         CHECK(A::realtime_last_error().status == n::NetStatus::TransportError);
     }
 
