@@ -1,11 +1,18 @@
 // test_atari_fujinet_netstream_scaffold.cpp
-// Stage 9B.5: Netstream realtime skeleton safety and storage audit.
+// Netstream realtime seam-safety audit (no backend I/O).
+//
+// This is a SEAM/scaffold safety test: it exercises only the cached-state paths of
+// FujiPlatform::hal that are safe to reach without opening the lane. It never calls
+// open_udp_seq, so the real backend (RealNetstreamOps -> SIOV/begin/end) is never
+// executed under mos-sim. The detailed DATA-PATH semantics of the wired 9R.2 adapter
+// (active-path send/recv, zero-length Ok, nullptr InvalidArgument, full-packet
+// WouldBlock/Ok) are covered deterministically by test_netstream_adapter_lifecycle
+// (FakeOps).
 //
 // Verifies:
-// - Scaffold deliberately returns Unsupported (not Ok) to prevent false activation.
-// - active() always returns false during scaffolding.
-// - Nonzero send/recv return Unsupported, not Ok or WouldBlock.
-// - Zero-length send/recv return Ok (no-op, always safe).
+// - active() is false before any successful open.
+// - While INACTIVE the wired adapter checks !active FIRST, so every send_nb/recv_nb
+//   returns Closed (and touches no backend op), regardless of size or pointer.
 // - bind_udp_seq remains Unsupported.
 // - Storage minimization: minimal state when ON, zero when OFF.
 
@@ -90,25 +97,24 @@ static void test_on_mode_send_recv() {
 #if defined(EDGE_ATARI_FUJINET_REALTIME_NETSTREAM)
     char io = 0;
 
-    // Zero-length send/recv must return Ok (no-op, always safe).
-    CHECK(FujiPlatform::hal::realtime_send_nb(&io, 0) == n::NetStatus::Ok);
-    CHECK(FujiPlatform::hal::realtime_recv_nb(&io, 0) == n::NetStatus::Ok);
+    // The lane was never opened, so state().active is false. The wired 9R.2 adapter checks
+    // !active FIRST in send_nb/recv_nb and returns Closed before touching any backend op
+    // (no SIOV/POKEY). This holds for every size and pointer here -- the zero-length Ok,
+    // nullptr InvalidArgument, and full-packet WouldBlock/Ok paths are only reachable AFTER
+    // a successful open and are covered by test_netstream_adapter_lifecycle (FakeOps).
+    CHECK(FujiPlatform::hal::realtime_send_nb(&io, 0) == n::NetStatus::Closed);
+    CHECK(FujiPlatform::hal::realtime_recv_nb(&io, 0) == n::NetStatus::Closed);
+    CHECK(FujiPlatform::hal::realtime_send_nb(&io, 1) == n::NetStatus::Closed);
+    CHECK(FujiPlatform::hal::realtime_send_nb(&io, 16) == n::NetStatus::Closed);
+    CHECK(FujiPlatform::hal::realtime_recv_nb(&io, 1) == n::NetStatus::Closed);
+    CHECK(FujiPlatform::hal::realtime_recv_nb(&io, 16) == n::NetStatus::Closed);
 
-    // Stage 9R.1: send/recv are wired but NON-PUMPING (data path is 9R.2). They touch no
-    // backend ops, so they are safe to call here. Nonzero -> WouldBlock (lane holds), never
-    // Ok (nothing is actually transmitted/received yet).
-    CHECK(FujiPlatform::hal::realtime_send_nb(&io, 1) == n::NetStatus::WouldBlock);
-    CHECK(FujiPlatform::hal::realtime_send_nb(&io, 16) == n::NetStatus::WouldBlock);
-    CHECK(FujiPlatform::hal::realtime_recv_nb(&io, 1) == n::NetStatus::WouldBlock);
-    CHECK(FujiPlatform::hal::realtime_recv_nb(&io, 16) == n::NetStatus::WouldBlock);
+    // nullptr is also rejected with Closed while inactive (the !active guard precedes the
+    // nullptr check, so no backend op runs).
+    CHECK(FujiPlatform::hal::realtime_send_nb(nullptr, 1) == n::NetStatus::Closed);
+    CHECK(FujiPlatform::hal::realtime_recv_nb(nullptr, 1) == n::NetStatus::Closed);
 
-    // Invalid pointers still rejected.
-    CHECK(FujiPlatform::hal::realtime_send_nb(nullptr, 1) ==
-          n::NetStatus::InvalidArgument);
-    CHECK(FujiPlatform::hal::realtime_recv_nb(nullptr, 1) ==
-          n::NetStatus::InvalidArgument);
-
-    printf("  ON mode send/recv tests passed.\n");
+    printf("  ON mode send/recv (inactive seam) tests passed.\n");
 #else
     printf("  (Skipped: OFF mode; this test requires EDGE_ATARI_FUJINET_REALTIME_NETSTREAM=ON)\n");
 #endif

@@ -7,7 +7,9 @@
 // - ns_recv_byte_packed: packed u16 return (low=data, high=status)
 // - ns_bytes_avail: direct passthrough, returns u16
 // - ns_get_status: direct passthrough, returns u8
-// - ns_init_netstream: declared but deferred (marshaling not yet proven)
+// - init: live via the 4-arg C wrapper edge_ns_init_netstream(host,flags,baud,port_swapped),
+//   which marshals into the handler .bss (edge_ns_init_marshal) then dispatches the raw
+//   hardware path through _edge_ns_init_run(); see the init surface below
 // - ns_begin_stream, ns_end_stream: void operations
 //
 // These are EDGE-owned symbols (edge_ns_* prefix) to avoid collisions.

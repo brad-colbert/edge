@@ -87,7 +87,7 @@ if(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB)
 endif()
 
 option(EDGE_ATARI_FUJINET_REALTIME_NETSTREAM
-       "Enable Atari FujiNet realtime adapter scaffolding (EDGE-owned translated Netstream handler; no external CA65 dependency)"
+       "Enable the Atari FujiNet realtime Netstream adapter (EDGE-owned translated handler; no external CA65 dependency)"
        OFF)
 
 set(EDGE_NETSTREAM_ROOT

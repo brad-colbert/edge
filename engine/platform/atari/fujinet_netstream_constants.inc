@@ -45,13 +45,14 @@
 #define NS_VSERIN     0x020A    // serial input ready vector (vseror/vseroc follow)
 #define NS_VIMIRQ     0x0216    // immediate IRQ vector
 ; cc65 fastcall arg pointer (c_sp) lives at 0x82. It is NOT used by EDGE: the
-; llvm-mos calling convention differs, so NS_InitNetstream arg marshaling is
-; deferred to a later translation stage (init is an inert stub in Stage 9E).
+; llvm-mos calling convention differs, so init arg marshaling is done in C
+; (edge_ns_init_marshal, fujinet_netstream_realtime_abi.h) which writes the staged
+; init inputs below; the raw _ns_init_netstream entry reads them.
 
 ;==========================================================================
 ; SIO
 #define NS_SIOV       0xE459    // SIO vector (DCB-driven I/O)
-; Device Control Block (used by the real init path in a later stage)
+; Device Control Block (used by the real init path)
 #define NS_DDEVIC     0x0300
 #define NS_DUNIT      0x0301
 #define NS_DCOMND     0x0302

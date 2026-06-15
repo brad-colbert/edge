@@ -26,10 +26,12 @@
 ;         serialOutIdle) it writes the first queued byte to SEROUT to kick the output
 ;         IRQ chain, consumes it, and clears serialOutIdle. begin/end are UNTOUCHED
 ;         and SerialOutputIrqHandler is byte-for-byte unchanged.
-; Still INERT / deferred (later stages):
+;   - 9Q: _ns_init_netstream (DCB fill -> SIOV -> DSTATS) + SIO baud selection
+;         (select_baud / BaudTable, AUDF3/AUDF4). Args are marshaled in C into the
+;         staged .bss inputs (see fujinet_netstream_realtime_abi.h).
+; Intentionally absent (not bugs):
 ;   - outBuf consumer-base SMC (EDGE stays index-based; not needed)
-;   - _ns_init_netstream / SIO baud selection (9Q)
-;   - packet framing
+;   - packet framing (engine owns fixed 16-byte boundaries; future work, no wire framing)
 ;
 ; SMC note (Option A, per Stage 9D): the RX pointers inReadPtr (in _ns_recv_byte)
 ; and inPtr (in the test-only producer) are kept as self-modifying absolute

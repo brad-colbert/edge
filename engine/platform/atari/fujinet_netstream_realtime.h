@@ -3,11 +3,12 @@
 
 // platform/atari/fujinet_netstream_realtime.h — Netstream realtime adapter.
 //
-// Stage 9R.1: production LIFECYCLE wiring. The adapter is now an ops-policy template
-// NetstreamRealtimeAdapterT<Ops>; the default alias NetstreamRealtimeAdapter binds the
-// real backend (RealNetstreamOps -> the 9Q.2 ABI). open->init->begin, close->end, active,
-// poll(status), last_error are wired. The byte<->packet DATA PATH (send_nb/recv_nb) is
-// deliberately NOT pumped here (it stays a benign WouldBlock); that lands in Stage 9R.2.
+// Final post-9R status. The adapter is an ops-policy template NetstreamRealtimeAdapterT<Ops>;
+// the default alias NetstreamRealtimeAdapter binds the real backend (RealNetstreamOps -> the
+// 9Q.2 ABI). The full path is wired: LIFECYCLE (open->init->begin, close->end, active,
+// poll(status), last_error) AND the byte<->packet DATA PATH (send_nb/recv_nb — fixed 16-byte
+// all-or-nothing; see below). Validated against fujinet-pc + NetSIO + Altirra + a Docker UDP
+// peer (Mode B). NOT yet validated on physical FujiNet hardware.
 //
 // Why a template: the netstream-ON unit tests build under mos-sim where SIOV / the OS
 // vector-page + POKEY + IRQEN writes in begin cannot execute, and add_engine_test targets
@@ -17,7 +18,8 @@
 //
 // Engine-owned framing: RealtimeLane (engine/net_api.h) + RealtimePacketQueues
 // (engine/net_ring.h) own the RX/TX packet rings and call realtime_send_nb/recv_nb a whole
-// 16-byte packet at a time. The adapter adds NO wire framing.
+// 16-byte packet at a time. The adapter adds NO wire framing (no header, checksum, sequence,
+// or resync); packet boundaries are implicit (every 16 bytes on the stream).
 
 #include "../../types.h"
 #include "../../net_types.h"
@@ -43,9 +45,10 @@ using engine::net::NetStatus;
 //
 // Values match the proven-working upstream reference
 // (fujinet-atari-netstream/examples/udp-sequence/atari_udp_sequence.c: flags 0x26, baud 31250),
-// validated against fujinet-pc + NetSIO in 9R.3. The earlier 0x20 / 19200 (internal TX clock)
-// never transmitted: FujiNet/NetSIO drives an EXTERNAL transmit clock, so TX_EXT (0x04) is required
-// or POKEY never clocks the serial output and the output-ready IRQ never fires.
+// validated against fujinet-pc + NetSIO in 9R.3 (Mode B); NOT yet validated on physical FujiNet
+// hardware. The earlier 0x20 / 19200 (internal TX clock) never transmitted: FujiNet/NetSIO drives
+// an EXTERNAL transmit clock, so TX_EXT (0x04) is required or POKEY never clocks the serial output
+// and the output-ready IRQ never fires.
 //
 // kNetstreamNominalBaud: a BaudTable entry (31250 = row 0x7A12, AUDF3=21).
 // kNetstreamFlags: UDP (bit0=0) + UDP-seq (0x20, the lane is open_udp_seq) + TX external clock
@@ -57,8 +60,8 @@ inline constexpr u8  kNetstreamFlags       = 0x26;
 
 // Host-order remote port -> the byte-swapped value edge_ns_init_netstream() expects in
 // port_swapped (low byte -> DCB DAUX1, high byte -> DAUX2). This is the adapter's single,
-// deterministic conversion. The Mode-A probe used port 0, so whether FujiNet accepts this
-// exact ordering is a Stage 9R.3 Mode-B validation item — but the implementation is fixed.
+// deterministic conversion. Confirmed in 9R.3 Mode B: DAUX1/DAUX2 = 23 28 is decoded by the
+// firmware as port 9000, so this ordering is correct.
 static constexpr u16 to_netstream_port_arg(u16 remote_port) {
     return static_cast<u16>(((remote_port & 0x00ffu) << 8) |
                             ((remote_port & 0xff00u) >> 8));
@@ -102,7 +105,8 @@ struct RealNetstreamOps {
 // ── Ops-policy realtime adapter ─────────────────────────────────────────────────────────
 template <class Ops = RealNetstreamOps>
 struct NetstreamRealtimeAdapterT {
-    // Minimal cached state (≤ 8 bytes; field names are asserted by test_netstream_state_size).
+    // Minimal cached state: currently 5 bytes (bool + NetError{NetStatus u8, i16} + u8);
+    // size audited by test_netstream_state_size.
     struct State {
         bool    active = false;
         NetError last_error{NetStatus::Unsupported, 0};
