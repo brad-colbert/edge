@@ -1573,3 +1573,91 @@ The session send path may stall the frame by 1–3 ms on the frame it is called.
 Game code should send only small control messages on the session lane, not bulk
 data, and should not call session send from frames with tight timing budgets.
 This is the same tradeoff accepted in ADR-016 for polling in general.
+
+---
+
+## ADR-033: FujiNet Netstream Realtime Lane — Wire Policy and Validation Status
+
+**Status:** Accepted
+
+**Context:**
+ADR-032 split the two network lanes and deferred the realtime lane, stating it
+"will use a non-blocking UDP-seq / Netstream path" when "wired in a future stage."
+Stages 9O–9R.3 wired it. This ADR records the final realtime Netstream
+architecture, the concrete Netstream policy the adapter applies, the precise
+validation status reached, and the remaining risks.
+
+The realtime lane (`Game::net.realtime`) carries frame-rate multiplayer state and
+must not stall the frame, so it cannot use the session lane's fujinet-lib/CIO/SIO
+path (ADR-032, ADR-016). It is instead driven by an EDGE-owned Netstream assembly
+handler that moves bytes through POKEY serial I/O via interrupt-driven rings.
+
+**Decision — architecture:**
+- **Dual-lane, separated transports.** The **session lane** (`Game::net.session`)
+  remains fujinet-lib/CIO `N:` TCP, framed, reliable, and may stall a few ms. The
+  **realtime lane** is EDGE-owned Netstream asm — no fujinet-lib, no per-byte
+  CIO/SIOV — feeding interrupt-driven RX/TX rings. The realtime lane must **not**
+  use fujinet-lib.
+- **Adapter policy.** The engine `RealtimeLane` (`engine/net_api.h`) +
+  `RealtimePacketQueues` (`engine/net_ring.h`) own the packet rings and hand the
+  Atari adapter (`fujinet_netstream_realtime.h`) one **fixed 16-byte** packet at a
+  time. TX and RX are **all-or-nothing**: the adapter pre-checks `tx_space()` /
+  `bytes_avail()` and either moves the whole 16-byte unit or returns `WouldBlock`
+  having moved nothing, so a partial transfer can never straddle the implicit
+  packet boundary.
+- **No wire framing.** The adapter adds no header, checksum, sequence number, or
+  resync marker. Packet boundaries are *implicit* (every 16 bytes on the
+  Netstream byte stream).
+- **Public API unchanged.** `Game::net` and the `open_udp_seq` / `send` / `recv` /
+  `poll` surface are exactly as before; the baud/flags/port policy below is
+  internal to the adapter.
+
+**Decision — Netstream policy** (constants in
+`engine/platform/atari/fujinet_netstream_realtime.h`):
+- **Flags `0x26`** = UDP (bit0=0) + UDP-seq (`0x20`) + TX external clock (`0x04`)
+  + register (`0x02`). RX stays internal (`0x08` clear). The PAL bit (`0x10`) is
+  left 0 in the seed and derived from `DetectPAL` — it is not pre-set.
+- **Nominal baud `31250`** (BaudTable row `0x7A12`, AUDF3 = 21).
+- **External TX clock required.** FujiNet/NetSIO drives the transmit clock.
+- **30 RTCLOK-frame settle** (~0.5 s NTSC) after `begin` before the first
+  transmit, so FujiNet/NetSIO can renegotiate the external SIO clock to the
+  Netstream baud.
+- **Port byte order** = host order byte-swapped into the DCB (low byte → DAUX1,
+  high byte → DAUX2). Confirmed: `23 28` is decoded by the firmware as port `9000`.
+
+**Reason for the change from the earlier attempt:**
+The initial configuration used flags `0x20` and baud `19200` on an *internal* TX
+clock and never transmitted. FujiNet/NetSIO drives an *external* transmit clock,
+so `TX_EXT` (`0x04`) is required; without it POKEY never clocks the serial output
+and the output-ready IRQ never fires. Switching to flags `0x26` / baud `31250`
+with the external clock matches the proven upstream reference
+(`fujinet-atari-netstream/examples/udp-sequence/atari_udp_sequence.c`).
+
+**Validation status (precise — do not overclaim):**
+- **mos-sim / static validated** — lifecycle state machine exercised via
+  `FakeOps` under the simulator; CTests 19/19.
+- **Altirra Mode A no-device clean-failure validated** — open with no FujiNet
+  device fails cleanly without hanging or corrupting state.
+- **fujinet-pc + NetSIO + Altirra + Docker UDP peer Mode B validated** — firmware
+  enabled Netstream; flags `0x26`; AUDF3 `21`; baud `31250`; STREAM-OUT `A0..AF`;
+  STREAM-IN `50..5F`; adapter open/active/send/recv/close all passed; the TX IRQ
+  diagnostic showed the handler count advancing and the ring draining; production
+  `.bss` remained 359.
+- **NOT physical FujiNet hardware validated.** All Mode-B evidence is from the
+  emulator/FujiNet-PC stack.
+
+**Risks / future work:**
+- Physical FujiNet hardware validation is pending.
+- The fixed 16-byte boundaries are *implicit*: if bytes are lost on the stream,
+  the receiver desynchronizes and cannot recover on its own (no resync marker).
+- Wire framing / resync / checksum / sequence is separate future work.
+- A real gameplay demo over the realtime lane is still needed; `net_dual_lane_demo`
+  only illustrates the API shape.
+- Physical Atari / SIO timing (clock renegotiation, IRQ latency, bus contention)
+  may differ from the emulator/FujiNet-PC stack; the 30-frame settle and baud
+  policy may need retuning on hardware.
+
+**Relationship to ADR-032:**
+This ADR fulfils the deferral in ADR-032. The `network_write`-on-session-only
+invariant still holds: the realtime lane does not reference `network_write` and
+uses the Netstream asm path exclusively.

@@ -449,7 +449,17 @@ Network I/O is polled once per frame during the main game
 loop (not during the frame service — SIO transactions are too long for
 interrupt context). Capability-gated: games compiled without
 a network axis have no `Game::net` and incur zero cost.
-Implementation status: API designed, implementation deferred.
+
+The transport splits into two lanes (see ADR-032, ADR-033). The **session
+lane** (`Game::net.session`) is framed, reliable TCP over fujinet-lib/CIO and
+may stall a few ms; it is optionally wired to real fujinet-lib at configure
+time. The **realtime lane** (`Game::net.realtime`) is an EDGE-owned FujiNet
+Netstream assembly path (no fujinet-lib, no per-byte CIO) that moves
+**fixed 16-byte packets** through interrupt-driven POKEY serial rings; the
+adapter adds **no wire framing** (boundaries are implicit, every 16 bytes).
+Implementation status: realtime lane wired and validated against the
+fujinet-pc emulator stack (NetSIO + Altirra + Docker UDP peer, Mode B); **not
+yet validated on physical FujiNet hardware**.
 
 ## Data Flow Per Frame
 

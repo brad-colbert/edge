@@ -105,7 +105,13 @@ parameter, not a linear tier progression.
 - SIO bus latency: ~1-3ms per transaction depending on
   payload size
 - Primary target for multiplayer networking
-- Implementation status: API designed, implementation deferred
+- Implementation status (two lanes; see ADR-032, ADR-033):
+  - Session lane (TCP, framed/reliable): optionally wired to fujinet-lib
+    (`-DEDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON`; OFF by default)
+  - Realtime lane (fixed 16-byte packets, no wire framing): wired to an
+    EDGE-owned FujiNet Netstream path; validated against the fujinet-pc
+    emulator stack (NetSIO + Altirra + Docker UDP peer); **not** validated on
+    physical FujiNet hardware
 
 Network is an independent axis like graphics and sound. Games
 compiled without a network axis incur zero cost — the network

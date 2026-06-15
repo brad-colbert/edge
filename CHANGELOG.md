@@ -11,6 +11,21 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
 
 ## [Unreleased]
 
+### Added
+- **FujiNet Netstream realtime lane (`Game::net.realtime`) wired** — the realtime
+  lane is now backed by an EDGE-owned FujiNet Netstream assembly path (no
+  fujinet-lib, no per-byte CIO/SIO), moving bytes through interrupt-driven POKEY
+  serial rings. The engine `RealtimeLane` / `RealtimePacketQueues` hand the Atari
+  adapter one **fixed 16-byte packet** at a time with **all-or-nothing** TX/RX;
+  the adapter adds **no wire framing** (packet boundaries are implicit). Netstream
+  policy: flags `0x26` (UDP + UDP-seq + TX-external-clock + register), nominal baud
+  `31250`, external TX clock, 30 RTCLOK-frame settle after begin, host→swapped port
+  byte order (low→DAUX1, high→DAUX2). The public `Game::net` API is unchanged.
+  Validated **mos-sim/static** (lifecycle via FakeOps; CTests 19/19), **Altirra
+  Mode A no-device clean-failure**, and **fujinet-pc + NetSIO + Altirra + Docker
+  UDP peer (Mode B)**; **not** validated on physical FujiNet hardware. Production
+  `.bss` unchanged at 359 bytes. See ADR-033.
+
 ## [0.5.0] - 2026-06-07
 
 API-cleanup release: Atari-specific names are purged from the generic engine

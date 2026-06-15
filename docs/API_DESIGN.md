@@ -1274,11 +1274,17 @@ documentation).
   counter, current frequency, current volume)
 - Total: `sound_channels * 4` bytes
 
-## Network (Implementation Deferred)
+## Network
 
 Multiplayer networking via Fujinet. Uses a state-sharing model:
 one machine is the authoritative host, clients send input and
-receive state. The API is designed; implementation is deferred.
+receive state. The API is dual-lane (see ADR-032, ADR-033): the
+**session lane** (framed/reliable TCP) is optionally wired to real
+fujinet-lib at configure time, and the **realtime lane** (fixed
+16-byte packets, no wire framing) is wired to an EDGE-owned FujiNet
+Netstream path. The realtime data path is validated against the
+fujinet-pc emulator stack (NetSIO + Altirra + Docker UDP peer);
+it is **not yet validated on physical FujiNet hardware**.
 
 Network is capability-gated. Games compiled without
 `atari::Network::Fujinet` (or equivalent) do not have

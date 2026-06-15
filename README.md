@@ -62,13 +62,20 @@ Networking (`engine/net.h`):
 - **Session lane** (`Game::net.session`) optionally wired to real fujinet-lib TCP transport;
   enable at configure time with `-DEDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON` (OFF by default;
   no external library required for default builds)
-- **Realtime lane** (`Game::net.realtime`) stubbed; FujiNet Netstream / UDP-seq wiring deferred
+- **Realtime lane** (`Game::net.realtime`) wired to the FujiNet Netstream path
+  (EDGE-owned assembly, fixed 16-byte packets, no wire framing). The data path is
+  validated against the fujinet-pc emulator stack (NetSIO + Altirra + Docker UDP
+  peer, Mode B); it is **not yet validated on physical FujiNet hardware** (see
+  `docs/DECISIONS.md` ADR-033)
 - the `net_dual_lane_demo` compiles and demonstrates the intended API shape
 
 Planned or intentionally deferred:
 
 - broader non-Atari backends
-- realtime lane FujiNet Netstream / UDP-seq wiring
+- physical FujiNet hardware validation of the realtime lane
+- realtime-lane wire framing / resync / checksum / sequence (boundaries are
+  currently implicit and cannot recover from lost bytes)
+- a real gameplay demo over the realtime lane
 
 ## Example program shape
 

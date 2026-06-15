@@ -691,10 +691,15 @@ are available.
 >   Enable with `-DEDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON` at configure time
 >   (requires an external fujinet-lib checkout; OFF by default).
 >   When OFF, session methods return `Unsupported`/`WouldBlock` stubs.
-> - **Realtime lane** — stubbed. Every `realtime_*` call returns `WouldBlock`
->   or a no-op. FujiNet Netstream / UDP-seq wiring is deferred.
+> - **Realtime lane** — wired to an EDGE-owned FujiNet Netstream path (fixed
+>   16-byte packets, all-or-nothing TX/RX, **no wire framing**; no fujinet-lib).
+>   The data path is validated against the fujinet-pc emulator stack
+>   (NetSIO + Altirra + Docker UDP peer, Mode B); it is **not yet validated on
+>   physical FujiNet hardware**. Packet boundaries are implicit and cannot
+>   recover from lost bytes. See `docs/DECISIONS.md` ADR-033.
 > - `net_dual_lane_demo` compiles and illustrates the intended flow; it does
->   not perform real network I/O unless the session option is enabled.
+>   not perform real network I/O unless the session option is enabled, and no
+>   real-gameplay realtime demo exists yet.
 >
 > See [PLATFORM_ATARI.md — Networking](./PLATFORM_ATARI.md#networking-on-atari)
 > for CMake options, blocking-risk notes, and the hardware validation checklist.
@@ -831,7 +836,7 @@ See `demo/net_dual_lane/net_dual_lane.cpp` for the full example.
 - backend-specific transport details stay below the platform HAL boundary
 - `session.poll()` never calls `network_write`; no hidden flush in the frame loop
 - `network_write` is called only from the explicit `send` / `send_bytes` path
-- `network_write` is not used by the realtime lane; realtime uses Netstream/UDP-seq (deferred)
+- `network_write` is not used by the realtime lane; realtime uses the EDGE-owned FujiNet Netstream path (ADR-033)
 
 ---
 

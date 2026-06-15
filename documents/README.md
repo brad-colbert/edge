@@ -55,8 +55,11 @@ Currently backend-specific in the public surface because Atari is the first impl
 
 These documents describe the API that is currently implemented in `engine/`, cross-checked against the demo in `demo/` and the unit tests in `tests/`, and informed by the design documents in `docs/`.
 
-Subsystems present only as placeholders today:
+Subsystems with partial backend wiring today:
 
-- `engine/net.h` — the networking *subsystem* is unimplemented. (The `Network` /
-  Fujinet *capability axis* on the Atari platform is real; only the portable net
-  API is still scaffolding.)
+- `engine/net.h` — the dual-lane networking API is implemented. On the Atari
+  platform the **session lane** is optionally wired to fujinet-lib (OFF by
+  default) and the **realtime lane** is wired to an EDGE-owned FujiNet Netstream
+  path, validated against the fujinet-pc emulator stack (NetSIO + Altirra +
+  Docker UDP peer) but **not yet on physical FujiNet hardware**. The `Network` /
+  Fujinet *capability axis* is real; non-Atari net backends remain unimplemented.

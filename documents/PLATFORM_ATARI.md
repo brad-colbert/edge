@@ -448,7 +448,7 @@ using Platform = atari::FullUpgrade;   // XL, U1MB, VBXE<>, PokeyMax, NTSC, Fuji
 | Lane | Backend | Status |
 |---|---|---|
 | `Game::net.session` | fujinet-lib / CIO `N:` TCP client | **Optional** — see below |
-| `Game::net.realtime` | FujiNet Netstream / UDP-seq | Deferred — stubbed |
+| `Game::net.realtime` | EDGE-owned FujiNet Netstream / UDP-seq | **Wired** — emulator-validated; not physical-HW validated |
 
 #### Session lane — optional fujinet-lib wiring
 
@@ -493,15 +493,54 @@ connected-flag check with no hidden flush.
 - session methods return `Unsupported`/`WouldBlock` stubs
 - all existing tests pass without the library
 
-#### Realtime lane — deferred
+#### Realtime lane — FujiNet Netstream
 
-The realtime lane (`Game::net.realtime`) remains **stubbed**. Every
-`realtime_*` HAL method returns `WouldBlock` or a no-op. No FujiNet
-Netstream or UDP-seq wiring is present. Wiring is deferred to a later stage.
+The realtime lane (`Game::net.realtime`) is wired to an **EDGE-owned FujiNet
+Netstream** assembly path — no fujinet-lib, no per-byte CIO/SIO. Bytes move
+through interrupt-driven POKEY serial rings; the engine `RealtimeLane` /
+`RealtimePacketQueues` hand the adapter one **fixed 16-byte packet** at a time
+with **all-or-nothing** TX/RX (it pre-checks ring space and moves a whole packet
+or nothing). The adapter adds **no wire framing** — packet boundaries are
+implicit (every 16 bytes) and cannot recover from lost bytes. The public
+`Game::net` API is unchanged.
 
-#### Hardware / emulator validation checklist (deferred)
+Adapter Netstream policy (internal constants in
+`engine/platform/atari/fujinet_netstream_realtime.h`):
 
-Before relying on the session lane in production, validate against real
+- **flags `0x26`** — UDP + UDP-seq (`0x20`) + TX external clock (`0x04`) +
+  register (`0x02`); RX internal; PAL bit derived from `DetectPAL`, not pre-set
+- **nominal baud `31250`** (BaudTable row `0x7A12`, AUDF3 = 21)
+- **external TX clock required** (FujiNet/NetSIO drives the transmit clock)
+- **30 RTCLOK-frame settle** (~0.5 s NTSC) after `begin` before the first send,
+  for SIO clock renegotiation
+- **port byte order** host→swapped (low → DCB DAUX1, high → DAUX2); confirmed
+  `23 28` decoded by firmware as port `9000`
+
+An earlier attempt used flags `0x20` / baud `19200` on an internal TX clock and
+never transmitted; FujiNet/NetSIO requires the external clock (`TX_EXT`) or POKEY
+never clocks serial output. See `docs/DECISIONS.md` ADR-033.
+
+**Remaining risks / future work:** physical FujiNet hardware validation is
+pending; implicit 16-byte boundaries desync on lost bytes (no resync); wire
+framing / resync / checksum / sequence is separate future work; a real gameplay
+demo over the realtime lane is still needed; physical Atari/SIO timing may differ
+from the emulator/FujiNet-PC stack (settle and baud may need retuning on HW).
+
+#### Hardware / emulator validation checklist
+
+**Realtime lane** — validated against the fujinet-pc emulator stack
+(fujinet-pc firmware + NetSIO hub + Altirra + Docker UDP peer):
+
+- [x] mos-sim / static: lifecycle state machine via FakeOps (CTests 19/19)
+- [x] Altirra Mode A no-device clean failure (open fails cleanly, no hang)
+- [x] fujinet-pc + NetSIO + Altirra + Docker UDP peer (Mode B): firmware enabled
+      Netstream; flags `0x26`; AUDF3 `21`; baud `31250`; STREAM-OUT `A0..AF`;
+      STREAM-IN `50..5F`; open/active/send/recv/close passed; TX IRQ diagnostic
+      showed handler count advancing + ring draining; production `.bss` 359
+- [ ] **physical FujiNet hardware** (open/send/recv/close on a real device)
+- [ ] real gameplay demo over the realtime lane
+
+**Session lane** — before relying on it in production, validate against real
 hardware or an emulator with a FujiNet device:
 
 - [ ] llvm-mos link test with fujinet-lib archive passes
@@ -627,6 +666,6 @@ with `EDGE_NETSTREAM_TEST_HOOKS`) dumps the serial-IRQ counters if the TX path r
 - display layouts still use the Atari mode enum (`atari::Mode`) as the concrete backend token, supplied
   through the `engine::display::traits` seam; a second backend would add its own mode type and traits
 - the first backend is Atari, so some examples necessarily use Atari terminology
-- the Atari FujiNet session lane is optionally wired to fujinet-lib (OFF by default); the realtime lane remains stubbed
+- the Atari FujiNet session lane is optionally wired to fujinet-lib (OFF by default); the realtime lane is wired to the EDGE-owned Netstream path, emulator-validated (fujinet-pc/NetSIO/Altirra/Docker peer) but not yet validated on physical FujiNet hardware
 
 That is expected at this stage of the project. The docs in this folder are organized so the general engine shape stays clear even where the concrete implementation is currently Atari-first.
