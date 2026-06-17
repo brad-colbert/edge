@@ -1500,3 +1500,184 @@ callers are the engine's own demos, this is a one-site update. Future
 callers will find the function where it semantically belongs — in the
 Atari platform headers — rather than on a generic facade that implies
 cross-platform availability.
+
+---
+
+## ADR-032: Session Lane Uses network_write; Realtime Lane Must Not
+
+**Status:** Accepted
+
+**Context:**
+After wiring the FujiNet session lane to fujinet-lib (Stages 8E–8F), the
+engine has two network lanes with different latency and reliability contracts:
+
+- **Session lane** (`Game::net.session`) — TCP/reliable, intended for lobby,
+  login, control messages, and match setup. Occasional multi-millisecond stalls
+  are acceptable here.
+- **Realtime lane** (`Game::net.realtime`) — intended for frame-rate multiplayer
+  state snapshots. Frame stalls are not acceptable here.
+
+The question is: which lane is permitted to call `network_write`, and what
+invariants must hold about hidden flushes?
+
+**Options Considered:**
+
+1. **network_write permitted on both lanes:** Realtime lane also calls
+   `network_write` for frame-rate sends. Problem: `network_write` performs a
+   full CIO/FujiNet SIO transaction and may stall for 1–3 ms. A stall every
+   frame would break the realtime lane's timing contract entirely.
+
+2. **network_write gated behind a compile flag but available on both lanes:**
+   Game code could opt in. Problem: the compile flag is a build-time choice, not
+   a per-call choice. It cannot prevent game code from accidentally calling send
+   on the realtime lane from a timing-critical path.
+
+3. **network_write restricted to session lane; realtime lane uses Netstream/UDP-seq
+   when wired** (chosen): The session adapter is the only site that calls
+   `network_write`. The realtime lane adapter never calls it. When the realtime
+   lane is wired in a future stage, it will use a non-blocking UDP-seq / Netstream
+   path.
+
+**Decision:**
+`network_write` is called only from `FujinetLibSessionAdapter::session_send_nb`.
+No realtime path, no `session_poll`, and no frame-service code calls
+`network_write`. This is enforced by code structure (only the session adapter
+file contains the call) and documented in the blocking-risk comment at the call
+site.
+
+**Rationale:**
+The session lane already accepts occasional multi-ms stalls by design (ADR-016
+discusses SIO latency). The realtime lane must not stall. Keeping `network_write`
+strictly inside `session_send_nb` makes the boundary explicit and auditable
+with a simple grep.
+
+**Blocking-risk note recorded at call site:**
+```
+// NOTE (Stage 8F): network_write may block or perform a full CIO/FujiNet
+// transaction. This call is only safe on the session/control lane where
+// occasional frame stalls are acceptable. Do NOT use this path for
+// realtime traffic; the realtime lane must use Netstream/UDP-seq when
+// that stage is implemented. Avoid large writes during timing-critical
+// frames; prefer small, bounded messages on the session lane.
+```
+
+**Invariants established:**
+- `session.poll()` does **not** call `network_write` (no hidden flush).
+- `network_write` is **not** referenced in any realtime lane file.
+- `network_write` is **not** referenced in VBI or frame-service context.
+- The realtime lane adapter (`fujinet_realtime_*.h`) will use a separate
+  non-blocking symbol when wired in a future stage.
+
+**Tradeoff:**
+The session send path may stall the frame by 1–3 ms on the frame it is called.
+Game code should send only small control messages on the session lane, not bulk
+data, and should not call session send from frames with tight timing budgets.
+This is the same tradeoff accepted in ADR-016 for polling in general.
+
+---
+
+## ADR-033: FujiNet Netstream Realtime Lane — Wire Policy and Validation Status
+
+**Status:** Accepted
+
+**Context:**
+ADR-032 split the two network lanes and deferred the realtime lane, stating it
+"will use a non-blocking UDP-seq / Netstream path" when "wired in a future stage."
+Stages 9O–9R.3 wired it. This ADR records the final realtime Netstream
+architecture, the concrete Netstream policy the adapter applies, the precise
+validation status reached, and the remaining risks.
+
+The realtime lane (`Game::net.realtime`) carries frame-rate multiplayer state and
+must not stall the frame, so it cannot use the session lane's fujinet-lib/CIO/SIO
+path (ADR-032, ADR-016). It is instead driven by an EDGE-owned Netstream assembly
+handler that moves bytes through POKEY serial I/O via interrupt-driven rings.
+
+**Decision — architecture:**
+- **Dual-lane, separated transports.** The **session lane** (`Game::net.session`)
+  remains fujinet-lib/CIO `N:` TCP, framed, reliable, and may stall a few ms. The
+  **realtime lane** is EDGE-owned Netstream asm — no fujinet-lib, no per-byte
+  CIO/SIOV — feeding interrupt-driven RX/TX rings. The realtime lane must **not**
+  use fujinet-lib.
+- **Adapter policy.** The engine `RealtimeLane` (`engine/net_api.h`) +
+  `RealtimePacketQueues` (`engine/net_ring.h`) own the packet rings and hand the
+  Atari adapter (`fujinet_netstream_realtime.h`) one **fixed 16-byte** packet at a
+  time. TX and RX are **all-or-nothing**: the adapter pre-checks `tx_space()` /
+  `bytes_avail()` and either moves the whole 16-byte unit or returns `WouldBlock`
+  having moved nothing, so a partial transfer can never straddle the implicit
+  packet boundary.
+- **No wire framing.** The adapter adds no header, checksum, sequence number, or
+  resync marker. Packet boundaries are *implicit* (every 16 bytes on the
+  Netstream byte stream).
+- **Public API unchanged.** `Game::net` and the `open_udp_seq` / `send` / `recv` /
+  `poll` surface are exactly as before; the baud/flags/port policy below is
+  internal to the adapter.
+
+**Decision — Netstream policy** (constants in
+`engine/platform/atari/fujinet_netstream_realtime.h`):
+- **Flags `0x26`** = UDP (bit0=0) + UDP-seq (`0x20`) + TX external clock (`0x04`)
+  + register (`0x02`). RX stays internal (`0x08` clear). The PAL bit (`0x10`) is
+  left 0 in the seed and derived from `DetectPAL` — it is not pre-set.
+- **Nominal baud `31250`** (BaudTable row `0x7A12`, AUDF3 = 21).
+- **External TX clock required.** FujiNet/NetSIO drives the transmit clock.
+- **30 RTCLOK-frame settle** (~0.5 s NTSC) after `begin` before the first
+  transmit, so FujiNet/NetSIO can renegotiate the external SIO clock to the
+  Netstream baud.
+- **Port byte order** = host order byte-swapped into the DCB (low byte → DAUX1,
+  high byte → DAUX2). Confirmed: `23 28` is decoded by the firmware as port `9000`.
+
+**Reason for the change from the earlier attempt:**
+The initial configuration used flags `0x20` and baud `19200` on an *internal* TX
+clock and never transmitted. FujiNet/NetSIO drives an *external* transmit clock,
+so `TX_EXT` (`0x04`) is required; without it POKEY never clocks the serial output
+and the output-ready IRQ never fires. Switching to flags `0x26` / baud `31250`
+with the external clock matches the proven upstream reference
+(`fujinet-atari-netstream/examples/udp-sequence/atari_udp_sequence.c`).
+
+**Validation status (precise — do not overclaim):**
+- **mos-sim / static validated** — lifecycle state machine exercised via
+  `FakeOps` under the simulator; CTests 19/19.
+- **Altirra Mode A no-device clean-failure validated** — open with no FujiNet
+  device fails cleanly without hanging or corrupting state.
+- **fujinet-pc + NetSIO + Altirra + Docker UDP peer Mode B validated** — firmware
+  enabled Netstream; flags `0x26`; AUDF3 `21`; baud `31250`; STREAM-OUT `A0..AF`;
+  STREAM-IN `50..5F`; adapter open/active/send/recv/close all passed; the TX IRQ
+  diagnostic showed the handler count advancing and the ring draining; production
+  `.bss` remained 359.
+- **NOT physical FujiNet hardware validated.** All Mode-B evidence is from the
+  emulator/FujiNet-PC stack.
+
+**Risks / future work:**
+- Physical FujiNet hardware validation is pending.
+- The fixed 16-byte boundaries are *implicit*: if bytes are lost on the stream,
+  the receiver desynchronizes and cannot recover on its own (no resync marker).
+- Wire framing / resync / checksum / sequence is separate future work.
+- A real gameplay demo over the realtime lane is still needed; `net_dual_lane_demo`
+  only illustrates the API shape.
+- Physical Atari / SIO timing (clock renegotiation, IRQ latency, bus contention)
+  may differ from the emulator/FujiNet-PC stack; the 30-frame settle and baud
+  policy may need retuning on hardware.
+
+**Relationship to ADR-032:**
+This ADR fulfils the deferral in ADR-032. The `network_write`-on-session-only
+invariant still holds: the realtime lane does not reference `network_write` and
+uses the Netstream asm path exclusively.
+
+**Post-9R bring-up notes (Stage 9S.3):**
+- **Unframed byte stream → consumer reassembles.** Netstream (UDP-seq) carries an
+  unframed byte stream; the firmware forwards serial bytes to UDP in arbitrary
+  chunks, so a fixed 16-byte unit may split across datagrams. The "no wire framing"
+  decision above still holds — the *consumer* reassembles 16-byte units (the Atari
+  adapter on its serial RX ring; the host peer mirrors it, resyncing on the `E7 01`
+  marker). There is still no checksum/sequence to recover lost bytes.
+- **TX-clock build-time override (`EDGE_NETSTREAM_FLAGS`).** The validated `0x26`
+  external-TX-clock value is the default. Because real SIO timing may differ from
+  NetSIO (which drives the clock in emulation), `kNetstreamFlags` is overridable at
+  build time; `-DEDGE_NETSTREAM_FLAGS=0x22` clears `TX_EXT` to select an internal/
+  local POKEY-generated TX clock (handler maps `flags & 0x0c == 0x00` → SKCTL `0x30`).
+  This internal-clock path is **experimental and not yet validated on any stack**;
+  the default and the validation status above are unchanged. Plausibly the correct
+  mode on physical hardware, where the device relies on the Atari to clock the line.
+- **Diagnostic demo.** `demo/edge_net_realtime_meter.cpp` (public `Game::net.realtime`
+  only) + `tools/net/edge_realtime_peer.py` exercise and measure the lane on-screen
+  (no H: device), the practical readout path on real hardware. Validation status is
+  unchanged: emulator/FujiNet-PC Mode B only; **not** physical-hardware validated.

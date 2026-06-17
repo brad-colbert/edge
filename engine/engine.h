@@ -21,6 +21,7 @@
 #include "scroll.h"
 #include "tiles.h"
 #include "interrupt.h"
+#include "net.h"
 
 // Integration layer.
 #include "hooks.h"

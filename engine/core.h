@@ -30,6 +30,7 @@
 #include "input.h"
 #include "interrupt.h"
 #include "loop.h"
+#include "net.h"
 #include "screen.h"
 #include "scroll.h"
 #include "sound.h"
@@ -102,6 +103,15 @@ struct ports<P, void_t<decltype(P::capabilities::joystick_ports)>> {
     static constexpr u8 value = P::capabilities::joystick_ports;
 };
 
+template <typename P, typename C, bool Enabled>
+struct net_facet { };
+
+template <typename P, typename C>
+struct net_facet<P, C, true> {
+    using Net = net::NetManager<P, C>;
+    static inline Net net{};
+};
+
 } // namespace cdetail
 
 // ── SpriteCollisionState ────────────────────────────────────────────────
@@ -124,7 +134,8 @@ struct SpriteCollisionState {
 
 // ── Core ────────────────────────────────────────────────────────────────
 template <typename Platform, typename GameConfig>
-class Core {
+class Core : public cdetail::net_facet<Platform, GameConfig,
+                                       engine::caps_of_t<Platform>::has_network> {
 public:
     using screens       = typename GameConfig::screens;
     using InitialScreen = typename cdetail::initial_screen<GameConfig, screens>::type;

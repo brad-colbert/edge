@@ -178,11 +178,21 @@ distinguish platforms with fundamentally different pixel modes.
 
 **Network capabilities:**
 
-- `has_network` — network hardware present
-- `network_transport` — transport type (UDP, TCP, serial)
-- `network_reliable` — whether transport guarantees delivery
-- `network_max_payload` — maximum bytes per send
-- `network_latency_ms` — approximate round-trip latency
+- `has_network` — any network hardware present (true if either lane is enabled)
+- `has_network_realtime` — fixed-packet realtime lane available
+- `has_network_session` — framed byte-stream session lane available
+- `network_realtime_transport` — transport kind for the realtime lane (UDP, TCP, Serial, None)
+- `network_session_transport` — transport kind for the session lane
+- `network_realtime_max_payload` — maximum bytes per realtime send
+- `network_session_max_message` — maximum bytes per session message
+- `network_session_reliable` — whether session transport guarantees delivery
+- `network_latency_ms` — approximate round-trip latency hint
+
+Compatibility aliases (older code paths): `network_transport`, `network_reliable`,
+`network_max_payload`, `network_latency_ms`.
+
+`Network::None` sets all flags false/zero. `Game::net` is compile-time absent on
+these platforms, adding no storage to `Core`. `Network::Fujinet` enables both lanes.
 
 ## Engine Subsystems
 
@@ -439,7 +449,20 @@ Network I/O is polled once per frame during the main game
 loop (not during the frame service — SIO transactions are too long for
 interrupt context). Capability-gated: games compiled without
 a network axis have no `Game::net` and incur zero cost.
-Implementation status: API designed, implementation deferred.
+
+The transport splits into two lanes (see ADR-032, ADR-033). The **session
+lane** (`Game::net.session`) is framed, reliable TCP over fujinet-lib/CIO and
+may stall a few ms; it is optionally wired to real fujinet-lib at configure
+time. The **realtime lane** (`Game::net.realtime`) is an EDGE-owned FujiNet
+Netstream assembly path (no fujinet-lib, no per-byte CIO) that moves
+**fixed 16-byte packets** through interrupt-driven POKEY serial rings; the
+adapter adds **no wire framing** (boundaries are implicit, every 16 bytes, so the
+consumer reassembles units from the byte stream).
+Implementation status: realtime lane wired and validated against the
+fujinet-pc emulator stack (NetSIO + Altirra + Docker UDP peer, Mode B); **not
+yet validated on physical FujiNet hardware**. The `edge_net_realtime_meter` demo
+(public API only) plus the `tools/net/edge_realtime_peer.py` host peer exercise and
+measure the lane end to end.
 
 ## Data Flow Per Frame
 

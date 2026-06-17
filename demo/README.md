@@ -180,6 +180,78 @@ achieved the same with a manual `atari::set_playfield_dma(false)` call.)
 | The background stays intact under the moving sprites | per-frame footprint restore from the master (flicker-free) |
 | The sprites move at full speed (~60 px/s) | pure-overlay layout keeps ANTIC DMA off, freeing the VRAM bus for the blitter |
 
+# Dual-lane network API example (`net_dual_lane_demo.xex`)
+
+A small engine-style sample showing intended use of the dual-lane EDGE network
+surface from game code:
+
+- `Game::net.realtime` for fixed-size realtime packets.
+- `Game::net.session` for reliable framed session/control messages.
+
+It uses a FujiNet-enabled Atari `Platform<..., Network::Fujinet>` and runs the
+frame-loop pattern (`poll` -> drain `recv` -> `send`) for both lanes. The
+current Atari FujiNet HAL seam is intentionally still stubbed; real transport
+wiring is deferred, so this example has no server requirement.
+
+## Build
+
+```sh
+cmake --build build --target net_dual_lane_demo   # -> build/net_dual_lane_demo.xex
+```
+
+# Session lane runtime validation (`fujinet_session_validate.xex`)
+
+A minimal Stage 8H validation tool for the optional fujinet-lib-backed session
+lane. This is intentionally not a gameplay demo.
+
+What it does:
+
+- `Game::net.session.connect_tcp(host, port)`
+- one small send (`"ping"`)
+- bounded `poll()`/`recv()` loop
+- on-screen status codes:
+  - connect result
+  - send result
+  - read result
+  - `last_error.status`
+  - `last_error.detail`
+
+It uses the session lane only (no realtime lane calls).
+
+## Build
+
+```sh
+cmake --build build --target fujinet_session_validate   # -> build/fujinet_session_validate.xex
+```
+
+Built only when all are true:
+
+- `EDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON`
+- valid `EDGE_FUJINETLIB_INCLUDE_DIR` and `EDGE_FUJINETLIB_LIBRARY`
+- Atari/llvm-mos demo path is active (same gating style as other FujiNet demo rules)
+
+## Host / port config
+
+Defaults:
+
+- host: `192.168.1.100`
+- port: `9000`
+
+Override at configure time:
+
+```sh
+cmake -S . -B build \
+  -DEDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON \
+  -DEDGE_FUJINET_VALIDATE_HOST=192.168.1.50 \
+  -DEDGE_FUJINET_VALIDATE_PORT=9000
+```
+
+## Timing note
+
+Session send currently uses fujinet-lib `network_write` under the hood.
+`network_write` may block for a FujiNet/CIO transaction. Keep writes small and
+avoid using this path for timing-critical frame data.
+
 # Arena game demo (`arena_base.xex` / `arena_vbxe.xex`)
 
 A small complete Berzerk-style game (`demo/arena/arena.cpp`): a three-screen flow

@@ -11,6 +11,72 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
 
 ## [Unreleased]
 
+### Added
+- **Realtime networking diagnostic demo (Stage 9S.3)** — a two-ended user-facing
+  diagnostic for the realtime lane, NOT a game and NOT a protocol layer.
+  `demo/edge_net_realtime_meter.cpp` is an Atari client that uses **only** the public
+  `Game::net.realtime` API (open/poll/send/recv/rx_count/rx_dropped/
+  consume_rx_overflowed/last_error) — no session lane, no fujinet-lib, no HAL/internal
+  access. It sends fixed 16-byte `MeterPacket16` units at a steady cadence, drains
+  replies each frame, and renders a text-mode HUD plus custom-charset sparklines for
+  TX/RX sequence, RX count/age, round-trip delay, clock offset, jitter, stale state,
+  and the public RX drop/overflow indicators. Timing uses a four-timestamp
+  (T1/T2/T3/T4) frame/jiffy model with signed 16-bit wrap helpers; milliseconds are
+  shown only as approximate. The Netstream hardware settle is internal to
+  `open_udp_seq()` (blocking), so the demo shows `OPENING / NETSTREAM SETTLE...` then
+  `ACTIVE`/`OPEN FAILED` and never fakes a live settle countdown; an optional
+  `POST-OPEN WARMUP` is labelled as demo-only. `MeterPacket16` is documented as demo
+  diagnostic payload only — not an EDGE wire format. The host peer
+  `tools/net/edge_realtime_peer.py` is generic stdlib-only UDP (no Atari/SIO/POKEY/
+  FujiNet/Netstream transport knowledge): `--mode echo` preserves client fields and
+  stamps T2/T3/peer_seq into exactly 16 bytes; `--mode ticker` streams to an explicit
+  `--target-host/--target-port` or a learned sender; `--tv ntsc|pal` (+ `--hz`
+  override) drives a virtual jiffy clock seeded from the client's first T1.
+  **API gaps recorded:** TX queue depth and internal Netstream flags are not public,
+  so TX health is inferred from `send()`/`poll()` status only and internal flags are
+  not displayed. **Build note:** the demo target links the real Netstream adapter (the
+  two `.S` handlers) only when `EDGE_ATARI_FUJINET_REALTIME_NETSTREAM=ON`; otherwise it
+  links the stub HAL (HUD shows `ACTIVE`/`LAST OK` but performs no SIO). Optional
+  `-DEDGE_NET_PEER_HOST`/`-DEDGE_NET_PEER_PORT` CMake passthrough configures the peer
+  endpoint without editing the source. Validated end-to-end over fujinet-pc + NetSIO +
+  Altirra + a Docker UDP peer (Mode B) on 2026-06-15 — `TX`/`RX`/`GOT` advancing with
+  computed delay (~4 frames/~66 ms), signed offset, RTT, and jitter, and realistic loss
+  on the raw 16-byte path. Not validated on physical FujiNet hardware.
+- **Realtime meter — comms reliability + true throughput measurement.** The meter now
+  quantifies the lossy raw path at both ends, with **no `MeterPacket16` change** (it
+  reuses the `peer_seq` reply counter already in the packet). The host peer reports
+  per-interval (`--stats-interval`, default 1 s) forward-path **packets/s and bytes/s**,
+  **forward loss** by `client_seq` gap analysis, plus **duplicate / reorder / bad**
+  counts, and a cumulative `summary:` line on exit. The Atari HUD gains a
+  `LINK QUALITY (1S)` block: measured `TXHZ`/`RXHZ`, `TXBPS`/`RXBPS`, and loss split
+  three ways — round-trip, **forward** (Atari→peer, `1−Δpeer_seq/Δtx`), and **reverse**
+  (peer→Atari, `1−Δgot/Δpeer_seq`) — over ~1 s RTCLOK windows using the existing `sub16`
+  wrap helper, with a worst/best round-trip-loss range. The peer's forward loss is the
+  authoritative figure; the HUD's directional split is a client-side estimate.
+- **Realtime peer — byte-stream reassembly (correctness fix).** Netstream (UDP-seq) is an
+  unframed byte stream: the firmware forwards serial bytes to UDP in arbitrary chunks, so a
+  16-byte unit may split across datagrams. The peer previously assumed one datagram == one
+  packet and miscounted split units as `bad`/lost (worse at low rates), which looked like a
+  lossy/corrupt link. The peer now reassembles 16-byte units from the stream (matching the
+  Atari adapter's serial-ring reassembly), resyncing on the `E7 01` marker after a
+  lost/reordered datagram and reporting discarded bytes as `resync`. With this, the emulated
+  Mode B forward path measures **0 % loss / 0 corruption**; the only limit is packet *rate*,
+  which is bound by the emulated NetSIO external-clock serial stalling the CPU (a stack
+  characteristic, not loss or EDGE code), not real FujiNet hardware behaviour.
+- **FujiNet Netstream realtime lane (`Game::net.realtime`) wired** — the realtime
+  lane is now backed by an EDGE-owned FujiNet Netstream assembly path (no
+  fujinet-lib, no per-byte CIO/SIO), moving bytes through interrupt-driven POKEY
+  serial rings. The engine `RealtimeLane` / `RealtimePacketQueues` hand the Atari
+  adapter one **fixed 16-byte packet** at a time with **all-or-nothing** TX/RX;
+  the adapter adds **no wire framing** (packet boundaries are implicit). Netstream
+  policy: flags `0x26` (UDP + UDP-seq + TX-external-clock + register), nominal baud
+  `31250`, external TX clock, 30 RTCLOK-frame settle after begin, host→swapped port
+  byte order (low→DAUX1, high→DAUX2). The public `Game::net` API is unchanged.
+  Validated **mos-sim/static** (lifecycle via FakeOps; CTests 19/19), **Altirra
+  Mode A no-device clean-failure**, and **fujinet-pc + NetSIO + Altirra + Docker
+  UDP peer (Mode B)**; **not** validated on physical FujiNet hardware. Production
+  `.bss` unchanged at 359 bytes. See ADR-033.
+
 ## [0.5.0] - 2026-06-07
 
 API-cleanup release: Atari-specific names are purged from the generic engine

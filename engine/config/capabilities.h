@@ -104,10 +104,19 @@ struct Capabilities {
     static constexpr bool has_vbi           = false;
 
     // ── Network ──
-    static constexpr bool             has_network         = false;
-    static constexpr NetworkTransport network_transport   = NetworkTransport::None;
-    static constexpr bool             network_reliable    = false;
-    static constexpr u16              network_max_payload = 0;
+    static constexpr bool             has_network              = false;
+    static constexpr bool             has_network_realtime     = false;
+    static constexpr bool             has_network_session      = false;
+    static constexpr NetworkTransport network_realtime_transport = NetworkTransport::None;
+    static constexpr NetworkTransport network_session_transport  = NetworkTransport::None;
+    static constexpr u16              network_realtime_max_payload = 0;
+    static constexpr u16              network_session_max_message  = 0;
+    static constexpr bool             network_session_reliable     = false;
+
+    // Compatibility aliases kept for older code paths.
+    static constexpr NetworkTransport network_transport   = network_realtime_transport;
+    static constexpr bool             network_reliable    = network_session_reliable;
+    static constexpr u16              network_max_payload = network_realtime_max_payload;
     static constexpr u16              network_latency_ms  = 0;
 };
 

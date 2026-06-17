@@ -21,6 +21,7 @@
 #include "../../types.h"
 #include "display_list.h"
 #include "display_traits.h"
+#include "fujinet.h"
 #include "hal.h"
 #include "vbxe_config.h"
 #include "vbxe_overlay.h"
@@ -63,6 +64,11 @@ template <typename C> struct is_vbxe<gfx::VBXE<C>> { static constexpr bool value
 // in the backend: the generic engine only ever calls the neutral overlay_* seams.
 template <typename G> struct overlay_hal_for            { using type = NullOverlay; };
 template <typename C> struct overlay_hal_for<gfx::VBXE<C>> { using type = OverlayHal<C>; };
+
+// network_hal_for<N>::type — the backend network seam folded into Platform::hal.
+// Network::Fujinet exposes FujinetNetwork stubs; Network::None gets NullNetwork.
+template <Network N> struct network_hal_for { using type = NullNetwork; };
+template <> struct network_hal_for<Network::Fujinet> { using type = FujinetNetwork; };
 
 // Extended (bank-switched) RAM total for each memory axis, in bytes.
 constexpr u32 ext_ram_bytes(RAM r) {
@@ -163,13 +169,25 @@ struct AtariCaps : engine::Capabilities {
     static constexpr bool has_vbi           = true;
 
     // ── Network ──
-    static constexpr bool has_network = (N == Network::Fujinet);
-    static constexpr engine::NetworkTransport network_transport =
-        (N == Network::Fujinet) ? engine::NetworkTransport::UDP
-                                : engine::NetworkTransport::None;
-    static constexpr bool network_reliable    = false;          // UDP best-effort
-    static constexpr u16  network_max_payload = (N == Network::Fujinet) ? 512 : 0;
-    static constexpr u16  network_latency_ms  = (N == Network::Fujinet) ? 2 : 0;
+    static constexpr bool has_network_realtime = (N == Network::Fujinet);
+    static constexpr bool has_network_session  = (N == Network::Fujinet);
+    static constexpr bool has_network = has_network_realtime || has_network_session;
+
+    static constexpr engine::NetworkTransport network_realtime_transport =
+        has_network_realtime ? engine::NetworkTransport::UDP
+                             : engine::NetworkTransport::None;
+    static constexpr engine::NetworkTransport network_session_transport =
+        has_network_session ? engine::NetworkTransport::TCP
+                            : engine::NetworkTransport::None;
+    static constexpr u16  network_realtime_max_payload = has_network_realtime ? 512 : 0;
+    static constexpr u16  network_session_max_message  = has_network_session ? 512 : 0;
+    static constexpr bool network_session_reliable     = has_network_session;
+
+    // Compatibility aliases.
+    static constexpr engine::NetworkTransport network_transport = network_realtime_transport;
+    static constexpr bool network_reliable    = network_session_reliable;
+    static constexpr u16  network_max_payload = network_realtime_max_payload;
+    static constexpr u16  network_latency_ms  = has_network_realtime ? 2 : 0;
 };
 
 // ── Platform type ────────────────────────────────────────────────────
@@ -190,11 +208,12 @@ struct Platform {
 
     using capabilities = AtariCaps<M, R, Gfx, S, Tv, Net>;
 
-    // The HAL the engine talks to: the baseline Atari Hal plus the graphics-axis
-    // overlay seam (OverlayHal<Config> for VBXE, NullOverlay otherwise). Both are
-    // all-static, so multiple inheritance just unifies their static methods under
-    // one Platform::hal:: — existing call sites are unaffected.
-    struct HalBundle : Hal, detail::overlay_hal_for<Gfx>::type {};
+    // The HAL the engine talks to: baseline Atari Hal + graphics overlay seam +
+    // network seam. All are all-static, so multiple inheritance unifies methods
+    // under Platform::hal:: without per-instance state.
+    struct HalBundle : Hal,
+                       detail::overlay_hal_for<Gfx>::type,
+                       detail::network_hal_for<Net>::type {};
     using hal          = HalBundle;
 
     // The backend display-program builder for a portable layout. engine::Screen-

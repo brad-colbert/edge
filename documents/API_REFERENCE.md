@@ -679,11 +679,178 @@ The following public pieces are currently tied to the Atari implementation:
 
 For the full backend-specific guide, see [Atari Platform Guide](./PLATFORM_ATARI.md).
 
+## Network API
+
+EDGE exposes a dual-lane transport API through `Game::net` when the platform
+capability `has_network` is true. On `Network::None` platforms `Game::net` does
+not exist (compile-time absent, zero storage). On `Network::Fujinet` both lanes
+are available.
+
+> **Implementation status:**
+> - **Session lane** — optionally wired to real fujinet-lib TCP transport.
+>   Enable with `-DEDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON` at configure time
+>   (requires an external fujinet-lib checkout; OFF by default).
+>   When OFF, session methods return `Unsupported`/`WouldBlock` stubs.
+> - **Realtime lane** — wired to an EDGE-owned FujiNet Netstream path (fixed
+>   16-byte packets, all-or-nothing TX/RX, **no wire framing**; no fujinet-lib).
+>   The data path is validated against the fujinet-pc emulator stack
+>   (NetSIO + Altirra + Docker UDP peer, Mode B); it is **not yet validated on
+>   physical FujiNet hardware**. Packet boundaries are implicit and cannot
+>   recover from lost bytes. See `docs/DECISIONS.md` ADR-033.
+> - `net_dual_lane_demo` compiles and illustrates the intended flow; it does
+>   not perform real network I/O unless the session option is enabled, and no
+>   real-gameplay realtime demo exists yet.
+>
+> See [PLATFORM_ATARI.md — Networking](./PLATFORM_ATARI.md#networking-on-atari)
+> for CMake options, blocking-risk notes, and the hardware validation checklist.
+
+### Architecture
+
+```
+Game::net.realtime   — fixed-size packet lane (UDP-seq intent)
+Game::net.session    — framed byte-stream lane (TCP intent)
+```
+
+**Realtime lane** (`Game::net.realtime`):
+- intended for frame-rate multiplayer state snapshots
+- fixed 16-byte packets by default (`engine::net::default_realtime_packet_bytes`)
+- RX ring holds up to 8 packets by default; overflow drops oldest, increments `rx_dropped()`
+- TX ring holds 2 packets by default; flushed during `poll()`
+- do not use for critical reliable messages
+
+**Session lane** (`Game::net.session`):
+- intended for lobby, login, chat, match setup, and control/reliable data
+- framed variable-length messages: `kind` (1 byte) + `size` (2 bytes) + payload
+- RX and TX byte rings (256 bytes each by default)
+- maximum message payload 128 bytes by default
+
+Both lanes are **nonblocking** and **explicitly polled** by game code once per
+frame. No network work happens from VBI or frame service context (ADR-016).
+
+### Memory cost (approximate, defaults)
+
+| Configuration | Core net storage |
+|---|---|
+| `Network::None` | 0 bytes |
+| `Network::Fujinet` (both lanes) | ≈ 840–880 bytes |
+
+Realtime packet storage: RX 8 × 16 = 128 bytes, TX 2 × 16 = 32 bytes.
+Session buffers dominate: two 256-byte byte rings plus a 128-byte message store.
+
+### Enabling the network
+
+```cpp
+using Platform = atari::Platform<
+    atari::Machine::XL,
+    atari::RAM::Baseline,
+    atari::gfx::Baseline,
+    atari::Sound::Mono,
+    atari::TV::NTSC,
+    atari::Network::Fujinet   // enables Game::net.realtime and Game::net.session
+>;
+```
+
+With `atari::Network::None` (the default), `Game::net` is not a member of `Game`.
+Accessing it is a compile error.
+
+### Realtime lane API
+
+On `Game::net.realtime`:
+
+```
+open_udp_seq(host, remote_port, local_port = 0) -> NetStatus
+bind_udp_seq(local_port) -> NetStatus
+close()
+active() -> bool
+poll() -> NetStatus
+send(packet) -> NetStatus          // packet must be sizeof == packet_bytes()
+recv(packet) -> bool               // copy-out; returns false if empty
+rx_count() -> u8
+rx_capacity() -> u8
+rx_dropped() -> u16                // cumulative drop counter
+consume_rx_overflowed() -> bool    // sticky flag; clears on read
+last_error() -> NetError
+```
+
+### Session lane API
+
+On `Game::net.session`:
+
+```
+connect_tcp(host, port) -> NetStatus
+close()
+connected() -> bool
+poll() -> NetStatus
+send(message) -> NetStatus         // sizeof(message) must be <= max_message_bytes()
+send_bytes(data, size, kind = 0) -> NetStatus
+recv(SessionMessageView& view) -> bool
+bytes_pending() -> u16
+last_error() -> NetError
+```
+
+`SessionMessageView` fields: `kind` (`u8`), `data` (`const u8*`), `size` (`u16`).
+The view is valid only until the next `poll()`, `recv()`, or session buffer mutation.
+
+### NetStatus values
+
+```
+Ok, WouldBlock, Closed, Overflow, InvalidArgument, BadConfig,
+Unsupported, TransportError
+```
+
+### Example usage
+
+```cpp
+// init
+Game::net.realtime.open_udp_seq("192.168.1.100", 9001);
+Game::net.session.connect_tcp("192.168.1.100", 9000);
+
+// frame loop
+Game::net.realtime.poll();
+engine::net::RealtimePacket16 pkt{};
+while (Game::net.realtime.recv(pkt)) {
+    // apply remote state from pkt.bytes[16]
+}
+engine::net::RealtimePacket16 local{};
+local.bytes[0] = tick++;
+Game::net.realtime.send(local);
+
+Game::net.session.poll();
+engine::net::SessionMessageView msg{};
+while (Game::net.session.recv(msg)) {
+    // handle reliable data from msg.kind / msg.data / msg.size
+}
+static constexpr u8 hello[] = {'h','e','l','l','o'};
+Game::net.session.send_bytes(hello, sizeof(hello), 0);
+```
+
+See `demo/net_dual_lane/net_dual_lane.cpp` for the full example.
+
+For a worked realtime-lane diagnostic that uses **only** this public API (open /
+poll / send / recv / `rx_count` / `rx_dropped` / `consume_rx_overflowed` /
+`last_error`) — an on-screen HUD of TX/RX sequence, RTT, jitter, and measured
+throughput/loss — see `demo/edge_net_realtime_meter.cpp` and its host peer
+[`tools/net/edge_realtime_peer.py`](../tools/net/README.md). Note its
+`MeterPacket16` is a demo diagnostic payload only — **not** an EDGE wire format;
+the realtime lane carries raw fixed 16-byte units with no framing, and the consumer
+reassembles them from the byte stream.
+
+### Design constraints
+
+- no heap allocation, no exceptions, no RTTI, no virtual dispatch
+- fixed-size buffers, compile-time capacity
+- compile-time capability gating: unavailable lanes fail at compile time
+- all network I/O is polled explicitly by game code
+- no network work from VBI or frame service (ADR-016)
+- backend-specific transport details stay below the platform HAL boundary
+- `session.poll()` never calls `network_write`; no hidden flush in the frame loop
+- `network_write` is called only from the explicit `send` / `send_bytes` path
+- `network_write` is not used by the realtime lane; realtime uses the EDGE-owned FujiNet Netstream path (ADR-033)
+
+---
+
 ## Current Limits
 
 1. Call `Game::init()` before using rendering, sound, or loop services.
 2. Treat the frame callback as logical frame work, not direct hardware commit time.
 3. Prefer engine subsystems first and reach for low-level hooks only when needed.
-4. `engine/net.h` is still a placeholder and is not yet usable as a public
-   subsystem. (The `Network`/Fujinet capability axis on the Atari platform exists;
-   only the portable net API is unimplemented.)
