@@ -5,3 +5,4 @@ working_documents/
 .claude/
 *.xex
 .github/
+bin/
