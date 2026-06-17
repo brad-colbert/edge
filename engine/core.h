@@ -392,19 +392,10 @@ public:
         //    after a few minutes of no console/keyboard input).
         Platform::hal::suppress_idle_dim();
 
-        // 0a. Gate raster interrupts off for the duration of this service. The
-        //     deferred frame service rewrites the raster-hook chain state below
-        //     (the raster-hook vector/current_ and the multiplexer's
-        //     mux_index_/mux_table_), and a heavy service (e.g. the 9-sprite
-        //     multiplexer) can still be running when it overruns vertical blank into
-        //     the visible region — where a zone-boundary raster hook would otherwise
-        //     fire mid-rewrite and corrupt the chain (raw raster hooks are not
-        //     re-entrant against the builder). prepare_chain re-arms raster
-        //     interrupts at the end once the chain is consistent, so any boundary
-        //     line the beam has not yet reached still fires this frame; one the
-        //     overrun already passed is simply skipped for the frame (a cosmetic
-        //     seam, not a crash). Backends with no raster hooks just stay disabled.
-        Platform::hal::disable_raster();
+        // (Raster interrupts are gated off only around the chain rewrite in step 6,
+        //  not for the whole service — see the comment there. Disabling for the
+        //  whole service suppressed earlier user raster hooks every frame when the
+        //  service overran into the visible region past that hook's scanline.)
 
         // 1. Input capture.
         u8 joy[kPorts];
@@ -468,6 +459,27 @@ public:
         //    backend needs no zone-boundary raster hooks (no hardware players to
         //    reposition), so the
         //    hook rebuild is baseline-only; prepare_chain still runs for both.
+        //
+        //    Gate raster interrupts off around this rewrite ONLY when the chain
+        //    actually carries raw zone-boundary (multiplex) raster hooks — i.e. the
+        //    multiplexer split sprites across >1 zone this frame, or it did last
+        //    frame and those raw hooks are still live until prepare_chain replaces
+        //    them. Such a raw hook firing mid-rewrite would read an inconsistent
+        //    chain (it is not re-entrant against the builder). prepare_chain re-arms
+        //    at its end.
+        //
+        //    With a single zone (<=4 sprites) or a static-only chain there is no raw
+        //    hook to protect, so we do NOT gate — gating would suppress earlier user
+        //    raster hooks (e.g. a colour split high on the screen) every frame
+        //    whenever the service overruns into the visible region past that hook's
+        //    scanline: the service runs past the scanline while raster interrupts are
+        //    disabled. (That was the atari_hw_test regression — a whole-service
+        //    disable_raster() at the top of frame_service.)
+        const bool gate_raster =
+            !caps::has_blitter &&
+            (sprites.zone_count() > 1 ||
+             interrupts.raster_hook_count() > interrupts.static_raster_hook_count());
+        if (gate_raster) Platform::hal::disable_raster();
         if constexpr (!caps::has_blitter) {
             sprites.build_raster_hooks(interrupts);
         }
