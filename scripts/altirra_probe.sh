@@ -18,7 +18,20 @@
 #     `wineserver -k` (kills the wine prefix without matching "Altirra").
 
 set -u
-ALT_DIR="${ALTIRRA_DIR:-/home/brad/Dropbox/Projects/Atari/Altirra/Altirra-4.50-test4}"
+
+# Altirra install dir: explicit ALTIRRA_DIR wins; otherwise auto-discover the
+# newest Altirra-* under the conventional location (relative to $HOME, no
+# hardcoded username or version). Override with ALTIRRA_DIR=/path/to/Altirra-dir.
+ALT_DIR="${ALTIRRA_DIR:-}"
+if [ -z "$ALT_DIR" ]; then
+    ALT_DIR="$(ls -d "$HOME"/Dropbox/Projects/Atari/Altirra/Altirra-*/ 2>/dev/null \
+               | sort -V | tail -n 1)"
+    ALT_DIR="${ALT_DIR%/}"   # trailing slash from the dirs-only glob
+fi
+if [ -z "$ALT_DIR" ] || [ ! -d "$ALT_DIR" ]; then
+    echo "Altirra dir not found; set ALTIRRA_DIR=/path/to/Altirra-install" >&2
+    exit 2
+fi
 
 XEX="${1:?usage: altirra_probe.sh <probe.xex> [A|B] [extra Altirra flags...]}"
 MODE="${2:-A}"
