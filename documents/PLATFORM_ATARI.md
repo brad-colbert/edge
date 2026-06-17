@@ -654,6 +654,18 @@ scripts/altirra_probe.sh build-test-9p/netstream_adapter_altirra_probe.xex B   #
 ```
 
 It prints the captured bytes (and keeps the last capture at `/tmp/altirra_probe_last.bin`).
+
+For **demos** (which render to the screen instead of self-dumping to H:), the companion
+`scripts/altirra_screenshot.sh <program.xex> [out.png] [seconds]` boots the `.xex` in
+Altirra and captures a PNG of the display (grabbing the emulator window on `DISPLAY=:0`
+via ImageMagick `import`, cropped to the Atari display pane). It uses the same
+`/debug …/debugcmd:g` startup-trap bypass and always tears the emulator down with
+`wineserver -k`, so nothing is left parked in the debugger:
+
+```bash
+scripts/altirra_screenshot.sh build-demo/atari_hw_test.xex /tmp/hw.png   # then view the PNG
+```
+
 Example Mode A output for the adapter probe (page 6 `$0600..$064F`):
 
 ```
