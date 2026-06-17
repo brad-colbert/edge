@@ -108,10 +108,13 @@ parameter, not a linear tier progression.
 - Implementation status (two lanes; see ADR-032, ADR-033):
   - Session lane (TCP, framed/reliable): optionally wired to fujinet-lib
     (`-DEDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON`; OFF by default)
-  - Realtime lane (fixed 16-byte packets, no wire framing): wired to an
-    EDGE-owned FujiNet Netstream path; validated against the fujinet-pc
-    emulator stack (NetSIO + Altirra + Docker UDP peer); **not** validated on
-    physical FujiNet hardware
+  - Realtime lane (fixed 16-byte packets, no wire framing; unframed stream, so
+    the consumer reassembles units): wired to an EDGE-owned FujiNet Netstream
+    path; validated against the fujinet-pc emulator stack (NetSIO + Altirra +
+    Docker UDP peer); **not** validated on physical FujiNet hardware. Exercised by
+    the `edge_net_realtime_meter` demo + `tools/net/edge_realtime_peer.py` peer; a
+    build-time TX-clock override (`EDGE_NETSTREAM_FLAGS`) is available for hardware
+    bring-up (internal-clock value experimental, default external clock unchanged)
 
 Network is an independent axis like graphics and sound. Games
 compiled without a network axis incur zero cost — the network

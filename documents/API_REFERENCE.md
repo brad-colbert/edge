@@ -826,6 +826,15 @@ Game::net.session.send_bytes(hello, sizeof(hello), 0);
 
 See `demo/net_dual_lane/net_dual_lane.cpp` for the full example.
 
+For a worked realtime-lane diagnostic that uses **only** this public API (open /
+poll / send / recv / `rx_count` / `rx_dropped` / `consume_rx_overflowed` /
+`last_error`) — an on-screen HUD of TX/RX sequence, RTT, jitter, and measured
+throughput/loss — see `demo/edge_net_realtime_meter.cpp` and its host peer
+[`tools/net/edge_realtime_peer.py`](../tools/net/README.md). Note its
+`MeterPacket16` is a demo diagnostic payload only — **not** an EDGE wire format;
+the realtime lane carries raw fixed 16-byte units with no framing, and the consumer
+reassembles them from the byte stream.
+
 ### Design constraints
 
 - no heap allocation, no exceptions, no RTTI, no virtual dispatch

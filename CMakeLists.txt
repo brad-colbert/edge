@@ -338,6 +338,26 @@ if(EDGE_BUILD_DEMO)
     set_target_properties(net_dual_lane_demo PROPERTIES OUTPUT_NAME "net_dual_lane_demo.xex")
     target_link_options(net_dual_lane_demo PRIVATE
         "LINKER:--Map=$<TARGET_FILE_DIR:net_dual_lane_demo>/net_dual_lane_demo.map")
+
+    # Realtime networking diagnostic demo (Stage 9S.3; public Game::net.realtime).
+    # Built -O2 (per-frame net path), like the other realtime demos. When netstream
+    # is ON, link the real adapter's .S handlers (the define is already global via
+    # add_compile_definitions above) so Mode B uses real SIO, not the stub HAL.
+    set(NET_RT_METER_SRC demo/edge_net_realtime_meter.cpp)
+    if(EDGE_ATARI_FUJINET_REALTIME_NETSTREAM)
+        list(APPEND NET_RT_METER_SRC
+            engine/platform/atari/fujinet_netstream_realtime_abi.s
+            engine/platform/atari/fujinet_netstream_handler.S)
+    endif()
+    add_executable(edge_net_realtime_meter ${NET_RT_METER_SRC})
+    target_compile_options(edge_net_realtime_meter PRIVATE
+        -std=c++20 -fno-exceptions -fno-rtti -O2 -Wall -Wextra)
+    target_include_directories(edge_net_realtime_meter PRIVATE
+        ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/engine/platform/atari)
+    set_target_properties(edge_net_realtime_meter PROPERTIES
+        OUTPUT_NAME "edge_net_realtime_meter.xex")
+    target_link_options(edge_net_realtime_meter PRIVATE
+        "LINKER:--Map=$<TARGET_FILE_DIR:edge_net_realtime_meter>/edge_net_realtime_meter.map")
     return()
 endif()
 
@@ -831,6 +851,54 @@ if(MOS_ATARI8_CXX)
         COMMENT "Building Atari XEX demo (net_dual_lane_demo.xex)"
         VERBATIM)
     add_custom_target(net_dual_lane_demo DEPENDS ${NET_DUAL_LANE_XEX})
+
+    # ── Realtime networking diagnostic demo (edge_net_realtime_meter.xex) ──
+    #   cmake --build build --target edge_net_realtime_meter
+    # Public Game::net.realtime only; -O2 for the per-frame net/HUD path.
+    #
+    # When EDGE_ATARI_FUJINET_REALTIME_NETSTREAM is ON, link the REAL EDGE-owned
+    # Netstream adapter (define + the two .S handlers + the platform include for the
+    # .inc), exactly like the netstream probes. Without these the realtime HAL is the
+    # stub (open/send return Ok with NO real SIO), so Mode B silently does nothing.
+    # Override the peer endpoint at build time with
+    #   -DEDGE_NET_PEER_HOST='"172.30.0.2"' -DEDGE_NET_PEER_PORT=9000  (see the .cpp).
+    set(NET_RT_METER_XEX ${CMAKE_BINARY_DIR}/edge_net_realtime_meter.xex)
+    set(NET_RT_METER_MAP ${CMAKE_BINARY_DIR}/edge_net_realtime_meter.map)
+    set(NET_RT_METER_NS_ARGS "")
+    set(NET_RT_METER_NS_SRC "")
+    if(EDGE_ATARI_FUJINET_REALTIME_NETSTREAM)
+        set(NET_RT_METER_NS_ARGS -DEDGE_ATARI_FUJINET_REALTIME_NETSTREAM=1
+                                 -I${CMAKE_SOURCE_DIR}/engine/platform/atari)
+        set(NET_RT_METER_NS_SRC
+            ${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_realtime_abi.s
+            ${CMAKE_SOURCE_DIR}/engine/platform/atari/fujinet_netstream_handler.S)
+    endif()
+    # Optional peer-endpoint passthrough (else the .cpp constants apply):
+    #   cmake ... -DEDGE_NET_PEER_HOST=172.30.0.2 -DEDGE_NET_PEER_PORT=9000
+    if(DEFINED EDGE_NET_PEER_HOST)
+        list(APPEND NET_RT_METER_NS_ARGS -DEDGE_NET_PEER_HOST="${EDGE_NET_PEER_HOST}")
+    endif()
+    if(DEFINED EDGE_NET_PEER_PORT)
+        list(APPEND NET_RT_METER_NS_ARGS -DEDGE_NET_PEER_PORT=${EDGE_NET_PEER_PORT})
+    endif()
+    add_custom_command(
+        OUTPUT ${NET_RT_METER_XEX}
+        COMMAND ${MOS_ATARI8_CXX}
+                -std=c++20 -fno-exceptions -fno-rtti -O2 -Wall -Wextra
+                ${NET_RT_METER_NS_ARGS}
+                -I${CMAKE_SOURCE_DIR}
+                ${CMAKE_SOURCE_DIR}/demo/edge_net_realtime_meter.cpp
+                ${NET_RT_METER_NS_SRC}
+                -o ${NET_RT_METER_XEX}
+                -Wl,--Map=${NET_RT_METER_MAP}
+        DEPENDS ${CMAKE_SOURCE_DIR}/demo/edge_net_realtime_meter.cpp
+                ${CMAKE_SOURCE_DIR}/demo/PREPPIEPC_FNT.h
+                ${NET_RT_METER_NS_SRC}
+                ${EDGE_ENGINE_HEADERS}
+        BYPRODUCTS ${NET_RT_METER_MAP}
+        COMMENT "Building Atari XEX demo (edge_net_realtime_meter.xex, netstream=${EDGE_ATARI_FUJINET_REALTIME_NETSTREAM})"
+        VERBATIM)
+    add_custom_target(edge_net_realtime_meter DEPENDS ${NET_RT_METER_XEX})
 else()
-    message(STATUS "mos-atari8-dos-clang++ not found; 'atari_hw_test'/'atari_scroll_test'/'atari_vbxe_bringup'/'net_dual_lane_demo'/'fujinet_session_validate' demo targets unavailable")
+    message(STATUS "mos-atari8-dos-clang++ not found; 'atari_hw_test'/'atari_scroll_test'/'atari_vbxe_bringup'/'net_dual_lane_demo'/'edge_net_realtime_meter'/'fujinet_session_validate' demo targets unavailable")
 endif()

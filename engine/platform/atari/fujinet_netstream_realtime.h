@@ -56,7 +56,16 @@ using engine::net::NetStatus;
 //   seed — ns_init_prepare derives it from DetectPAL; do NOT pre-set it. The handler maps
 //   flags & 0x0c == 0x04 -> SKCTL 0x10 (RX int, TX ext).
 inline constexpr u16 kNetstreamNominalBaud = 31250;
-inline constexpr u8  kNetstreamFlags       = 0x26;
+// Default 0x26 (external TX clock) is the proven-working value. Overridable at build
+// time to experiment with clock modes, e.g. -DEDGE_NETSTREAM_FLAGS=0x22 selects an
+// INTERNAL TX clock (bit 0x04 clear): POKEY self-clocks the serial output instead of
+// waiting for FujiNet/NetSIO to drive each clock edge. The handler configures SKCTL
+// 0x30 (RX int, TX int) for flags&0x0c==0x00. Whether the firmware accepts a
+// POKEY-clocked stream is firmware/NetSIO-dependent.
+#ifndef EDGE_NETSTREAM_FLAGS
+#define EDGE_NETSTREAM_FLAGS 0x26
+#endif
+inline constexpr u8  kNetstreamFlags       = EDGE_NETSTREAM_FLAGS;
 
 // Host-order remote port -> the byte-swapped value edge_ns_init_netstream() expects in
 // port_swapped (low byte -> DCB DAUX1, high byte -> DAUX2). This is the adapter's single,

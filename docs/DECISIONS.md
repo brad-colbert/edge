@@ -1661,3 +1661,23 @@ with the external clock matches the proven upstream reference
 This ADR fulfils the deferral in ADR-032. The `network_write`-on-session-only
 invariant still holds: the realtime lane does not reference `network_write` and
 uses the Netstream asm path exclusively.
+
+**Post-9R bring-up notes (Stage 9S.3):**
+- **Unframed byte stream → consumer reassembles.** Netstream (UDP-seq) carries an
+  unframed byte stream; the firmware forwards serial bytes to UDP in arbitrary
+  chunks, so a fixed 16-byte unit may split across datagrams. The "no wire framing"
+  decision above still holds — the *consumer* reassembles 16-byte units (the Atari
+  adapter on its serial RX ring; the host peer mirrors it, resyncing on the `E7 01`
+  marker). There is still no checksum/sequence to recover lost bytes.
+- **TX-clock build-time override (`EDGE_NETSTREAM_FLAGS`).** The validated `0x26`
+  external-TX-clock value is the default. Because real SIO timing may differ from
+  NetSIO (which drives the clock in emulation), `kNetstreamFlags` is overridable at
+  build time; `-DEDGE_NETSTREAM_FLAGS=0x22` clears `TX_EXT` to select an internal/
+  local POKEY-generated TX clock (handler maps `flags & 0x0c == 0x00` → SKCTL `0x30`).
+  This internal-clock path is **experimental and not yet validated on any stack**;
+  the default and the validation status above are unchanged. Plausibly the correct
+  mode on physical hardware, where the device relies on the Atari to clock the line.
+- **Diagnostic demo.** `demo/edge_net_realtime_meter.cpp` (public `Game::net.realtime`
+  only) + `tools/net/edge_realtime_peer.py` exercise and measure the lane on-screen
+  (no H: device), the practical readout path on real hardware. Validation status is
+  unchanged: emulator/FujiNet-PC Mode B only; **not** physical-hardware validated.

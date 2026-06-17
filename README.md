@@ -63,11 +63,16 @@ Networking (`engine/net.h`):
   enable at configure time with `-DEDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON` (OFF by default;
   no external library required for default builds)
 - **Realtime lane** (`Game::net.realtime`) wired to the FujiNet Netstream path
-  (EDGE-owned assembly, fixed 16-byte packets, no wire framing). The data path is
-  validated against the fujinet-pc emulator stack (NetSIO + Altirra + Docker UDP
-  peer, Mode B); it is **not yet validated on physical FujiNet hardware** (see
-  `docs/DECISIONS.md` ADR-033)
-- the `net_dual_lane_demo` compiles and demonstrates the intended API shape
+  (EDGE-owned assembly, fixed 16-byte packets, no wire framing — the consumer
+  reassembles units from the byte stream). The data path is validated against the
+  fujinet-pc emulator stack (NetSIO + Altirra + Docker UDP peer, Mode B); it is
+  **not yet validated on physical FujiNet hardware** (see `docs/DECISIONS.md` ADR-033)
+- a build-time TX-clock override `EDGE_NETSTREAM_FLAGS` exists for hardware bring-up
+  (default `0x26` external clock = emulator-validated; `0x22` = internal/local POKEY
+  clock, **experimental, not yet validated**)
+- the `net_dual_lane_demo` compiles and demonstrates the intended API shape; the
+  `edge_net_realtime_meter` demo + host peer (`tools/net/edge_realtime_peer.py`)
+  exercise and measure the realtime lane end to end
 
 Planned or intentionally deferred:
 
@@ -109,8 +114,11 @@ For a fuller walkthrough, start with [`/documents/QUICK_START.md`](./documents/Q
 - [`/tests`](./tests) — `mos-sim` unit tests for engine subsystems
 - [`/demo`](./demo) — hardware validation demos: `atari_hw_test`, `atari_scroll_test`,
   the VBXE set (`atari_vbxe_bringup`, `atari_vbxe_gfx`, `atari_vbxe_text`,
-  `atari_vbxe_sprites`), and the Arena game (`arena_base`, plus `arena_vbxe` — the
-  same game rendered entirely through the VBXE overlay)
+  `atari_vbxe_sprites`), the Arena game (`arena_base`, plus `arena_vbxe` — the
+  same game rendered entirely through the VBXE overlay), and the realtime-networking
+  diagnostic `edge_net_realtime_meter` (public `Game::net.realtime` HUD + sparklines)
+- [`/tools/net`](./tools/net) — host-side UDP peer (`edge_realtime_peer.py`) for the
+  realtime networking demo
 - [`/documents`](./documents) — end-user documentation
 - [`/cmake`](./cmake) — toolchain files for simulator and Atari builds
 

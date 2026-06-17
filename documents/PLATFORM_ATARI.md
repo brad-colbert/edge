@@ -504,6 +504,15 @@ or nothing). The adapter adds **no wire framing** — packet boundaries are
 implicit (every 16 bytes) and cannot recover from lost bytes. The public
 `Game::net` API is unchanged.
 
+Netstream (UDP-seq) is an **unframed byte stream**: the firmware forwards serial
+bytes to UDP in whatever chunks they arrive, so a 16-byte unit may split across
+datagrams (or several may share one). Any consumer must **reassemble** fixed
+16-byte units from the byte stream rather than assume one datagram == one packet —
+the Atari adapter does this on its serial RX ring, and the host peer
+(`tools/net/edge_realtime_peer.py`) mirrors it, resyncing on the `E7 01` marker
+after a lost/reordered datagram. There is still no checksum/sequence to recover
+lost bytes.
+
 Adapter Netstream policy (internal constants in
 `engine/platform/atari/fujinet_netstream_realtime.h`):
 
@@ -517,8 +526,25 @@ Adapter Netstream policy (internal constants in
   `23 28` decoded by firmware as port `9000`
 
 An earlier attempt used flags `0x20` / baud `19200` on an internal TX clock and
-never transmitted; FujiNet/NetSIO requires the external clock (`TX_EXT`) or POKEY
-never clocks serial output. See `docs/DECISIONS.md` ADR-033.
+never transmitted; under fujinet-pc + NetSIO the emulated FujiNet drives the
+transmit clock, so the external clock (`TX_EXT`) is required there or POKEY never
+clocks serial output. See `docs/DECISIONS.md` ADR-033.
+
+**TX-clock build-time override (hardware bring-up).** Because real SIO timing may
+differ from the emulator, `kNetstreamFlags` is overridable at build time via
+`-DEDGE_NETSTREAM_FLAGS=<value>`:
+
+- **`0x26`** (default) — external TX clock; the emulator-validated value.
+- **`0x22`** — clears `TX_EXT` (`0x04`), selecting an **internal/local** POKEY-
+  generated TX clock at 31250 baud. The handler already programs this case
+  (`flags & 0x0c == 0x00` → SKCTL `0x30`, RX int + TX int). This is **experimental
+  and not yet validated on any stack** (it is the *more* plausible mode on real
+  hardware, where the device relies on the Atari to clock the line, unlike NetSIO).
+
+This is not the old failed config: the register bit, 31250 baud, the settle, and
+the confirmed port byte order all remain. Example:
+`cmake --build build-ns --target edge_net_realtime_meter` after configuring with
+`-DEDGE_NETSTREAM_FLAGS=0x22` (or pass it directly to the demo compile).
 
 **Remaining risks / future work:** physical FujiNet hardware validation is
 pending; implicit 16-byte boundaries desync on lost bytes (no resync); wire
@@ -550,6 +576,47 @@ hardware or an emulator with a FujiNet device:
 - [ ] Measure whether `network_write` blocks noticeably (expected: 1–3 ms)
 - [ ] Verify behavior when the server closes the connection
 - [ ] Verify error codes from a failed host/port (unreachable host)
+
+#### Realtime diagnostic demo + host peer
+
+`demo/edge_net_realtime_meter.cpp` is a user-facing diagnostic for the realtime
+lane (not a game, not a protocol layer). It uses **only** the public
+`Game::net.realtime` API and renders a text-mode HUD plus custom-charset
+sparklines for TX/RX sequence, RX count/age, round-trip delay, clock offset,
+jitter, stale state, the public drop/overflow indicators, and a `LINK QUALITY (1S)`
+block (measured TX/RX packets-per-second and bytes-per-second, plus round-trip /
+forward / reverse loss). Because the HUD is on-screen, it needs no H: host device —
+it is the practical way to read realtime-lane results **on real hardware**.
+
+It pairs with `tools/net/edge_realtime_peer.py`, a generic stdlib-only UDP peer
+(it knows nothing about Atari/SIO/POKEY/FujiNet/Netstream): `--mode echo` stamps
+`T2/T3/peer_seq` and replies once per 16-byte unit; `--mode ticker` streams to a
+target; `--stats-interval` reports authoritative forward-path packets/s, bytes/s,
+and loss; `--tv ntsc|pal` drives a virtual jiffy clock. It performs the byte-stream
+reassembly described above. See [`tools/net/README.md`](../tools/net/README.md) for
+the full peer reference, the reliability/throughput readouts, and the end-to-end
+Mode B recipe.
+
+Build and run:
+
+```sh
+# Build with the REAL Netstream adapter (else the HAL is a stub: HUD shows ACTIVE
+# but no SIO happens). Peer endpoint comes from the .cpp constants, or override:
+cmake --build build-ns --target edge_net_realtime_meter      # peer from source
+#   …configured with -DEDGE_ATARI_FUJINET_REALTIME_NETSTREAM=ON
+#   optional: -DEDGE_NET_PEER_HOST=192.168.1.50 -DEDGE_NET_PEER_PORT=9000
+#   optional: -DEDGE_NETSTREAM_FLAGS=0x22   (experimental internal TX clock)
+
+# Host peer (must be a DISTINCT IP from the Atari/FujiNet — the firmware binds
+# 0.0.0.0:port and also sends to host:port, so a same-host peer self-loops):
+python3 tools/net/edge_realtime_peer.py --mode echo --tv ntsc
+```
+
+Validated end-to-end over fujinet-pc + NetSIO + Altirra + a Docker UDP peer
+(Mode B): after reassembly the forward path measures 0% loss / 0 corruption; the
+packet *rate* is capped by the emulated NetSIO external clock stalling the CPU (an
+emulation-stack characteristic, not loss or EDGE code, and not real-hardware
+behaviour). **Not** validated on physical FujiNet hardware.
 
 ### Usage pattern
 
