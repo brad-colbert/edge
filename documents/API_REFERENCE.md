@@ -68,9 +68,9 @@ using Game = engine::Core<Platform, GameConfig>;
 ### Core Initialization
 
 - `Game::init()`
-- `Game::init(charset)`
+- `Game::init(tileset)`
 
-`Game::init(charset)` loads the provided charset into engine-managed charset RAM before starting the backend services.
+`Game::init(tileset)` copies the provided tileset into engine-managed character-set RAM and binds the character-set base to it before starting the backend services.
 
 ### Main Loop
 
@@ -490,33 +490,43 @@ the `ScrollRegion` declaration; games do not call them directly.
 
 ## Tiles API
 
+Terminology: a **tile** is one character-sized visual element; a **tile code**
+is the byte stored in a **map cell** that selects a tile from the active
+**tileset**; a **tile map** is a row-major grid of map cells; the **viewport**
+is the moving visible window. See ARCHITECTURE.md "Tile terminology".
+
 ### Asset Builders
 
 ```cpp
-constexpr auto charset = engine::make_charset(data_array);
-constexpr auto map = engine::make_map<Width, Height>(tile_indices);
+constexpr auto tileset = engine::make_tileset(data_array);   // TilesetData
+constexpr auto map = engine::make_map<Width, Height>(tile_codes);
 ```
 
 ### TileMap API
 
-- `tile_at(col, row)`
-- `set_tile(col, row, tile)`
+A `TileMap` owns its own row-major grid of map cells (one tile code each):
 
-### Tile Manager API
+- `tile_at(col, row)` — read the tile code stored in a map cell
+- `set_tile(col, row, tile_code)` — store a tile code (RAM-resident maps only)
 
-On `Game::tiles`:
+### TileDisplay API
 
-- `init_charset(charset, dest)`
-- `bind_charset_page(page)`
+On `Game::tiles` (type `engine::TileDisplay`):
+
+- `init_charset(tileset, dest)` — copy a tileset into character-set RAM
+- `bind_charset_page(page)` — point the character-set base at it
 - `set_viewport(x, y)`
 - `viewport_x()`
 - `viewport_y()`
 
 General contract:
 
-- charset and tilemap assets are plain compile-time data objects
-- the tile manager coordinates charset load and viewport state
-- map ownership remains with the game or asset data, not the manager
+- tileset and tile-map assets are plain compile-time data objects
+- `TileDisplay` coordinates tileset load (into charset RAM), the charset-page
+  binding, and viewport state
+- map ownership remains with the game or asset data, not `TileDisplay`, which
+  performs no map-cell lookup
+- map *chunk* loading/residency is out of scope (not implemented)
 
 ## Interrupt API
 

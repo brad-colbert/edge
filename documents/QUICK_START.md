@@ -24,7 +24,7 @@ In normal gameplay code, these are the main concepts you work with regardless of
 - `engine::Input`
 - `engine::SlotPool` and `engine::PackedPool`
 - `engine::make_sprite`, `engine::make_pixel_sprite`, `engine::make_sound`,
-  `engine::make_charset`, `engine::make_map`
+  `engine::make_tileset`, `engine::make_map`
 - `engine::audio::Waveform` (note timbre portably; the backend maps it to its sound hardware)
 - `Game::run`, `Game::run_until`, `Game::set_screen`
 - `Game::sound`, `Game::scroll`, `Game::tiles`, `Game::interrupts`, `Game::gfx()`
@@ -172,7 +172,7 @@ After the minimal example works, the usual next steps are:
 
 1. Add object pools for entities with `engine::SlotPool` or `engine::PackedPool`.
 2. Split the program into screens and transition with `Game::set_screen<ScreenType>(callback)`.
-3. Add tile and charset assets with `engine::make_charset` and `engine::make_map`.
+3. Add tileset and tile-map assets with `engine::make_tileset` and `engine::make_map`.
 4. Use `Game::sprite_collisions()` and multiplex queries if your game uses many sprites.
 5. Add raster or frame hooks only after the basic game loop is stable.
 

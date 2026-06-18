@@ -1,20 +1,21 @@
 // demo/atari_scroll_test.cpp — Edge engine ANTIC hardware-scroll validation demo.
 //
 // A minimal Atari program that exercises the engine's hardware scroll path and
-// the Tile infrastructure, producing a loadable .xex (build with the
+// the Tiles subsystem, producing a loadable .xex (build with the
 // mos-atari8-dos target; see CMakeLists.txt). It is the scroll counterpart to
 // atari_hw_test.cpp and is meant to be run on Altirra / Fujisan as a visual
 // confirmation that per-line-LMS scrolling works on real silicon:
 //
 //   Top 2 rows : fixed HUD — live scroll X, Y and a frame counter (does NOT
 //                scroll, so the coordinates stay readable).
-//   Below      : a 22-row Mode-2 window onto a 64x32 tilemap. Joystick scrolls
-//                the window through the map; the engine splits the position into
-//                fine (HSCROL/VSCROL) and coarse (per-line LMS) automatically.
+//   Below      : a 22-row Mode-2 window (the viewport) onto a 64x32 tile map.
+//                Joystick scrolls the viewport through the map; the engine splits
+//                the position into fine (HSCROL/VSCROL) and coarse (per-line LMS)
+//                automatically.
 //
-// The map is an engine::TileMap<64,32> in RAM (a tile index is the ANTIC screen
-// code in Mode 2, so the map serves directly as scroll screen memory). It is
-// filled with a coordinate grid so any scroll glitch is obvious: the left two
+// The map is an engine::TileMap<64,32> in RAM (a tile code is the ANTIC screen
+// code in Mode 2, so the map's cells serve directly as scroll screen memory). It
+// is filled with a coordinate grid so any scroll glitch is obvious: the left two
 // columns are the row number, every 4th column carries a column-number marker,
 // and the rest is a checkerboard texture.
 //

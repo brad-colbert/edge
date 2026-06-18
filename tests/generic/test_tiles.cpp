@@ -3,7 +3,7 @@
 // Built for the llvm-mos `mos-sim` platform and run under `mos-sim`; main()'s
 // return value becomes the process exit code (0 = pass) for CTest.
 //
-// Everything here is platform-independent: the TileMap/CharsetData assets are
+// Everything here is platform-independent: the TileMap/TilesetData assets are
 // pure data, and the one hardware touch (bind_charset_page) is driven through a MOCK
 // HAL that records the charset-base write, so no real backend is needed. The live
 // charset-base write in the Atari HAL is verified separately on Altirra/Fujisan.
@@ -16,11 +16,11 @@
 using engine::u8;
 using engine::u16;
 
-using engine::CharsetData;
+using engine::TilesetData;
 using engine::Charset1K;
 using engine::Charset512;
-using engine::TileManager;
-using engine::make_charset;
+using engine::TileDisplay;
+using engine::make_tileset;
 using engine::make_map;
 
 // ── Mock platform ─────────────────────────────────────────────────────
@@ -69,7 +69,7 @@ struct RampMap {
     }
 };
 
-// ── TileMap reads ───────────────────────────────────────────────────────
+// ── TileMap reads: tile_at returns the stored tile code ────────────────────
 
 static void test_tile_at() {
     constexpr RampMap<16, 8> ramp;
@@ -82,23 +82,23 @@ static void test_tile_at() {
     CHECK(map.tile_at(5, 3) == 53);     // 3*16 + 5
 }
 
-// ── set_tile round-trips, leaves neighbors alone ───────────────────────
+// ── set_tile writes a tile code, leaves neighbor cells alone ───────────────
 
 static void test_set_tile() {
     RampMap<16, 8> ramp;                     // mutable RAM map
     auto map = make_map<16, 8>(ramp.data);
 
     CHECK(map.tile_at(5, 3) == 53);
-    map.set_tile(5, 3, 200);
+    map.set_tile(5, 3, 200);                  // store tile code 200
     CHECK(map.tile_at(5, 3) == 200);         // change reads back
-    CHECK(map.tile_at(4, 3) == 52);          // neighbor untouched
+    CHECK(map.tile_at(4, 3) == 52);          // neighbor cell untouched
     CHECK(map.tile_at(6, 3) == 54);
 }
 
-// ── make_charset: size + data accessible ───────────────────────────────
+// ── make_tileset: size + data accessible ───────────────────────────────
 
-static void test_make_charset() {
-    // 1024-byte charset where byte i holds i & 0xFF.
+static void test_make_tileset() {
+    // 1024-byte tileset where byte i holds i & 0xFF.
     struct Ramp {
         u8 data[1024];
         constexpr Ramp() : data{} {
@@ -106,27 +106,30 @@ static void test_make_charset() {
         }
     };
     constexpr Ramp ramp;
-    constexpr auto cs = make_charset(ramp.data);
+    constexpr auto ts = make_tileset(ramp.data);
 
-    CHECK(cs.size == 1024);
-    CHECK(cs.data[0] == 0);
-    CHECK(cs.data[255] == 255);
-    CHECK(cs.data[256] == 0);                // wrapped (256 & 0xFF)
-    CHECK(cs.data[1023] == static_cast<u8>(1023));
+    CHECK(ts.size == 1024);
+    CHECK(ts.data[0] == 0);
+    CHECK(ts.data[255] == 255);
+    CHECK(ts.data[256] == 0);                // wrapped (256 & 0xFF)
+    CHECK(ts.data[1023] == static_cast<u8>(1023));
 }
 
-// ── CharsetData sizes are fixed at compile time ────────────────────────
+// ── TilesetData sizes are fixed at compile time ────────────────────────
 
-static_assert(sizeof(CharsetData<1024>) == 1024, "1K charset is 1024 bytes");
-static_assert(sizeof(CharsetData<512>) == 512,   "512-byte charset is 512 bytes");
+static_assert(sizeof(TilesetData<1024>) == 1024, "1K tileset is 1024 bytes");
+static_assert(sizeof(TilesetData<512>) == 512,   "512-byte tileset is 512 bytes");
 static_assert(Charset1K::size == 1024, "Charset1K is 1024 bytes");
 static_assert(Charset512::size == 512,  "Charset512 is 512 bytes");
 
-// ── TileManager: init_charset copies, bind_charset_page writes, viewport stores ─
+// ── TileDisplay: init_charset copies, bind_charset_page writes, viewport stores ─
+//
+// Also confirms the coordinator owns no map: it exposes only tileset-load,
+// charset-page binding, and viewport state — no tile-map storage or lookup.
 
-static void test_tile_manager() {
+static void test_tile_display() {
     MockHal::reset();
-    TileManager<MockPlatform> tiles;
+    TileDisplay<MockPlatform> tiles;
 
     // init_charset copies exactly ::size bytes into the destination buffer.
     struct Ramp {
@@ -136,7 +139,7 @@ static void test_tile_manager() {
         }
     };
     constexpr Ramp ramp;
-    constexpr auto cs = make_charset(ramp.data);   // CharsetData<512>
+    constexpr auto cs = make_tileset(ramp.data);   // TilesetData<512>
 
     u8 dest[512];
     for (u16 i = 0; i < 512; ++i) dest[i] = 0;
@@ -151,7 +154,8 @@ static void test_tile_manager() {
     CHECK(MockHal::chbase == 0x9C);
     CHECK(MockHal::chbase_writes == 1);
 
-    // set_viewport stores the position for later tilemap lookups.
+    // set_viewport stores the viewport position (plain state; the coordinator
+    // does not use it to index any map).
     CHECK(tiles.viewport_x() == 0);
     CHECK(tiles.viewport_y() == 0);
     tiles.set_viewport(40, 17);
@@ -162,8 +166,8 @@ static void test_tile_manager() {
 int main() {
     test_tile_at();
     test_set_tile();
-    test_make_charset();
-    test_tile_manager();
+    test_make_tileset();
+    test_tile_display();
 
     if (g_failures == 0) {
         printf("ALL TESTS PASSED\n");

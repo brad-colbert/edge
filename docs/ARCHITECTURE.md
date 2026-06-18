@@ -416,11 +416,52 @@ Missiles are not multiplexed in the initial implementation
 (see ADR-025). The 4 hardware missiles are available directly.
 ZoneInfo reserves space for future missile multiplexing.
 
-**Tiles** — manages character-mode or map-mode backgrounds.
-Owns tileset loading (into character set RAM), tilemap storage,
-and viewport management. Works with Scroll for scrolling
-backgrounds. Operations are scoped to TextRegion types in
-mixed displays.
+**Tiles** — supports character-mode or map-mode backgrounds. It
+has three independent parts: a *tileset* asset (`TilesetData`, the
+tile bitmap definitions, ROM-resident); a *tile map* (`TileMap`, a
+row-major grid of map cells holding one tile code each, owned by the
+game in ROM or RAM); and the *`TileDisplay`* coordinator, which
+copies a tileset into character-set RAM, binds the character-set
+base, and tracks the viewport position. `TileDisplay` owns no map
+data and performs no map-cell lookup — the game reads the map via
+`TileMap::tile_at()`. Works with Scroll for scrolling backgrounds.
+Operations are scoped to TextRegion types in mixed displays. Map
+*chunk* loading/residency is not part of this subsystem.
+
+#### Tile terminology
+
+These terms are used consistently across the engine, documentation,
+demos, and tests (see ADR-034 in [DECISIONS.md](DECISIONS.md)):
+
+- **Glyph** — one bitmap pattern used to render a character-sized
+  element. On Atari ANTIC character modes a glyph is normally an
+  8-byte character definition.
+- **Tileset** — a collection of graphical tile definitions
+  (`TilesetData`). The platform representation in ANTIC character
+  modes is a *character set* / *charset*.
+- **Charset** — used for operations and storage tied specifically to
+  character-set RAM or the character-base hardware (e.g.
+  `init_charset`, `bind_charset_page`, `Charset1K`).
+- **Tile** — one character-sized visual element that may be placed in
+  a tile map (nominally 8×8 for ANTIC 4).
+- **Tile code** — the stored byte that selects a tile from the active
+  tileset (for ANTIC 4 it may also encode colour behaviour).
+- **Map cell** — one location in a tile map. A map cell holds one
+  tile code; the rendered result is a tile.
+- **Tile map** — a row-major 2D grid of map cells (`TileMap`). May
+  reside in ROM (constexpr) or RAM.
+- **Map chunk** — a fixed rectangular subdivision of a tile map used
+  as an asset-loading / management unit (e.g. 40×24 cells). Reserved
+  for future functionality (`MapChunk`, `ChunkGrid`, `ChunkLoader`,
+  `ChunkManager`, `ChunkCache`); **not implemented** today.
+- **Chunk grid** — the arrangement of map chunks over a tile map
+  (future).
+- **Viewport** — the moving visible window into a tile map,
+  independent of map-chunk boundaries; may overlap several chunks.
+- **Playfield** — the complete tile-mapped gameplay area (use
+  *world* for gameplay coordinates).
+- **Screen** — a display configuration or game screen (`ScreenSet`,
+  `set_screen`). Not used as the name of a stored map chunk.
 
 **Scroll** — manages hardware fine and coarse scrolling. The
 `ScrollManager` is portable: it owns the viewport position and
@@ -763,7 +804,7 @@ engine/
 ├── input.h             # Input snapshot and edge detection
 ├── sound.h             # Sound subsystem (portable interface)
 ├── sprites.h           # Logical sprite management
-├── tiles.h             # Tileset and tilemap management
+├── tiles.h             # Tileset asset, tile map, and TileDisplay
 ├── scroll.h            # Scroll management
 ├── screen.h            # Screen manager, set_screen, ScreenSet
 ├── display.h           # DisplayLayout, TextRegion, BitmapRegion

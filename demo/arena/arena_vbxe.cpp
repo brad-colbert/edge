@@ -107,7 +107,7 @@ static constexpr u8 kPlayTopY  = kTopMargin + kCellH; // overlay y of play-area 
 static constexpr u8 kPlayerColor = 0x0F;
 static constexpr u8 kEnemyColor  = 0x34;
 
-// Tile index at a sprite coordinate within the play area, or kNoTile if outside.
+// Tile code at a sprite coordinate within the play area, or kNoTile if outside.
 static u8 tile_at(u8 sprite_x, u8 sprite_y) {
     if (sprite_x < kPlayLeftX || sprite_y < kPlayTopY) return kNoTile;
     const u8 col = static_cast<u8>((sprite_x - kPlayLeftX) / kCellW);

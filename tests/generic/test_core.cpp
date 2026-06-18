@@ -200,11 +200,11 @@ static void test_init() {
     CHECK(MockHal::frame_handler == &Game::frame_service);
 }
 
-// init(charset) additionally loads the char set and binds the charset base to it.
+// init(tileset) additionally loads the tileset and binds the charset base to it.
 static void test_init_charset() {
     MockHal::reset();
     static const u8 cs_bytes[8] = {1, 2, 3, 4, 5, 6, 7, 8};
-    auto cs = engine::make_charset(cs_bytes);
+    auto cs = engine::make_tileset(cs_bytes);
     Game::init(cs);
     CHECK(MockHal::charset_writes == 1);
     CHECK(MockHal::frame_handler == &Game::frame_service);

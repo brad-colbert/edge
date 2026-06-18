@@ -120,7 +120,7 @@ static constexpr u8 kCellH     = 8;              // Mode 4 row height in scanlin
 
 static constexpr u8 kPlayerColor = 0x0F;         // white — stands out over the play palette
 
-// Tile index at a sprite coordinate within the play area, or kNoTile if outside.
+// Tile code at a sprite coordinate within the play area, or kNoTile if outside.
 static u8 tile_at(u8 sprite_x, u8 sprite_y) {
     if (sprite_x < kPlayLeftX || sprite_y < kPlayTopY) return kNoTile;
     const u8 col = static_cast<u8>((sprite_x - kPlayLeftX) / kCellW);
@@ -334,7 +334,7 @@ EDGE_COLD static void play_enter() {
         for (u8 x = 0; x < 40; ++x)
             play.put_char(x, y, kRoom.t[y][x]);
 
-    // HUD: score label, level readout, and three life hearts (raw tile index 0x05).
+    // HUD: score label, level readout, and three life hearts (raw tile code 0x05).
     hud.print(0, 0, "SCORE: 00000");
     hud.print(kHudLevelCol, 0, "LV:01");
     hud.put_char(36, 0, 0x05);

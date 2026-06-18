@@ -53,7 +53,7 @@ using Game = engine::Core<Platform, GameConfig>;
 
 // ── Assets (constexpr, ROM-resident) ────────────────
 
-constexpr auto tileset = Game::make_charset({
+constexpr auto tileset = engine::make_tileset({
     // tile definitions...
 });
 
@@ -544,8 +544,12 @@ This single call:
 ```cpp
 Game::set_screen<GameplayScreen>([]() {
     // Runs after display is configured but before
-    // first frame renders
-    Game::init_charset(gameplay_tileset);
+    // first frame renders.
+    // Load this screen's tileset into a game-held, page-aligned
+    // character-set buffer, then point the character-set base at it.
+    // (init_charset/bind_charset_page are methods on Game::tiles.)
+    Game::tiles.init_charset(gameplay_tileset, charset_dest);
+    Game::tiles.bind_charset_page(charset_page);
     draw_initial_level();
     init_player();
 });
@@ -1538,8 +1542,8 @@ requires explicit region scoping to avoid ambiguity.
 Character sets apply to text regions:
 
 ```cpp
-constexpr auto tileset = Game::make_charset({
-    // 128 characters, 8 bytes each
+constexpr auto tileset = engine::make_tileset({
+    // 128 tiles, 8 bytes each
 });
 
 Game::init(tileset);
@@ -1556,20 +1560,24 @@ Game::interrupts.add_raster_hook(status_end_scanline, [](auto& ctx) {
 });
 ```
 
-### Tilemap (Scrolling Text/Character Games)
+### Tile map (Scrolling Text/Character Games)
 
 ```cpp
-constexpr auto level_map = Game::make_map<128, 32>({
-    // tile indices
+constexpr auto level_map = engine::make_map<128, 32>({
+    // tile codes, row-major
 });
 
 Game::tiles.set_viewport(scroll_x, scroll_y);
 ```
 
-A `TileMap` also serves as the source for a hardware-scrolling region (see
-[Scroll](#scroll)): bind it with `Game::scroll_map(map)` and the frame service
-keeps `tiles.set_viewport()` in sync with the scroll position automatically — you
-only call `set_viewport()` yourself for standalone tilemap lookups.
+A `TileMap` owns its own row-major grid of map cells (one tile code per cell)
+and reads them via `level_map.tile_at(col, row)`. It also serves as the source
+for a hardware-scrolling region (see [Scroll](#scroll)): bind it with
+`Game::scroll_map(map)` and the frame service keeps the `Game::tiles`
+(`TileDisplay`) viewport in sync with the scroll position automatically. You only
+call `set_viewport()` yourself when driving the viewport without the Scroll
+subsystem; `TileDisplay` stores it as plain state and performs no map lookup of
+its own.
 
 ## Scroll
 

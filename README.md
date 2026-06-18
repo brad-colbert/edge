@@ -42,7 +42,7 @@ Implemented today:
 - input snapshot model
 - sprite and missile management (P/M-style and full-colour pixel sprites)
 - sound effect playback
-- tile and charset helpers
+- tileset and tile-map helpers
 - hardware scrolling (`engine::ScrollRegion` + `Game::scroll_map`)
 - portable bitmap drawing via `Game::gfx()` (`engine/gfx.h`), blitter-accelerated
   on capable platforms and software-rendered on baseline

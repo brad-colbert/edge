@@ -77,6 +77,33 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
   UDP peer (Mode B)**; **not** validated on physical FujiNet hardware. Production
   `.bss` unchanged at 359 bytes. See ADR-033.
 
+### Changed
+- **Tile subsystem terminology + naming cleanup — source-breaking API rename, no
+  runtime change.** Source compatibility changed; runtime behaviour, ROM size, and
+  RAM use did **not** (`atari_scroll_test.xex` and `atari_hw_test.xex` are
+  byte-identical before/after; all 27 host tests pass). The following public names
+  were renamed with **no compatibility aliases** — **breaking** for any downstream
+  source that uses the old names. Recompilation alone is not sufficient; callers
+  must update their source:
+  - `engine::TileManager` → `engine::TileDisplay`
+  - `engine::CharsetData` → `engine::TilesetData`
+  - `engine::make_charset` → `engine::make_tileset`
+  - `TileMap::tiles` → `TileMap::cells` — the tile-map's backing cell array is a
+    **public** member, so code that indexes it directly (`map.tiles[i]`) must
+    change to `map.cells[i]`.
+
+  Unchanged: the `Game::tiles` façade, the `TileMap` type with its `tile_at` /
+  `set_tile` / `make_map` API, the `Charset1K` / `Charset512` size aliases, and the
+  `init_charset` / `bind_charset_page` operations (which keep the "charset" spelling
+  because they act on character-set RAM / the character-base hardware).
+  `TileDisplay` coordinates the displayed tileset/charset and viewport — it owns no
+  map and performs no map-cell lookup. Established canonical terms (glyph, tileset,
+  charset, tile, tile code, map cell, tile map, map chunk, chunk grid, viewport,
+  playfield, screen) and reserved the
+  `MapChunk`/`ChunkGrid`/`ChunkLoader`/`ChunkManager`/`ChunkCache` names for future
+  map-streaming work — **no chunk management or new demo is introduced**. See
+  ADR-034.
+
 ## [0.5.0] - 2026-06-07
 
 API-cleanup release: Atari-specific names are purged from the generic engine
