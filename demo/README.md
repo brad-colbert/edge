@@ -101,7 +101,7 @@ left border (the HSCROLL fetch margin). See the ANTIC scroll quirks captured in
 the engine memory / [`engine/scroll.h`](../engine/scroll.h) and ADR-027 in
 [`docs/DECISIONS.md`](../docs/DECISIONS.md).
 
-# Tank demo — Stage 3 PMG tank + steering (`atari_tank_demo.xex`)
+# Tank demo — Stage 4 following camera (`atari_tank_demo.xex`)
 
 A polished public-API tank demo ([`tank/`](tank/)). The playfield (Stage 2) is a
 full-screen **40×24 ANTIC Mode 4 viewport** onto an **80×48 logical tile map**
@@ -111,17 +111,22 @@ padding). The chunk payloads and 1K tileset are embedded ATank-derived assets (s
 [`tank/assets/PROVENANCE.md`](tank/assets/PROVENANCE.md)) copied directly into the
 single physical map at startup.
 
-Stage 3 adds one normal-width **GTIA player tank** with tank-style steering:
+The tank (Stage 3) is one normal-width **GTIA player** with tank-style steering:
 **sixteen movement headings** (N, NNE, NE, … 22.5° apart) but **eight displayed
 silhouettes** (N, NE, E, SE, S, SW, W, NW — adapted from ATank, doubled to 8×16 so
 they display as square 16×16). The hull-centre position is tracked in **Q12.4**
 nominal pixels and clamped to the logical world.
 
-The **camera is fixed at the world centre** this stage (it shows the central
-320×192 of the 640×384 world); the tank may drive off-screen and is hidden when
-fully outside the viewport. **Camera following, collision/terrain response,
-bullets, and networking are not implemented yet** (later stages). Note: eight
-silhouettes are not true 22.5° artwork — adjacent headings share art.
+Stage 4 makes the **camera follow the tank**: it keeps the tank centred while
+scrolling room remains and **clamps at all four logical-world edges**; once
+clamped, the tank slides from screen centre toward the corresponding viewport
+edge. The horizontal camera and sprite share **one color-clock quantization**
+(1 cc = 2 nominal px), so there is no one-pixel wobble at odd world X, and the
+camera + sprite are computed from the **same frame's** tank state (no lag). The
+tank stays fully visible at every legal world position.
+
+**No collision, terrain response, bullets, networking, or runtime map streaming.**
+Note: eight silhouettes are not true 22.5° artwork — adjacent headings share art.
 
 All geometry uses the Altirra-measured Stage 1.1 invariants (ADR-034 terminology).
 
@@ -135,8 +140,8 @@ cmake --build build-atari --target atari_tank_demo     # -> build-atari/atari_ta
 The build turns `tank/assets/tank_tileset.fnt` and `tank/assets/chunk_*.scr` into
 ROM-resident byte-array headers (in the build tree). For deterministic headless
 screenshots, pin the boot state with `-DEDGE_TANK_HEADING=<0..15>` and/or
-`-DEDGE_TANK_POSITION=<0..8>` (0 = world centre, 1–4 = world corners, 5–8 = viewport
-edges); unset = heading N at the world centre.
+`-DEDGE_TANK_POSITION=<0..14>` (clamps, world edges, centre, follow transitions,
+odd-X quantization — see `kValidationPositions`); unset = heading N at the centre.
 
 ## Controls (tank-style)
 
@@ -157,12 +162,13 @@ is quantized to 2 nominal pixels (HPOSP is in color clocks).
 
 | Observation | Proves |
 |---|---|
-| Tank sits at the viewport centre on boot | fixed camera + world→PMG conversion |
-| Eight distinct silhouettes as you rotate through the headings | heading→silhouette mapping |
-| Smooth, equal-feeling speed in every direction | Q12.4 movement table |
-| Up drives along the barrel; down reverses | forward/reverse along heading |
-| Tank stops at the world edges; disappears cleanly when fully off-screen | world clamp + offscreen hide (no wrap/remnant) |
-| Playfield, palette, seams, and chunks unchanged from Stage 2 | no scrolling/geometry regression |
+| Driving through the interior scrolls the playfield while the tank stays centred | centered camera following |
+| The camera stops at each world edge; the tank then slides toward that viewport edge | camera clamp + centre→edge slide |
+| The tank returns to centre as it leaves an edge region | clamp is symmetric, no mode state |
+| Eight distinct silhouettes as you rotate; equal-feeling speed in every direction | heading→silhouette mapping + Q12.4 table |
+| No horizontal one-pixel wobble at odd world X; no one-frame camera/sprite lag | shared color-clock quantization, same-frame submit |
+| No visible padding checker; clean seams/bottom row throughout | camera stays in the padding-safe scroll range |
+| Playfield, palette, seams, and chunks unchanged from earlier stages | no scrolling/geometry regression |
 
 # VBXE demos
 

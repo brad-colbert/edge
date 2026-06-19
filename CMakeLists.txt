@@ -287,8 +287,8 @@ if(EDGE_BUILD_DEMO)
         "LINKER:--Map=$<TARGET_FILE_DIR:atari_tank_demo>/atari_tank_demo.map")
     # Optional deterministic boot state for headless screenshots (target-private,
     # NOT global): -DEDGE_TANK_HEADING=<0..15> pins the heading; -DEDGE_TANK_POSITION
-    # =<0..8> pins the tank's start (see kValidationPositions). Unset = heading N,
-    # centre. The camera is fixed at the world centre this stage.
+    # =<0..14> pins the tank's start (see kValidationPositions: clamps, edges,
+    # centre, follow transitions, odd-X). Unset = heading N at the world centre.
     if(DEFINED EDGE_TANK_HEADING)
         target_compile_definitions(atari_tank_demo PRIVATE EDGE_TANK_HEADING=${EDGE_TANK_HEADING})
     endif()

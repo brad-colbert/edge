@@ -102,34 +102,9 @@ inline void move_tank(TankState& s, i8 dir) {
 inline constexpr i16 world_x_nominal(const TankState& s) { return static_cast<i16>(s.world_x_q4 >> 4); }
 inline constexpr i16 world_y_nominal(const TankState& s) { return static_cast<i16>(s.world_y_q4 >> 4); }
 
-// ── Fixed camera + world->screen->PMG conversion (Stage 3 keeps camera fixed) ─
-inline constexpr i16 kCameraNominalX = 160;   // shows central 320x192 of the 640x384 world
-inline constexpr i16 kCameraNominalY = 96;
-inline constexpr i16 kPmgOriginX = 48;        // HPOSP at visible playfield X=0 (Stage 1.1)
-inline constexpr i16 kPmgOriginY = 32;        // strip Y at visible playfield Y=0
-inline constexpr i16 kAnchorCC = 4;           // hull-centre horizontal anchor (color clocks)
-inline constexpr i16 kAnchorSL = 8;           // hull-centre vertical anchor (scanlines)
-
-inline constexpr i16 screen_x_nominal(i16 world_x_nom) { return static_cast<i16>(world_x_nom - kCameraNominalX); }
-inline constexpr i16 screen_y_nominal(i16 world_y_nom) { return static_cast<i16>(world_y_nom - kCameraNominalY); }
-
-// PMG top-left. Horizontal is quantized to 2 nominal px because HPOSP is in
-// color clocks (screen_x >> 1). Signed result — caller checks tank_visible()
-// before narrowing to u8.
-inline constexpr i16 pmg_x_from_screen(i16 screen_x_nom) {
-    return static_cast<i16>(kPmgOriginX + (screen_x_nom >> 1) - kAnchorCC);
-}
-inline constexpr i16 pmg_y_from_screen(i16 screen_y_nom) {
-    return static_cast<i16>(kPmgOriginY + screen_y_nom - kAnchorSL);
-}
-
-// Visible if any of the 16x16 footprint (centre = screen pos) overlaps the
-// 320x192 viewport. When true, the derived pmg_x/pmg_y are in safe u8 range
-// (no strip overflow, no HPOSP wrap); when false, the demo hides the player.
-inline constexpr bool tank_visible(i16 screen_x_nom, i16 screen_y_nom) {
-    return screen_x_nom + 8 > 0 && screen_x_nom - 8 < 320 &&
-           screen_y_nom + 8 > 0 && screen_y_nom - 8 < 192;
-}
+// The world->screen->PMG conversion now lives in tank_camera.h (Stage 4 uses a
+// following camera, color-clock-coherent). tank_motion.h owns only heading,
+// movement, and world clamping.
 
 }  // namespace tank
 

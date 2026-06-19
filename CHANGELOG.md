@@ -12,6 +12,22 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
 ## [Unreleased]
 
 ### Added
+- **Tank demo — Stage 4 centered + clamped following camera (`atari_tank_demo`).**
+  Replaces the Stage 3 fixed camera with one that **follows the tank**: it keeps
+  the tank centred while scrolling room remains and **clamps at all four logical-
+  world edges**, after which the tank slides from screen centre toward the
+  corresponding viewport edge (no camera-mode state machine — it falls out of
+  clamping the desired origin). The horizontal camera and PMG X share **one
+  color-clock quantization** (the player world X is quantized to color clocks once
+  and drives both `Game::scroll` and the sprite), eliminating the one-pixel wobble
+  at odd world X; the camera and sprite are derived from the **same frame's** tank
+  state, so there is no camera/sprite lag. Pure helpers (`shifts/subtracts/clamps`
+  only — no float/multiply/divide/trig) live in `demo/tank/tank_camera.h`, shared
+  with the new `test_tank_camera` host test (30 checks incl. full legal-position
+  sweeps for visibility, monotonic PMG X, and odd/even-X coherence). Altirra-
+  validated (centre, four clamps, the four follow transitions, odd-X). The tank is
+  fully visible at every legal world position. Still **no collision, terrain,
+  bullets, networking, or map streaming**.
 - **Tank demo — Stage 3 PMG tank + sixteen-heading steering (`atari_tank_demo`).**
   Adds one normal-width GTIA player tank to the Stage 2 playfield: **16 movement
   headings** (22.5° apart, with wrap) but **8 displayed silhouettes** (N, NE, E,
@@ -29,7 +45,8 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
   `test_tank_motion` host test); silhouettes in `demo/tank/tank_shapes.h` (128 ROM
   bytes). Altirra-validated (all 8 silhouettes, fixed camera, viewport-edge
   placement, offscreen hide). Eight silhouettes are not true 22.5° artwork.
-  **Camera following, collision, bullets, and networking are not implemented yet.**
+  (Camera following arrives in Stage 4, above; collision, bullets, and networking
+  remain for later.)
 - **Tank demo — Stage 2 static four-chunk playfield (`atari_tank_demo`).** A
   polished public-API demo ([`demo/tank/`](demo/tank/)): a full-screen 40×24 ANTIC
   Mode 4 viewport onto an 80×48 logical tile map assembled from a 2×2 grid of

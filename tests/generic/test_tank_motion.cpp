@@ -123,32 +123,8 @@ static void test_clamp() {
     CHECK(so.world_y_q4 == tank::kMaxCenterYq4);  // 6016 (= 376 px)
 }
 
-// 17, 18: centre world -> screen and world -> PMG (fixed camera 160,96).
-static void test_center_conversion() {
-    const i16 sx = tank::screen_x_nominal(320);
-    const i16 sy = tank::screen_y_nominal(192);
-    CHECK(sx == 160 && sy == 96);
-    CHECK(tank::tank_visible(sx, sy));
-    CHECK(tank::pmg_x_from_screen(sx) == 124);   // 48 + (160>>1) - 4
-    CHECK(tank::pmg_y_from_screen(sy) == 120);    // 32 + 96 - 8
-}
-
-// 19, 20: offscreen safety (no u8 wrap; hidden when fully out of the viewport).
-static void test_offscreen() {
-    // World top-left corner (8,8): screen (-152,-88) -> not visible.
-    const i16 sx1 = tank::screen_x_nominal(8), sy1 = tank::screen_y_nominal(8);
-    CHECK(sx1 == -152 && sy1 == -88);
-    CHECK(!tank::tank_visible(sx1, sy1));        // negative -> hidden, never narrowed to u8
-    // World bottom-right corner (632,376): screen (472,280) -> not visible.
-    const i16 sx2 = tank::screen_x_nominal(632), sy2 = tank::screen_y_nominal(376);
-    CHECK(sx2 == 472 && sy2 == 280);
-    CHECK(!tank::tank_visible(sx2, sy2));
-    // A viewport-edge position stays visible with safe u8 PMG coords.
-    const i16 sx3 = tank::screen_x_nominal(472), sy3 = tank::screen_y_nominal(104);
-    CHECK(tank::tank_visible(sx3, sy3));
-    const i16 px = tank::pmg_x_from_screen(sx3), py = tank::pmg_y_from_screen(sy3);
-    CHECK(px >= 0 && px <= 255 && py >= 0 && py <= 255);
-}
+// NOTE: world->screen->PMG conversion + offscreen tests moved to
+// test_tank_camera.cpp in Stage 4 (the camera now follows the tank).
 
 int main() {
     test_headings();
@@ -158,8 +134,6 @@ int main() {
     test_input();
     test_accumulation();
     test_clamp();
-    test_center_conversion();
-    test_offscreen();
     if (g_failures == 0) printf("ALL TESTS PASSED\n");
     else                 printf("%u FAILURES\n", g_failures);
     return g_failures != 0;
