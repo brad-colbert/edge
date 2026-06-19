@@ -295,6 +295,18 @@ if(EDGE_BUILD_DEMO)
     if(DEFINED EDGE_TANK_POSITION)
         target_compile_definitions(atari_tank_demo PRIVATE EDGE_TANK_POSITION=${EDGE_TANK_POSITION})
     endif()
+    # Stage 5A: optional simulated network-asset loading (target-private, default
+    # OFF so the embedded build is byte-unchanged). -DEDGE_TANK_NETWORK_ASSETS=ON
+    # feeds the protocol from the embedded assets through the loader (no real
+    # connection). -DEDGE_TANK_NET_FAULT=<0..3> injects a deterministic fault
+    # (1 bad manifest, 2 missing last chunk row, 3 premature COMPLETE).
+    option(EDGE_TANK_NETWORK_ASSETS "Tank demo: simulated network asset loading" OFF)
+    if(EDGE_TANK_NETWORK_ASSETS)
+        target_compile_definitions(atari_tank_demo PRIVATE EDGE_TANK_NETWORK_ASSETS=1)
+        if(DEFINED EDGE_TANK_NET_FAULT)
+            target_compile_definitions(atari_tank_demo PRIVATE EDGE_TANK_NET_FAULT=${EDGE_TANK_NET_FAULT})
+        endif()
+    endif()
 
     # VBXE Phase 4a bring-up smoke test — independent .xex (no charset header).
     add_executable(atari_vbxe_bringup demo/vbxe_bringup.cpp)

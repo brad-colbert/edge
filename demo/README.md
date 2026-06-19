@@ -170,6 +170,30 @@ is quantized to 2 nominal pixels (HPOSP is in color clocks).
 | No visible padding checker; clean seams/bottom row throughout | camera stays in the padding-safe scroll range |
 | Playfield, palette, seams, and chunks unchanged from earlier stages | no scrolling/geometry regression |
 
+## Optional: network asset loading (Stage 5A)
+
+The tileset and four map chunks can optionally be loaded from a server instead of
+the embedded assets. Stage 5A adds the **transport-neutral protocol + loader core
+only** — there is no FujiNet/session-lane connection yet (that is Stage 5B). The
+protocol is documented in [`tank/ASSET_PROTOCOL.md`](tank/ASSET_PROTOCOL.md); the
+host server is [`tools/net/edge_tank_asset_server.py`](../tools/net/edge_tank_asset_server.py)
+(stdlib-only; `--hex`, `--capture FILE`, or `--tcp`).
+
+```sh
+# Simulated loader build (feeds the protocol from the embedded assets through the
+# loader over several frames, then installs and enters normal gameplay):
+cmake -B build-atari -DCMAKE_TOOLCHAIN_FILE=cmake/atari-toolchain.cmake \
+      -DEDGE_BUILD_DEMO=ON -DEDGE_TANK_NETWORK_ASSETS=ON
+cmake --build build-atari --target atari_tank_demo
+```
+
+The default build (`EDGE_TANK_NETWORK_ASSETS=OFF`) uses the embedded assets and is
+unchanged. In simulated mode the border shows coarse progress (amber loading →
+green complete → red failed); `-DEDGE_TANK_NET_FAULT=<1..3>` forces a deterministic
+failure (bad manifest / missing chunk row / premature complete) which halts before
+gameplay. Map chunks are written directly into the single physical map; the
+tileset uses one page-aligned 1024-byte buffer installed via the public charset API.
+
 # VBXE demos
 
 Four additional demos exercise the VBXE (`atari::gfx::VBXE<...>`) graphics path —

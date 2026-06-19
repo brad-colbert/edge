@@ -12,6 +12,30 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
 ## [Unreleased]
 
 ### Added
+- **Tank demo — Stage 5A network asset protocol + loader core (`atari_tank_demo`).**
+  Adds a transport-neutral way to load the demo's tileset (1×1024 B) and four map
+  chunks (4×960 B) from a server — **without** any FujiNet/session-lane/realtime
+  integration (that is Stage 5B). A demo-local, little-endian, fixed-layout
+  protocol (`demo/tank/asset_protocol.h`, spec in `demo/tank/ASSET_PROTOCOL.md`)
+  defines MANIFEST / TILESET_BLOCK / CHUNK_ROWS / COMPLETE / ERROR messages, all
+  ≤89 B (under the 128-B session payload). A fixed-memory loader
+  (`demo/tank/asset_loader.h`) consumes already-framed payloads, validates every
+  field, writes chunk rows **directly into the one 88×48 physical map** (no staging
+  buffer, no second map) and the tileset into a single page-aligned 1024-B buffer
+  (network mode's accepted duplicate), tracks coverage with fixed masks (u16 +
+  4×u32), and exposes state/error/progress. The tileset is installed only on a
+  valid COMPLETE, via the public charset API (`bind_charset_page`) — no access to
+  private engine charset storage. New host test `test_asset_loader` (38 checks:
+  manifest/version/geometry/transfer-id validation, tileset & chunk range checks,
+  duplicate/out-of-order handling, coverage, premature-COMPLETE, failure+reset,
+  full round-trip incl. shuffled order). A target-private `EDGE_TANK_NETWORK_ASSETS`
+  build (default **OFF** — embedded build byte-unchanged apart from a +7 B shared-
+  helper refactor) drives a **simulated** multi-frame load from the embedded assets
+  through the loader, then enters the unchanged Stage 4 gameplay; `EDGE_TANK_NET_FAULT`
+  selects deterministic fault modes. Adds `tools/net/edge_tank_asset_server.py`
+  (stdlib-only: hex/capture/TCP). Altirra-validated: simulated load → install →
+  gameplay is identical to embedded mode; fault modes halt without entering
+  gameplay. No engine APIs changed; not a generic asset protocol.
 - **Tank demo — Stage 4 centered + clamped following camera (`atari_tank_demo`).**
   Replaces the Stage 3 fixed camera with one that **follows the tank**: it keeps
   the tank centred while scrolling room remains and **clamps at all four logical-
