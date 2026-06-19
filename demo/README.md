@@ -101,6 +101,56 @@ left border (the HSCROLL fetch margin). See the ANTIC scroll quirks captured in
 the engine memory / [`engine/scroll.h`](../engine/scroll.h) and ADR-027 in
 [`docs/DECISIONS.md`](../docs/DECISIONS.md).
 
+# Tank demo — Stage 2 playfield (`atari_tank_demo.xex`)
+
+The first stage of a polished public-API tank demo ([`tank/`](tank/)). It builds
+a full-screen **40×24 ANTIC Mode 4 viewport** onto an **80×48 logical tile map**
+assembled from a **2×2 grid of 40×24 map chunks**, all stored in one **88×48
+physical tile map** (4 padding cells on each side: `[4 pad][80 logical][4 pad]`,
+no vertical padding). The four chunk payloads and the 1K tileset are embedded
+ATank-derived assets (see [`tank/assets/PROVENANCE.md`](tank/assets/PROVENANCE.md))
+copied **directly** into the single physical map at startup — no staging buffer,
+no per-frame copy. A temporary joystick **free camera** scrolls the playfield for
+validation. The viewport is independent of chunk boundaries (it may overlap one,
+two, or all four chunks).
+
+All geometry uses the Altirra-measured Stage 1.1 invariants (ADR-034 terminology).
+This stage is the playfield only: **the tank sprite, tank-style steering, camera
+following, PMG rendering, and networking are not yet implemented.**
+
+## Build
+
+```sh
+cmake -B build-atari -DCMAKE_TOOLCHAIN_FILE=cmake/atari-toolchain.cmake -DEDGE_BUILD_DEMO=ON
+cmake --build build-atari --target atari_tank_demo     # -> build-atari/atari_tank_demo.xex
+```
+
+The build turns `tank/assets/tank_tileset.fnt` and `tank/assets/chunk_*.scr` into
+ROM-resident byte-array headers (`tank/*.gen.h`). For deterministic headless
+screenshots, pin the boot camera with `-DEDGE_TANK_CAMERA=<0..10>` (0=top-left …
+4=four-chunk centre … 9=max X, 10=max Y); unset opens interactively on the centre.
+
+## Controls
+
+| Input | Effect |
+|---|---|
+| Joystick left / right | move the camera in logical −X / +X (nominal pixels) |
+| Joystick up / down | move the camera in logical −Y / +Y (nominal pixels) |
+
+The camera is kept in nominal square-pixel units (0–320 × 0–192) and converted to
+EDGE scroll units (`scroll_x = camera_x >> 1` color clocks, `scroll_y = camera_y`
+scanlines), clamped explicitly in the demo.
+
+## What to look for
+
+| Observation | Proves |
+|---|---|
+| The central zigzag chevrons straddle the four-chunk intersection | correct chunk ordering + seam continuity |
+| Right-edge wall brackets appear at max camera X | full logical width revealed, no right-padding intrusion |
+| Bottom edge stays clean at max camera Y | correct 24-line vertical scroll, no tearing/stale row |
+| Scrolling stops at every edge with no padding-checker visible | explicit camera clamp + correct physical padding |
+| Smooth motion through fine→coarse steps | per-line LMS + fine scroll |
+
 # VBXE demos
 
 Four additional demos exercise the VBXE (`atari::gfx::VBXE<...>`) graphics path —

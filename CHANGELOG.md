@@ -12,6 +12,24 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
 ## [Unreleased]
 
 ### Added
+- **Tank demo — Stage 2 static four-chunk playfield (`atari_tank_demo`).** A
+  polished public-API demo ([`demo/tank/`](demo/tank/)): a full-screen 40×24 ANTIC
+  Mode 4 viewport onto an 80×48 logical tile map assembled from a 2×2 grid of
+  40×24 map chunks, stored in one 88×48 physical `engine::TileMap` (4 padding cells
+  each side, no vertical padding) and bound via `Game::scroll_map()`. Embedded
+  ATank-derived assets (1K tileset + four 960-byte chunks; see
+  [`demo/tank/assets/PROVENANCE.md`](demo/tank/assets/PROVENANCE.md)) are turned
+  into ROM-resident byte arrays at build time and copied **directly** into the
+  single physical map at startup — no staging buffer, no per-frame copy. A
+  temporary joystick free camera (nominal-pixel units → EDGE scroll units, clamped
+  in the demo) scrolls the playfield. Uses the Altirra-measured Stage 1.1 geometry
+  invariants; Altirra-validated (corners, seams, four-chunk centre, fine/coarse
+  transitions, max camera — no padding intrusion or bottom-row tearing). Geometry,
+  chunk placement, and camera math live in `demo/tank/playfield_geometry.h`, shared
+  with the `test_tank_playfield` host test. The tank sprite, steering, camera
+  following, PMG rendering, and networking are **not** implemented yet. Adds a
+  generic `cmake/generate_bytes_header.cmake` (neutral companion to the charset
+  generator) for raw binary assets.
 - **Realtime networking diagnostic demo (Stage 9S.3)** — a two-ended user-facing
   diagnostic for the realtime lane, NOT a game and NOT a protocol layer.
   `demo/edge_net_realtime_meter.cpp` is an Atari client that uses **only** the public

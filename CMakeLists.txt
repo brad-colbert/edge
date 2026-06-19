@@ -240,6 +240,57 @@ if(EDGE_BUILD_DEMO)
             PROBE_FORCE_MODE=${EDGE_PROBE_MODE} PROBE_FORCE_INDEX=${EDGE_PROBE_INDEX})
     endif()
 
+    # Stage 2 tank demo — static four-chunk ANTIC Mode 4 playfield + free camera.
+    # Embedded ATank-derived assets (demo/tank/assets/*) are turned into ROM-resident
+    # byte-array headers at build time: the 1K tileset via generate_charset_header,
+    # the four 960-byte map chunks via the generic generate_bytes_header.
+    # Source binaries are committed under demo/tank/assets/; the generated C++
+    # headers live ONLY in the build tree (per build dir, removed with it) and are
+    # listed as target sources so the demo cannot compile before they exist.
+    set(GENERATE_BYTES_HEADER_SCRIPT ${CMAKE_SOURCE_DIR}/cmake/generate_bytes_header.cmake)
+    set(TANK_ASSET_SRC_DIR ${CMAKE_SOURCE_DIR}/demo/tank/assets)
+    set(TANK_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated/tank)
+    set(TANK_TILESET_HEADER ${TANK_GEN_DIR}/tank_tileset.gen.h)
+    add_custom_command(
+        OUTPUT ${TANK_TILESET_HEADER}
+        COMMAND ${CMAKE_COMMAND}
+                -DINPUT=${TANK_ASSET_SRC_DIR}/tank_tileset.fnt
+                -DOUTPUT=${TANK_TILESET_HEADER}
+                -DSYMBOL=tileset_bytes -DNAMESPACE=demo::tank::assets
+                -P ${GENERATE_CHARSET_HEADER_SCRIPT}
+        DEPENDS ${TANK_ASSET_SRC_DIR}/tank_tileset.fnt ${GENERATE_CHARSET_HEADER_SCRIPT}
+        COMMENT "Generating tank_tileset.gen.h" VERBATIM)
+    set(TANK_CHUNK_HEADERS "")
+    foreach(C 0_0 1_0 0_1 1_1)
+        set(_h ${TANK_GEN_DIR}/chunk_${C}.gen.h)
+        add_custom_command(
+            OUTPUT ${_h}
+            COMMAND ${CMAKE_COMMAND}
+                    -DINPUT=${TANK_ASSET_SRC_DIR}/chunk_${C}.scr
+                    -DOUTPUT=${_h}
+                    -DSYMBOL=chunk_${C} -DNAMESPACE=demo::tank::assets -DEXPECT_BYTES=960
+                    -P ${GENERATE_BYTES_HEADER_SCRIPT}
+            DEPENDS ${TANK_ASSET_SRC_DIR}/chunk_${C}.scr ${GENERATE_BYTES_HEADER_SCRIPT}
+            COMMENT "Generating chunk_${C}.gen.h" VERBATIM)
+        list(APPEND TANK_CHUNK_HEADERS ${_h})
+    endforeach()
+
+    add_executable(atari_tank_demo demo/tank/atari_tank_demo.cpp
+        ${TANK_TILESET_HEADER} ${TANK_CHUNK_HEADERS})
+    target_compile_options(atari_tank_demo PRIVATE
+        -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra)
+    # Target-private: the engine root (for <engine/...>) and the build-tree
+    # generated-header dir (for the *.gen.h). NOT global, NOT directory-wide.
+    target_include_directories(atari_tank_demo PRIVATE ${CMAKE_SOURCE_DIR} ${TANK_GEN_DIR})
+    set_target_properties(atari_tank_demo PROPERTIES OUTPUT_NAME "atari_tank_demo.xex")
+    target_link_options(atari_tank_demo PRIVATE
+        "LINKER:--Map=$<TARGET_FILE_DIR:atari_tank_demo>/atari_tank_demo.map")
+    # Optional: pin the boot camera for deterministic headless screenshots
+    # (-DEDGE_TANK_CAMERA=<0..10>). Unset = interactive (opens on the centre).
+    if(DEFINED EDGE_TANK_CAMERA)
+        target_compile_definitions(atari_tank_demo PRIVATE TANK_FORCE_CAMERA=${EDGE_TANK_CAMERA})
+    endif()
+
     # VBXE Phase 4a bring-up smoke test — independent .xex (no charset header).
     add_executable(atari_vbxe_bringup demo/vbxe_bringup.cpp)
     target_compile_options(atari_vbxe_bringup PRIVATE
