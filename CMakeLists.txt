@@ -223,6 +223,23 @@ if(EDGE_BUILD_DEMO)
     target_link_options(atari_scroll_test PRIVATE
         "LINKER:--Map=$<TARGET_FILE_DIR:atari_scroll_test>/atari_scroll_test.map")
 
+    # Stage 1.1 ANTIC Mode 4 scroll + PMG geometry probe — independent .xex
+    # (synthetic in-code tileset/map; no charset header, no ATank assets).
+    add_executable(atari_mode4_geometry_probe demo/atari_mode4_geometry_probe.cpp)
+    target_compile_options(atari_mode4_geometry_probe PRIVATE
+        -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra)
+    target_include_directories(atari_mode4_geometry_probe PRIVATE ${CMAKE_SOURCE_DIR})
+    set_target_properties(atari_mode4_geometry_probe PROPERTIES
+        OUTPUT_NAME "atari_mode4_geometry_probe.xex")
+    target_link_options(atari_mode4_geometry_probe PRIVATE
+        "LINKER:--Map=$<TARGET_FILE_DIR:atari_mode4_geometry_probe>/atari_mode4_geometry_probe.map")
+    # Optional: pin the boot test case for deterministic headless screenshots
+    # (-DEDGE_PROBE_MODE=<0|1|2> -DEDGE_PROBE_INDEX=<n>). Unset = interactive.
+    if(DEFINED EDGE_PROBE_MODE)
+        target_compile_definitions(atari_mode4_geometry_probe PRIVATE
+            PROBE_FORCE_MODE=${EDGE_PROBE_MODE} PROBE_FORCE_INDEX=${EDGE_PROBE_INDEX})
+    endif()
+
     # VBXE Phase 4a bring-up smoke test — independent .xex (no charset header).
     add_executable(atari_vbxe_bringup demo/vbxe_bringup.cpp)
     target_compile_options(atari_vbxe_bringup PRIVATE
