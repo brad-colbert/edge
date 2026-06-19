@@ -285,10 +285,15 @@ if(EDGE_BUILD_DEMO)
     set_target_properties(atari_tank_demo PROPERTIES OUTPUT_NAME "atari_tank_demo.xex")
     target_link_options(atari_tank_demo PRIVATE
         "LINKER:--Map=$<TARGET_FILE_DIR:atari_tank_demo>/atari_tank_demo.map")
-    # Optional: pin the boot camera for deterministic headless screenshots
-    # (-DEDGE_TANK_CAMERA=<0..10>). Unset = interactive (opens on the centre).
-    if(DEFINED EDGE_TANK_CAMERA)
-        target_compile_definitions(atari_tank_demo PRIVATE TANK_FORCE_CAMERA=${EDGE_TANK_CAMERA})
+    # Optional deterministic boot state for headless screenshots (target-private,
+    # NOT global): -DEDGE_TANK_HEADING=<0..15> pins the heading; -DEDGE_TANK_POSITION
+    # =<0..8> pins the tank's start (see kValidationPositions). Unset = heading N,
+    # centre. The camera is fixed at the world centre this stage.
+    if(DEFINED EDGE_TANK_HEADING)
+        target_compile_definitions(atari_tank_demo PRIVATE EDGE_TANK_HEADING=${EDGE_TANK_HEADING})
+    endif()
+    if(DEFINED EDGE_TANK_POSITION)
+        target_compile_definitions(atari_tank_demo PRIVATE EDGE_TANK_POSITION=${EDGE_TANK_POSITION})
     endif()
 
     # VBXE Phase 4a bring-up smoke test — independent .xex (no charset header).

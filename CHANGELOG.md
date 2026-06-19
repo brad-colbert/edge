@@ -12,6 +12,24 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
 ## [Unreleased]
 
 ### Added
+- **Tank demo — Stage 3 PMG tank + sixteen-heading steering (`atari_tank_demo`).**
+  Adds one normal-width GTIA player tank to the Stage 2 playfield: **16 movement
+  headings** (22.5° apart, with wrap) but **8 displayed silhouettes** (N, NE, E,
+  SE, S, SW, W, NW — ATank's eight directional shapes doubled to 8×16 so they
+  display as square 16×16; intermediate headings round clockwise to the nearest
+  silhouette). The hull-centre is tracked in **Q12.4 nominal pixels** and moved by
+  a 16-entry ROM motion table (|v|≈8 Q4, ~equal speed; reverse subtracts the same
+  vector — no reverse table; no float/multiply/divide/trig). Tank-style joystick
+  controls (left/right rotate, up/down forward/reverse, left+right and up+down
+  cancel, turn-while-move), one 22.5° step every ~7 NTSC (~6 PAL) frames. The tank
+  centre is clamped to the logical world; the **camera is fixed at the world
+  centre** this stage (the Stage 2 free-camera is removed). World→screen→PMG
+  conversion is signed and the player is hidden when fully off-screen (no `u8`
+  wrap). Motion math is in `demo/tank/tank_motion.h` (shared with the
+  `test_tank_motion` host test); silhouettes in `demo/tank/tank_shapes.h` (128 ROM
+  bytes). Altirra-validated (all 8 silhouettes, fixed camera, viewport-edge
+  placement, offscreen hide). Eight silhouettes are not true 22.5° artwork.
+  **Camera following, collision, bullets, and networking are not implemented yet.**
 - **Tank demo — Stage 2 static four-chunk playfield (`atari_tank_demo`).** A
   polished public-API demo ([`demo/tank/`](demo/tank/)): a full-screen 40×24 ANTIC
   Mode 4 viewport onto an 80×48 logical tile map assembled from a 2×2 grid of
@@ -26,10 +44,9 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
   invariants; Altirra-validated (corners, seams, four-chunk centre, fine/coarse
   transitions, max camera — no padding intrusion or bottom-row tearing). Geometry,
   chunk placement, and camera math live in `demo/tank/playfield_geometry.h`, shared
-  with the `test_tank_playfield` host test. The tank sprite, steering, camera
-  following, PMG rendering, and networking are **not** implemented yet. Adds a
-  generic `cmake/generate_bytes_header.cmake` (neutral companion to the charset
-  generator) for raw binary assets.
+  with the `test_tank_playfield` host test. (The movable tank is added in Stage 3,
+  above.) Adds a generic `cmake/generate_bytes_header.cmake` (neutral companion to
+  the charset generator) for raw binary assets.
 - **Realtime networking diagnostic demo (Stage 9S.3)** — a two-ended user-facing
   diagnostic for the realtime lane, NOT a game and NOT a protocol layer.
   `demo/edge_net_realtime_meter.cpp` is an Atari client that uses **only** the public
