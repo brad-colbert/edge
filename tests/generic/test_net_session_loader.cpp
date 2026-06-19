@@ -113,7 +113,19 @@ static void begin(u8 xfer) {
     g_client.begin(&g_fs, &g_map, g_tsdest, "host", 9000, xfer,
                    /*connect_to*/ 60, /*inactivity_to*/ 60);
 }
-static void run(int frames) { for (int i = 0; i < frames && !g_client.ready() && !g_client.failed(); ++i) g_client.update(); }
+// Drive frames while asserting the credit invariant 0 <= outstanding <= window
+// holds at every observable step (Stage 5C). Returns the peak outstanding seen.
+static u8 run_track(int frames) {
+    u8 peak = 0;
+    for (int i = 0; i < frames && !g_client.ready() && !g_client.failed(); ++i) {
+        g_client.update();
+        const u8 o = g_client.outstanding();
+        CHECK(o <= tank::kCreditWindow);     // never exceeds the window
+        if (o > peak) peak = o;
+    }
+    return peak;
+}
+static void run(int frames) { (void)run_track(frames); }
 
 int main() {
     make_ref();
@@ -126,8 +138,12 @@ int main() {
     CHECK(g_fs.adopted_xfer == 0x11);              // request carried our transfer id
     CHECK(g_fs.last_req_credit == tank::kCreditWindow);  // 13 credit initialized
     CHECK(g_client.state() == NetState::Receiving);
-    run(300);
+    const u8 peak_outstanding = run_track(300);
     CHECK(g_client.ready());                        // 10 complete loader -> Ready
+    CHECK(peak_outstanding <= tank::kCreditWindow); // Stage 5C: 0 <= outstanding <= 2
+    // Completion leaves the session OPEN (the loader does not auto-close on
+    // success; the app closes it when the lane is no longer needed).
+    CHECK(g_fs.connected());
     // 3 asset kind accepted + 5 payload forwarded unchanged + 6 multi-frame drain.
     CHECK(g_client.loader().complete());
     CHECK(g_client.messages_received() == kPayloadCount);
@@ -155,6 +171,12 @@ int main() {
     g_fs = FakeSession{}; g_fs.wrong_kind = true; begin(0x33);
     run(50);
     CHECK(g_client.failed() && g_client.net_error() == NetTransportError::UnexpectedKind);
+    // Stage 5C: a rejected message must NOT replenish credit. The client failed
+    // on the first (bad-kind) message before granting any replacement credit, so
+    // the server saw only the initial request grant and zero credit top-ups.
+    CHECK(g_fs.credits == 0);
+    // Rejection also closes the session (failure path).
+    CHECK(!g_fs.connected());
 
     // 8 transport close before completion fails (ClosedEarly).
     g_fs = FakeSession{}; g_fs.close_after = 5; begin(0x44);
@@ -166,6 +188,9 @@ int main() {
     run(50);
     CHECK(g_client.failed() && g_client.net_error() == NetTransportError::LoaderFailed);
     CHECK(g_client.loader_error() == tank::LoadError::WrongTransfer);
+    // Stage 5C: a loader-rejected payload must NOT top up credit, and must close.
+    CHECK(g_fs.credits == 0);
+    CHECK(!g_fs.connected());
 
     // 11 connection timeout (connect keeps returning WouldBlock).
     g_fs = FakeSession{}; g_fs.connect_result = NetStatus::WouldBlock; begin(0x55);

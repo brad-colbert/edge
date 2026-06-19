@@ -130,7 +130,7 @@ def read_session_message(conn):
     return kind, payload
 
 
-def serve_one(conn, addr, oneshot):
+def serve_one(conn, addr, oneshot, linger=10.0):
     print("connection from %s" % (addr,))
     msg = read_session_message(conn)
     if msg is None or msg[0] != SESS_REQUEST or len(msg[1]) < 4:
@@ -162,6 +162,18 @@ def serve_one(conn, addr, oneshot):
             credit += m[1][1]
             print("  credit grant +%d -> %d" % (m[1][1], credit))
     print("  transfer complete: %d messages, %d wire bytes" % (len(payloads), sent_bytes))
+    # Linger before closing (Stage 5C). Over real FujiNet the client drains the RX
+    # over several frames; if we FIN immediately the firmware discards the last
+    # messages still buffered unread (observed: client stalls at 64/66, missing the
+    # final chunk row + COMPLETE). Wait for the client to finish — it closes the
+    # socket (EOF) once it has COMPLETE, or the linger times out. This is correct
+    # shutdown ordering, NOT application retransmission.
+    conn.settimeout(linger)
+    try:
+        while conn.recv(64):           # absorb late credit grants until EOF/timeout
+            pass
+    except (socket.timeout, OSError):
+        pass
     conn.close()
 
 
@@ -190,6 +202,9 @@ def main():
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=9000)
     ap.add_argument("--oneshot", action="store_true", help="serve one client then exit")
+    ap.add_argument("--linger", type=float, default=10.0,
+                    help="seconds to keep the socket open after COMPLETE so the "
+                         "FujiNet client can drain the final messages before FIN")
     ap.add_argument("--selftest", action="store_true", help="verify framing/payloads and exit")
     ap.add_argument("--hex", action="store_true", help="print asset payloads as hex and exit")
     ap.add_argument("--capture-session", metavar="FILE",
@@ -218,7 +233,7 @@ def main():
     while True:
         conn, addr = srv.accept()
         try:
-            serve_one(conn, addr, args.oneshot)
+            serve_one(conn, addr, args.oneshot, args.linger)
         except OSError as e:
             print("  connection error: %s" % e)
         if args.oneshot:

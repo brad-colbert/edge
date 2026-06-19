@@ -237,7 +237,30 @@ static bool loading_step(const engine::Input&) {
 static const char kNetHost[] = EDGE_TANK_NET_HOST;     // ROM-resident endpoint
 static constexpr u16 kNetPort = EDGE_TANK_NET_PORT;
 static constexpr u8 kXfer = 0x42;
-static constexpr u16 kSecs3 = static_cast<u16>(3 * Platform::capabilities::frames_per_second);
+
+// Build-embedded live-backend marker (Stage 5C). A stub LiveSession build must
+// never be mistaken for a real network-capable one: this string lands in the
+// .xex (and linker map) so the backend can be confirmed from the binary itself.
+#ifndef EDGE_TANK_LIVE_BACKEND_REAL
+#define EDGE_TANK_LIVE_BACKEND_REAL 0
+#endif
+// [[gnu::used, gnu::retain]] keeps the marker in the .xex (rodata) without a
+// volatile zero-page static — the demo's zero page is nearly full, so the marker
+// must cost nothing there.
+#if EDGE_TANK_LIVE_BACKEND_REAL
+[[gnu::used, gnu::retain]] static const char kLiveBackendMarker[] = "EDGE-LIVE-BACKEND:RealFujinetLib";
+#else
+[[gnu::used, gnu::retain]] static const char kLiveBackendMarker[] = "EDGE-LIVE-BACKEND:Stub";
+#endif
+// Loading-lane timeouts, in frames. Sized for REAL FujiNet SIO throughput
+// (Stage 5C): an N:TCP read delivers a ~74 B asset frame roughly every ~3.5 s
+// over NetSIO, so a 3 s inactivity window (the original value) tripped a false
+// failure partway through the 66-message transfer. The timers reset on each
+// accepted message / successful connect, so these bound a genuine stall, not the
+// whole transfer — generous margins are cheap on a loading screen.
+static constexpr u16 kFps = Platform::capabilities::frames_per_second;
+static constexpr u16 kConnectTimeoutFrames    = static_cast<u16>(30 * kFps);
+static constexpr u16 kInactivityTimeoutFrames = static_cast<u16>(60 * kFps);
 
 using SessionT = decltype(Game::net.session);
 static tank::NetAssetClient<SessionT> g_client;
@@ -246,7 +269,15 @@ struct NetDebug {
     u8 state; u8 net_error; u8 loader_error; u8 messages; u16 bytes;
     u8 last_kind; u8 outstanding; u8 overflow; u8 loader_tiles; u8 loader_rows;
 };
-static volatile NetDebug g_netdbg = {};
+// Bundle the debug record (and the diagnostic scratch) into one larger struct so
+// it lands in main RAM, NOT the near-full zero page (a bare `volatile NetDebug`
+// gets zp-promoted and tips the demo over the 256-byte zp boundary at link).
+struct LiveState {
+    NetDebug dbg;
+    u8 diag_scratch[24];
+};
+static volatile LiveState g_live = {};
+#define g_netdbg g_live.dbg
 
 static bool live_step(const engine::Input&) {
     g_client.update();
@@ -264,6 +295,45 @@ static bool live_step(const engine::Input&) {
     show_progress(g_client.failed(), g_client.ready());
     return g_client.ready() || g_client.failed();
 }
+
+// Optional FujiNet transfer diagnostic (-DEDGE_TANK_NET_DIAG): on
+// completion/failure, self-dump the final client + session + fujinet-lib state to
+// a host file via Altirra's H: device (CIO IOCB #1), so the exact failure cause is
+// observable headless. Off by default; needs an Altirra run with /hdpathrw mounted.
+#ifdef EDGE_TANK_NET_DIAG
+static u8 tank_diag_cio(u8 cmd, const void* buf, u16 len) {
+    volatile u8* const ICCMD = (u8*)0x0352; volatile u8* const ICBAL = (u8*)0x0354;
+    volatile u8* const ICBAH = (u8*)0x0355; volatile u8* const ICBLL = (u8*)0x0358;
+    volatile u8* const ICBLH = (u8*)0x0359; volatile u8* const ICAX1 = (u8*)0x035A;
+    volatile u8* const ICAX2 = (u8*)0x035B;
+    const uintptr_t p = (uintptr_t)buf; u8 st = 0;
+    *ICBAL = (u8)(p & 0xff); *ICBAH = (u8)((p >> 8) & 0xff);
+    *ICBLL = (u8)(len & 0xff); *ICBLH = (u8)((len >> 8) & 0xff);
+    if (cmd == 3) { *ICAX1 = 8; *ICAX2 = 0; }
+    *ICCMD = cmd;
+    __asm__ volatile("ldx #$10\n\tjsr $E456\n\tsty %0" : "=r"(st) : : "a", "x", "y");
+    return st;
+}
+static void tank_net_diag_dump() {
+    static char fn[] = "H1:TANKDBG.BIN\x9b";
+    namespace FS = atari::fujinet_session;
+    const engine::net::NetError se = Game::net.session.last_error();
+    volatile u8* d = g_live.diag_scratch;
+    d[0]  = g_netdbg.state;        d[1]  = g_netdbg.net_error;
+    d[2]  = g_netdbg.loader_error; d[3]  = g_netdbg.messages;
+    d[4]  = g_netdbg.last_kind;    d[5]  = g_netdbg.outstanding;
+    d[6]  = g_netdbg.overflow;     d[7]  = g_netdbg.loader_tiles;
+    d[8]  = g_netdbg.loader_rows;  d[9]  = static_cast<u8>(se.status);
+    d[10] = static_cast<u8>(se.detail & 0xFF); d[11] = static_cast<u8>((se.detail >> 8) & 0xFF);
+    d[12] = FS::FujinetLibSessionAdapter::session_diag_fn_error();
+    d[13] = FS::FujinetLibSessionAdapter::session_diag_device_error();
+    d[14] = FS::FujinetLibSessionAdapter::session_diag_conn();
+    d[15] = static_cast<u8>(g_netdbg.bytes & 0xFF);
+    tank_diag_cio(3, fn, 0);                          // OPEN write
+    tank_diag_cio(11, (const void*)d, 16);            // PUT BINARY (16 diag bytes)
+    tank_diag_cio(12, nullptr, 0);                    // CLOSE
+}
+#endif
 #endif  // LIVE
 
 // ── Entry point ────────────────────────────────────────────────────────────
@@ -296,8 +366,12 @@ int main() {
     set_palette();
     tank::clear_physical_map(g_map);
     g_client.begin(&Game::net.session, &g_map, g_net_tileset.data,
-                   kNetHost, kNetPort, kXfer, kSecs3, kSecs3);
+                   kNetHost, kNetPort, kXfer,
+                   kConnectTimeoutFrames, kInactivityTimeoutFrames);
     Game::run_until(live_step);
+#ifdef EDGE_TANK_NET_DIAG
+    tank_net_diag_dump();
+#endif
     if (!g_client.ready()) halt_loop();
     enter_gameplay();
 #endif

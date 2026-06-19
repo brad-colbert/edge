@@ -83,7 +83,23 @@ if(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB)
             "EDGE_FUJINETLIB_LIBRARY does not exist: '${EDGE_FUJINETLIB_LIBRARY}'")
     endif()
 
+    # Stage 5C focused guard: reject the prohibited legacy toolchain mount in any
+    # fujinet-lib dependency path (NEVER use /mnt/old_ubuntu_22). Narrow on
+    # purpose — only the FujiNet dependency variables, not a global FS policy.
+    foreach(_fnpath
+            "${EDGE_FUJINETLIB_ROOT}"
+            "${EDGE_FUJINETLIB_INCLUDE_DIR}"
+            "${EDGE_FUJINETLIB_LIBRARY}")
+        if(_fnpath MATCHES "/mnt/old_ubuntu_22")
+            message(FATAL_ERROR
+                "Prohibited path /mnt/old_ubuntu_22 referenced by a fujinet-lib variable: '${_fnpath}'")
+        endif()
+    endforeach()
+
     add_compile_definitions(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB=1)
+    message(STATUS "EDGE FujiNet session backend: RealFujinetLib")
+    message(STATUS "  include: ${EDGE_FUJINETLIB_INCLUDE_DIR}")
+    message(STATUS "  library: ${EDGE_FUJINETLIB_LIBRARY}")
 endif()
 
 option(EDGE_ATARI_FUJINET_REALTIME_NETSTREAM
@@ -312,6 +328,26 @@ if(EDGE_BUILD_DEMO)
         target_compile_definitions(atari_tank_demo PRIVATE EDGE_TANK_NET_FAULT=${EDGE_TANK_NET_FAULT})
     endif()
     if(_TANK_SRC EQUAL 2)
+        # Live transport backend selection (Stage 5C). A LiveSession build is only
+        # network-capable when the real fujinet-lib backend is linked in; without
+        # it the session HAL is a stub that reports Ok without ever connecting. Make
+        # the distinction impossible to miss: a build-embedded marker, a configure
+        # line, and a loud warning for the stub case.
+        if(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB)
+            target_include_directories(atari_tank_demo PRIVATE ${EDGE_FUJINETLIB_INCLUDE_DIR})
+            target_link_libraries(atari_tank_demo PRIVATE ${EDGE_FUJINETLIB_LIBRARY})
+            target_compile_definitions(atari_tank_demo PRIVATE EDGE_TANK_LIVE_BACKEND_REAL=1)
+            message(STATUS "atari_tank_demo LiveSession — Live transport backend: RealFujinetLib")
+        else()
+            target_compile_definitions(atari_tank_demo PRIVATE EDGE_TANK_LIVE_BACKEND_REAL=0)
+            message(WARNING
+                "atari_tank_demo LiveSession selected WITHOUT the real fujinet-lib backend "
+                "(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB=OFF).\n"
+                "  Live transport backend: Stub — the session lane returns Ok without connecting; "
+                "this CANNOT validate a real transfer.\n"
+                "  For real validation: -DEDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON "
+                "-DEDGE_FUJINETLIB_ROOT=<fujinetlib-llvm checkout>")
+        endif()
         if(DEFINED EDGE_TANK_NET_HOST)
             target_compile_definitions(atari_tank_demo PRIVATE EDGE_TANK_NET_HOST="${EDGE_TANK_NET_HOST}")
         endif()

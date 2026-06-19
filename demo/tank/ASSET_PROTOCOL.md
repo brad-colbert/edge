@@ -171,3 +171,114 @@ transfer-id check rejects stale payloads. The transfer ends with the asset-layer
 
 Largest session frame = 3 + 89 = **92 bytes**. Control messages are 3+4 (request)
 and 3+2 (credit).
+
+## Real FujiNet backend (Stage 5C)
+
+Stages 5A/5B run the loader and the session lane over a *fake*/stub transport.
+Stage 5C links the tank demo's `LiveSession` build against the real
+**fujinet-lib** session backend (`Game::net.session` → `FujinetNetwork` HAL →
+`FujinetLibSessionAdapter` → `N:TCP://host:port/`) and validates an end-to-end
+transfer over real FujiNet SIO.
+
+### Dependency
+
+- fujinet-lib root (validated local checkout):
+  `/home/brad/Dropbox/Projects/Atari/fujinetlib-llvm`
+  - source commit `7803c86` (tag `wave3b-done`)
+  - public headers: `<root>/src/include` (`fujinet-network.h`, `fujinet-network-atari.h`)
+  - static library: `<root>/build/libfujinet.a`
+  - built with the `/usr/local/bin` llvm-mos toolchain
+    (`mos-atari8-dos-clang`, `llvm-ar`) — verified, no rebuild required.
+
+The CMake variables are configurable; the path above is the validated default,
+not a hard-coded requirement. A focused CMake guard rejects the prohibited legacy
+toolchain mount (`/mnt/old_ubuntu_22`) in any fujinet-lib path variable.
+
+### Stub vs. real backend (don't confuse them)
+
+`EDGE_TANK_ASSET_SOURCE=LiveSession` alone builds a **stub** session HAL whose
+`connect_tcp`/`poll` return `Ok` *without ever connecting* — useful only for
+failure-path testing. The real backend requires
+`EDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON` (which adds the include dir + links
+`libfujinet.a`). The distinction is made impossible to miss:
+
+- configure prints `Live transport backend: RealFujinetLib` (or warns loudly for
+  the stub), and
+- the `.xex` embeds a marker string — `EDGE-LIVE-BACKEND:RealFujinetLib` or
+  `EDGE-LIVE-BACKEND:Stub` — readable via `strings` / the linker map, and mirrored
+  into the demo's `NetDebug.backend_real` byte.
+
+### Build (real backend)
+
+```sh
+cmake -B build-atari-live \
+  -DCMAKE_TOOLCHAIN_FILE=cmake/atari-toolchain.cmake \
+  -DEDGE_BUILD_DEMO=ON \
+  -DEDGE_TANK_ASSET_SOURCE=LiveSession \
+  -DEDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON \
+  -DEDGE_FUJINETLIB_ROOT=/home/brad/Dropbox/Projects/Atari/fujinetlib-llvm \
+  -DEDGE_TANK_NET_HOST=192.168.1.205 \
+  -DEDGE_TANK_NET_PORT=9000
+cmake --build build-atari-live --target atari_tank_demo
+```
+
+`EDGE_TANK_NET_HOST` must be an address the FujiNet can reach (the dev host's LAN
+address — not `127.0.0.1`, which is the FujiNet's own loopback).
+
+### Server
+
+```sh
+python3 tools/net/edge_tank_asset_server.py --host 0.0.0.0 --port 9000 --linger 10
+# --selftest verifies framing/payloads (66 messages, max 89 B) and exits.
+# --linger N keeps the socket open N s after COMPLETE so the FujiNet client can
+#   drain the final messages before the FIN (see defect 3 below); default 10 s.
+```
+
+### Validated run (reaches gameplay)
+
+Run path: Altirra (NetSIO `custom` device) → fujinet-emulator-bridge
+(`netsiohub`, UDP 9997) → fujinet-pc firmware (real TCP) → asset server. The
+firmware connects from the LAN address and performs the real `N:TCP` transfer.
+
+Result: TCP connect succeeds; the client sends `request(version=1,
+transfer_id=0x42, asset_set=1, credit=2)`; the server streams all **66** asset
+messages (5,619 framed wire bytes) while the client tops the credit window back to
+2 as it drains (never more than 2 in flight, RX ring never overflows); the loader
+reaches 16/16 tileset blocks and 96/96 chunk rows, accepts `COMPLETE`, binds the
+network tileset + physical map, installs the palette, and enters gameplay. The
+live playfield is pixel-identical to the Embedded and SimulatedNetwork builds, and
+tank movement/camera are unchanged. Verified end-to-end on the
+Altirra+netsiohub+fujinet-pc path; final client state dump (`-DEDGE_TANK_NET_DIAG`,
+H: self-dump): `state=Ready net_error=0 loader_error=0 messages=66 tiles=16
+rows=96 overflow=0`.
+
+### Defects found on the real backend (and fixed)
+
+Three real-backend defects were demonstrated and fixed; **no** asset-protocol,
+credit-window, or RX-ring change was needed (those are correct as designed).
+
+1. **Loading timeouts too short.** Real `N:TCP` read latency is far higher than the
+   simulated path; the original 3 s inactivity window tripped a false
+   `InactivityTimeout` mid-transfer. Widened (demo) to **connect 30 s / inactivity
+   60 s**. The timers reset on each accepted message / successful connect, so they
+   bound a genuine stall, not the whole transfer.
+
+2. **Per-byte SIO reads → frame desync + extreme slowness.** The engine session
+   lane drains the RX one byte at a time; each `network_read_nb` is a full
+   `network_status` + `sio_read` SIO transaction, so one transfer was ~5,600 SIO
+   round-trips over emulated NetSIO. That was pathologically slow **and** an
+   occasional dropped/garbled byte desynchronised the session framing (observed as
+   a false `UnexpectedKind` ~⅓ of the way in). Fixed in the **Atari FujiNet
+   adapter** (`fujinet_session_fujinetlib.h`) by staging one bulk `network_read_nb`
+   (up to 256 B) and serving the byte-at-a-time drain from it — ~30–90× fewer SIO
+   transactions. No change to the generic recv seam. Transfer time dropped from
+   minutes to ~12 s and the desync disappeared (all frames `kind=1`).
+
+3. **Server closed too early → tail truncation.** After the bulk fix the transfer
+   reliably reached 64/66, then stalled: the server `close()`d immediately after
+   the last write and the FujiNet firmware discarded the final ~150 bytes still
+   buffered unread when the FIN arrived (client stuck missing the last chunk row +
+   `COMPLETE`). Fixed in the server with a post-`COMPLETE` **linger** (`--linger`,
+   default 10 s): it keeps the socket open, absorbing late credit grants until the
+   client has drained everything. This is correct shutdown ordering, **not**
+   application retransmission.
