@@ -24,20 +24,10 @@ namespace tank {
 
 using engine::u8;
 
-// The 1K Mode 4 tileset (ATank a4color1.fnt), ROM-resident.
+// The 1K Mode 4 tileset (ATank a4color1.fnt), ROM-resident. (Palette lives in
+// tank_palette.h so LiveSession can set colours without linking these assets.)
 inline constexpr engine::Charset1K tileset =
     engine::make_tileset(demo::tank::assets::tileset_bytes);
-
-// Atari colour-register values for this tileset, in Mode 4 pixel-value order
-// (from the ATank .m4c designer palette). 00->COLBK, 01->COLPF0, 10->COLPF1,
-// 11->COLPF2 (codes <128); COLPF3 is unused by these maps.
-struct Palette {
-    static constexpr u8 colbk  = 4;    // background / arena floor
-    static constexpr u8 colpf0 = 0;    // walls (black)
-    static constexpr u8 colpf1 = 7;    // light detail
-    static constexpr u8 colpf2 = 27;   // accent (greenish)
-    static constexpr u8 colpf3 = 54;   // unused (inverse) accent
-};
 
 // ROM-resident chunk payloads, indexed by chunk grid coordinate (chunk_x, chunk_y).
 inline const u8* chunk_payload(u8 chunk_x, u8 chunk_y) {

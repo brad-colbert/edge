@@ -12,6 +12,30 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
 ## [Unreleased]
 
 ### Added
+- **Tank demo — Stage 5B live session-lane asset loading (`atari_tank_demo`).**
+  Connects the Stage 5A loader to EDGE's reliable session lane (`Game::net.session`,
+  never the realtime lane) and loads the tileset + four chunks from the Python
+  server over TCP/FujiNet. Asset source is now a configure-time selector
+  `EDGE_TANK_ASSET_SOURCE = Embedded (default) | SimulatedNetwork | LiveSession`.
+  The session wire frame is `[kind][size_lo][size_hi][payload]` (engine framing —
+  not a bare length prefix); new session kinds carry the asset payload
+  (server→client) and the client's transfer **request** + **credit** grants
+  (client→server). Because the engine's 256-byte RX ring drops bytes on overflow
+  (no safe natural backpressure), a **credit window of 2** (≤184 B in flight; max
+  frame 92 B) paces the transfer; the client tops up credit as it drains. A pure,
+  templated `NetAssetClient<Session>` (`demo/tank/net_session_loader.h`) owns the
+  connect→request→receive→install state machine, frame-based connect/inactivity
+  timeouts, and compact transport+loader error codes — host-tested with a fake
+  session (`test_net_session_loader`, 33/33 suite). **LiveSession links no embedded
+  tileset/chunks** (linker-map verified: the 4,864 asset bytes are absent); it
+  keeps one page-aligned 1,024-B network tileset buffer, the one 4,224-B physical
+  map, loader/coverage state, and the session rings. The Python server
+  (`tools/net/edge_tank_asset_server.py`) now speaks the real session wire format,
+  parses the request, adopts the transfer id, obeys credit, and has a `--selftest`
+  (validated end-to-end host↔host). Embedded + Simulated Altirra-validated;
+  **live FujiNet hardware validation is unproven in this environment** (fujinet-lib
+  is unavailable to the supported toolchain) — the live build boots and correctly
+  halts on connect failure. No engine networking changes; demo-local protocol only.
 - **Tank demo — Stage 5A network asset protocol + loader core (`atari_tank_demo`).**
   Adds a transport-neutral way to load the demo's tileset (1×1024 B) and four map
   chunks (4×960 B) from a server — **without** any FujiNet/session-lane/realtime
@@ -28,11 +52,11 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
   private engine charset storage. New host test `test_asset_loader` (38 checks:
   manifest/version/geometry/transfer-id validation, tileset & chunk range checks,
   duplicate/out-of-order handling, coverage, premature-COMPLETE, failure+reset,
-  full round-trip incl. shuffled order). A target-private `EDGE_TANK_NETWORK_ASSETS`
-  build (default **OFF** — embedded build byte-unchanged apart from a +7 B shared-
-  helper refactor) drives a **simulated** multi-frame load from the embedded assets
-  through the loader, then enters the unchanged Stage 4 gameplay; `EDGE_TANK_NET_FAULT`
-  selects deterministic fault modes. Adds `tools/net/edge_tank_asset_server.py`
+  full round-trip incl. shuffled order). A target-private simulated-loader build
+  (`EDGE_TANK_ASSET_SOURCE=SimulatedNetwork`, see Stage 5B) drives a multi-frame
+  load from the embedded assets through the loader, then enters the unchanged
+  Stage 4 gameplay; `EDGE_TANK_NET_FAULT` selects deterministic fault modes. Adds
+  `tools/net/edge_tank_asset_server.py`
   (stdlib-only: hex/capture/TCP). Altirra-validated: simulated load → install →
   gameplay is identical to embedded mode; fault modes halt without entering
   gameplay. No engine APIs changed; not a generic asset protocol.

@@ -170,29 +170,52 @@ is quantized to 2 nominal pixels (HPOSP is in color clocks).
 | No visible padding checker; clean seams/bottom row throughout | camera stays in the padding-safe scroll range |
 | Playfield, palette, seams, and chunks unchanged from earlier stages | no scrolling/geometry regression |
 
-## Optional: network asset loading (Stage 5A)
+## Optional: network asset loading (Stages 5A/5B)
 
 The tileset and four map chunks can optionally be loaded from a server instead of
-the embedded assets. Stage 5A adds the **transport-neutral protocol + loader core
-only** — there is no FujiNet/session-lane connection yet (that is Stage 5B). The
-protocol is documented in [`tank/ASSET_PROTOCOL.md`](tank/ASSET_PROTOCOL.md); the
-host server is [`tools/net/edge_tank_asset_server.py`](../tools/net/edge_tank_asset_server.py)
-(stdlib-only; `--hex`, `--capture FILE`, or `--tcp`).
+the embedded assets. The asset source is chosen at configure time:
 
 ```sh
-# Simulated loader build (feeds the protocol from the embedded assets through the
-# loader over several frames, then installs and enters normal gameplay):
 cmake -B build-atari -DCMAKE_TOOLCHAIN_FILE=cmake/atari-toolchain.cmake \
-      -DEDGE_BUILD_DEMO=ON -DEDGE_TANK_NETWORK_ASSETS=ON
+      -DEDGE_BUILD_DEMO=ON -DEDGE_TANK_ASSET_SOURCE=<mode>
 cmake --build build-atari --target atari_tank_demo
 ```
 
-The default build (`EDGE_TANK_NETWORK_ASSETS=OFF`) uses the embedded assets and is
-unchanged. In simulated mode the border shows coarse progress (amber loading →
-green complete → red failed); `-DEDGE_TANK_NET_FAULT=<1..3>` forces a deterministic
-failure (bad manifest / missing chunk row / premature complete) which halts before
-gameplay. Map chunks are written directly into the single physical map; the
-tileset uses one page-aligned 1024-byte buffer installed via the public charset API.
+| `EDGE_TANK_ASSET_SOURCE` | Behaviour |
+|---|---|
+| `Embedded` (default) | tileset + chunks compiled in; unchanged gameplay |
+| `SimulatedNetwork` | feeds the protocol from the embedded assets through the loader over several frames (no connection); `-DEDGE_TANK_NET_FAULT=<1..3>` forces bad-manifest / missing-row / premature-complete failures |
+| `LiveSession` | loads from a server over the reliable session lane; **no embedded tileset/chunks are linked** |
+
+Protocol (asset payload **and** session-transport layers): [`tank/ASSET_PROTOCOL.md`](tank/ASSET_PROTOCOL.md).
+The border shows coarse progress (amber loading → green complete → red failed); a
+failed load halts before gameplay. Map chunks are written directly into the single
+physical map; the tileset uses one page-aligned 1024-byte buffer installed via the
+public charset API (`bind_charset_page`).
+
+### LiveSession build + server
+
+```sh
+# Atari (requires the FujiNet session lane: build fujinet-lib, then configure with
+# EDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON + EDGE_FUJINETLIB_ROOT=...):
+cmake -B build-atari -DCMAKE_TOOLCHAIN_FILE=cmake/atari-toolchain.cmake \
+      -DEDGE_BUILD_DEMO=ON -DEDGE_TANK_ASSET_SOURCE=LiveSession \
+      -DEDGE_TANK_NET_HOST="192.168.1.10" -DEDGE_TANK_NET_PORT=9000 \
+      -DEDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON -DEDGE_FUJINETLIB_ROOT=/path/to/fujinet-lib
+cmake --build build-atari --target atari_tank_demo
+
+# Host server (Python stdlib only):
+python3 tools/net/edge_tank_asset_server.py --host 0.0.0.0 --port 9000
+#   --selftest          verify framing/payloads     --hex   print asset payloads
+#   --capture-session F  write the session-wire frames
+```
+
+The client connects, requests the transfer (its transfer id + an initial credit of
+2), and grants credit as it drains so the 256-byte RX ring never overflows; the
+server sends 66 messages (1 manifest + 16 tileset blocks + 48 chunk-row pairs + 1
+complete), ~5.6 KB on the wire. `EDGE_TANK_NET_HOST`/`PORT` are baked into the ROM.
+The live build still has no collision/terrain/bullets/realtime-lane/gameplay
+networking; the session is only used to load assets before gameplay.
 
 # VBXE demos
 

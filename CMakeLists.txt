@@ -240,71 +240,83 @@ if(EDGE_BUILD_DEMO)
             PROBE_FORCE_MODE=${EDGE_PROBE_MODE} PROBE_FORCE_INDEX=${EDGE_PROBE_INDEX})
     endif()
 
-    # Stage 2 tank demo — static four-chunk ANTIC Mode 4 playfield + free camera.
-    # Embedded ATank-derived assets (demo/tank/assets/*) are turned into ROM-resident
-    # byte-array headers at build time: the 1K tileset via generate_charset_header,
-    # the four 960-byte map chunks via the generic generate_bytes_header.
-    # Source binaries are committed under demo/tank/assets/; the generated C++
-    # headers live ONLY in the build tree (per build dir, removed with it) and are
-    # listed as target sources so the demo cannot compile before they exist.
+    # Tank demo. Asset source selected at configure time (target-private):
+    #   EDGE_TANK_ASSET_SOURCE = Embedded (default) | SimulatedNetwork | LiveSession
+    # Embedded/SimulatedNetwork compile the ATank-derived assets in (binaries under
+    # demo/tank/assets/ are turned into build-tree-only byte-array headers, listed
+    # as target sources so the demo cannot compile before they exist). LiveSession
+    # links NO embedded tileset/chunks — they arrive over the session lane.
+    set(EDGE_TANK_ASSET_SOURCE "Embedded" CACHE STRING
+        "Tank demo asset source: Embedded | SimulatedNetwork | LiveSession")
+    set_property(CACHE EDGE_TANK_ASSET_SOURCE PROPERTY STRINGS
+        Embedded SimulatedNetwork LiveSession)
+    if(EDGE_TANK_ASSET_SOURCE STREQUAL "Embedded")
+        set(_TANK_SRC 0)
+    elseif(EDGE_TANK_ASSET_SOURCE STREQUAL "SimulatedNetwork")
+        set(_TANK_SRC 1)
+    elseif(EDGE_TANK_ASSET_SOURCE STREQUAL "LiveSession")
+        set(_TANK_SRC 2)
+    else()
+        message(FATAL_ERROR "EDGE_TANK_ASSET_SOURCE must be Embedded, SimulatedNetwork, or LiveSession")
+    endif()
+
     set(GENERATE_BYTES_HEADER_SCRIPT ${CMAKE_SOURCE_DIR}/cmake/generate_bytes_header.cmake)
     set(TANK_ASSET_SRC_DIR ${CMAKE_SOURCE_DIR}/demo/tank/assets)
     set(TANK_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated/tank)
-    set(TANK_TILESET_HEADER ${TANK_GEN_DIR}/tank_tileset.gen.h)
-    add_custom_command(
-        OUTPUT ${TANK_TILESET_HEADER}
-        COMMAND ${CMAKE_COMMAND}
-                -DINPUT=${TANK_ASSET_SRC_DIR}/tank_tileset.fnt
-                -DOUTPUT=${TANK_TILESET_HEADER}
-                -DSYMBOL=tileset_bytes -DNAMESPACE=demo::tank::assets
-                -P ${GENERATE_CHARSET_HEADER_SCRIPT}
-        DEPENDS ${TANK_ASSET_SRC_DIR}/tank_tileset.fnt ${GENERATE_CHARSET_HEADER_SCRIPT}
-        COMMENT "Generating tank_tileset.gen.h" VERBATIM)
-    set(TANK_CHUNK_HEADERS "")
-    foreach(C 0_0 1_0 0_1 1_1)
-        set(_h ${TANK_GEN_DIR}/chunk_${C}.gen.h)
+    set(TANK_GEN_HEADERS "")
+    if(NOT _TANK_SRC EQUAL 2)   # Embedded / SimulatedNetwork: generate embedded assets
+        set(TANK_TILESET_HEADER ${TANK_GEN_DIR}/tank_tileset.gen.h)
         add_custom_command(
-            OUTPUT ${_h}
+            OUTPUT ${TANK_TILESET_HEADER}
             COMMAND ${CMAKE_COMMAND}
-                    -DINPUT=${TANK_ASSET_SRC_DIR}/chunk_${C}.scr
-                    -DOUTPUT=${_h}
-                    -DSYMBOL=chunk_${C} -DNAMESPACE=demo::tank::assets -DEXPECT_BYTES=960
-                    -P ${GENERATE_BYTES_HEADER_SCRIPT}
-            DEPENDS ${TANK_ASSET_SRC_DIR}/chunk_${C}.scr ${GENERATE_BYTES_HEADER_SCRIPT}
-            COMMENT "Generating chunk_${C}.gen.h" VERBATIM)
-        list(APPEND TANK_CHUNK_HEADERS ${_h})
-    endforeach()
+                    -DINPUT=${TANK_ASSET_SRC_DIR}/tank_tileset.fnt
+                    -DOUTPUT=${TANK_TILESET_HEADER}
+                    -DSYMBOL=tileset_bytes -DNAMESPACE=demo::tank::assets
+                    -P ${GENERATE_CHARSET_HEADER_SCRIPT}
+            DEPENDS ${TANK_ASSET_SRC_DIR}/tank_tileset.fnt ${GENERATE_CHARSET_HEADER_SCRIPT}
+            COMMENT "Generating tank_tileset.gen.h" VERBATIM)
+        list(APPEND TANK_GEN_HEADERS ${TANK_TILESET_HEADER})
+        foreach(C 0_0 1_0 0_1 1_1)
+            set(_h ${TANK_GEN_DIR}/chunk_${C}.gen.h)
+            add_custom_command(
+                OUTPUT ${_h}
+                COMMAND ${CMAKE_COMMAND}
+                        -DINPUT=${TANK_ASSET_SRC_DIR}/chunk_${C}.scr
+                        -DOUTPUT=${_h}
+                        -DSYMBOL=chunk_${C} -DNAMESPACE=demo::tank::assets -DEXPECT_BYTES=960
+                        -P ${GENERATE_BYTES_HEADER_SCRIPT}
+                DEPENDS ${TANK_ASSET_SRC_DIR}/chunk_${C}.scr ${GENERATE_BYTES_HEADER_SCRIPT}
+                COMMENT "Generating chunk_${C}.gen.h" VERBATIM)
+            list(APPEND TANK_GEN_HEADERS ${_h})
+        endforeach()
+    endif()
 
-    add_executable(atari_tank_demo demo/tank/atari_tank_demo.cpp
-        ${TANK_TILESET_HEADER} ${TANK_CHUNK_HEADERS})
+    add_executable(atari_tank_demo demo/tank/atari_tank_demo.cpp ${TANK_GEN_HEADERS})
     target_compile_options(atari_tank_demo PRIVATE
         -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra)
-    # Target-private: the engine root (for <engine/...>) and the build-tree
-    # generated-header dir (for the *.gen.h). NOT global, NOT directory-wide.
     target_include_directories(atari_tank_demo PRIVATE ${CMAKE_SOURCE_DIR} ${TANK_GEN_DIR})
+    target_compile_definitions(atari_tank_demo PRIVATE EDGE_TANK_ASSET_SOURCE=${_TANK_SRC})
     set_target_properties(atari_tank_demo PROPERTIES OUTPUT_NAME "atari_tank_demo.xex")
     target_link_options(atari_tank_demo PRIVATE
         "LINKER:--Map=$<TARGET_FILE_DIR:atari_tank_demo>/atari_tank_demo.map")
-    # Optional deterministic boot state for headless screenshots (target-private,
-    # NOT global): -DEDGE_TANK_HEADING=<0..15> pins the heading; -DEDGE_TANK_POSITION
-    # =<0..14> pins the tank's start (see kValidationPositions: clamps, edges,
-    # centre, follow transitions, odd-X). Unset = heading N at the world centre.
+    # Deterministic boot state (target-private): -DEDGE_TANK_HEADING=<0..15>,
+    # -DEDGE_TANK_POSITION=<0..14>. SimulatedNetwork: -DEDGE_TANK_NET_FAULT=<0..3>.
+    # LiveSession endpoint: -DEDGE_TANK_NET_HOST="ip" -DEDGE_TANK_NET_PORT=<n>.
     if(DEFINED EDGE_TANK_HEADING)
         target_compile_definitions(atari_tank_demo PRIVATE EDGE_TANK_HEADING=${EDGE_TANK_HEADING})
     endif()
     if(DEFINED EDGE_TANK_POSITION)
         target_compile_definitions(atari_tank_demo PRIVATE EDGE_TANK_POSITION=${EDGE_TANK_POSITION})
     endif()
-    # Stage 5A: optional simulated network-asset loading (target-private, default
-    # OFF so the embedded build is byte-unchanged). -DEDGE_TANK_NETWORK_ASSETS=ON
-    # feeds the protocol from the embedded assets through the loader (no real
-    # connection). -DEDGE_TANK_NET_FAULT=<0..3> injects a deterministic fault
-    # (1 bad manifest, 2 missing last chunk row, 3 premature COMPLETE).
-    option(EDGE_TANK_NETWORK_ASSETS "Tank demo: simulated network asset loading" OFF)
-    if(EDGE_TANK_NETWORK_ASSETS)
-        target_compile_definitions(atari_tank_demo PRIVATE EDGE_TANK_NETWORK_ASSETS=1)
-        if(DEFINED EDGE_TANK_NET_FAULT)
-            target_compile_definitions(atari_tank_demo PRIVATE EDGE_TANK_NET_FAULT=${EDGE_TANK_NET_FAULT})
+    if(_TANK_SRC EQUAL 1 AND DEFINED EDGE_TANK_NET_FAULT)
+        target_compile_definitions(atari_tank_demo PRIVATE EDGE_TANK_NET_FAULT=${EDGE_TANK_NET_FAULT})
+    endif()
+    if(_TANK_SRC EQUAL 2)
+        if(DEFINED EDGE_TANK_NET_HOST)
+            target_compile_definitions(atari_tank_demo PRIVATE EDGE_TANK_NET_HOST="${EDGE_TANK_NET_HOST}")
+        endif()
+        if(DEFINED EDGE_TANK_NET_PORT)
+            target_compile_definitions(atari_tank_demo PRIVATE EDGE_TANK_NET_PORT=${EDGE_TANK_NET_PORT})
         endif()
     endif()
 

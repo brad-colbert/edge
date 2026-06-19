@@ -132,3 +132,42 @@ The Stage 5B transport is the **reliable, framed session lane** (TCP-backed),
 which already guarantees integrity, ordering, and message boundaries. Adding a CRC
 would duplicate that guarantee for no benefit on a 6502, so none is included. (If a
 future unreliable transport is used, a CRC/sequence layer would be reconsidered.)
+
+## Session transport layer (Stage 5B)
+
+Stage 5B carries the asset payloads above over EDGE's reliable **session lane**
+(`Game::net.session`). Two layers stay distinct: the session frame (below) and the
+asset payload (above). One asset payload = one session message payload, passed
+intact to `AssetLoader::consume()`.
+
+### Session wire frame (engine/net_api.h)
+
+```
+[ kind (1) ][ size_lo (1) ][ size_hi (1) ][ payload (size) ]    # size little-endian
+```
+
+This is the exact EDGE session wire format (NOT a bare 2-byte length prefix).
+`recv()` returns the `kind` and the payload.
+
+### Session message kinds (Stage 5B, demo-local)
+
+| Value | Name | Direction | Payload |
+|---|---|---|---|
+| 1 | asset payload | server → client | a Stage 5A asset message (above) |
+| 2 | transfer request | client → server | `[version][transfer_id][asset_set][credit]` |
+| 3 | credit grant | client → server | `[transfer_id][credit]` |
+
+### Flow + credit pacing
+
+The client connects, sends a **request** (its new transfer id + an initial credit
+of 2), and the server replies with asset messages — at most `credit` of them —
+then waits. As the client drains its 256-byte RX ring it sends **credit** grants
+to top the window back up to 2. The window of 2 bounds in-flight bytes to ≤ 2×92 =
+184 B (< the 256-B RX ring), so the ring never overflows (the engine's RX drain
+drops bytes on a full ring — there is no safe natural backpressure). The server
+stamps every asset payload with the request's transfer id; the loader's existing
+transfer-id check rejects stale payloads. The transfer ends with the asset-layer
+`COMPLETE` (sent as one more credited asset message).
+
+Largest session frame = 3 + 89 = **92 bytes**. Control messages are 3+4 (request)
+and 3+2 (credit).
