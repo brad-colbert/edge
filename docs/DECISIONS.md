@@ -1308,6 +1308,29 @@ clear, ADR-022, was the first such trim). The busy flag is global
 mutable state in the trampoline, acceptable because the deferred
 VBI is strictly single-instance.
 
+**Addendum (XITVBV-window pile-up):**
+The original guard cleared `edge_vbi_busy` *inside the trampoline*,
+just before `JMP XITVBV`. That left a hole: `XITVBV` is the OS
+deferred-VBI exit, and if the next VBI NMI arrives during that
+short window the guard is already clear, so a *fresh* service runs
+nested inside the previous `XITVBV`. The OS stage-1/2 VBLANK is not
+re-entrant mid-cleanup — its internal `RTS` returns one byte off
+into OS ROM, decodes garbage, and `KIL`s. This is distinct from the
+in-service re-entry above (which the busy flag did catch); it is a
+*pile-up* at exit, reachable whenever the service finishes right at
+the next vblank (observed on the heaviest scroll + sprite frame:
+far-left coarse_col=0, where ANTIC's HSCROLL pre-fetch peaks DMA
+and starves the `-Os` service over one frame). Reproduced at the
+original tank speed too — pre-existing, not speed-induced.
+
+Fix: keep `edge_vbi_busy` **set through `XITVBV`** (the trampoline
+no longer clears it) and release it from the **main loop** once the
+frame is consumed — `loop.h` (run/run_until) → `Core::frame_consumed()`
+→ `Hal::frame_consumed()`. A VBI arriving in the XITVBV window then
+also sees the flag and skips, so the guard now covers both the
+in-service and at-exit windows. `Core::frame_consumed()` is
+`requires`-gated so a HAL/mock without the hook is a no-op.
+
 ## ADR-029: P/M Hardware Missiles on the Blitter Backend
 
 **Status:** Accepted

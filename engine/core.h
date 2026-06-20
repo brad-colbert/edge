@@ -380,6 +380,15 @@ public:
     static void run_until(Cb cb) { engine::run_until<Core>(cb); }
     static bool frame_overrun() { return engine::frame_overrun<Core>(); }
 
+    // Called by the loop once it has consumed a frame (after clearing frame_ready_),
+    // so the backend can release any per-frame interrupt guard held across the VBI
+    // exit. The Atari HAL clears its VBI re-entry guard here (closing the XITVBV
+    // pile-up window); a HAL (or test mock) without the hook makes this a no-op.
+    static void frame_consumed() {
+        if constexpr (requires { Platform::hal::frame_consumed(); })
+            Platform::hal::frame_consumed();
+    }
+
     // ── Per-frame service ──
     //
     // The backend's frame interrupt runs this once per frame in the

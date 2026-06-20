@@ -12,6 +12,23 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
 ## [Unreleased]
 
 ### Added
+- **Tank demo — Stage 5C real FujiNet validation + launch scripts.** The
+  `LiveSession` build now links the real **fujinet-lib** backend
+  (`-DEDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON -DEDGE_FUJINETLIB_ROOT=…`); a build
+  marker (`EDGE-LIVE-BACKEND:RealFujinetLib` vs `…:Stub`), a configure print, and a
+  loud warning make a stub build impossible to mistake for a real one. **Validated
+  end-to-end on real FujiNet** (Altirra NetSIO → netsiohub → fujinet-pc → asset
+  server): all 66 asset messages (5,619 framed wire bytes) transfer with the credit
+  window of 2 honored, the loader completes (16/16 tiles, 96/96 rows), and gameplay
+  begins with a playfield pixel-identical to Embedded — this **supersedes the Stage
+  5B "unproven" note** below. The Atari session adapter now stages one bulk
+  `network_read_nb` and serves the engine's byte-at-a-time drain from it (~30–90×
+  fewer SIO transactions; the per-byte path desynced framing over emulated NetSIO),
+  and the Python server gains `--linger` (holds the socket open after COMPLETE so
+  the firmware delivers the final messages before FIN). New helper scripts
+  `scripts/run_tank_embedded.sh` and `scripts/run_tank_networked.sh` build + launch
+  the demo in Altirra (the networked one also starts the asset server). A focused
+  CMake guard rejects `/mnt/old_ubuntu_22` in any fujinet-lib path variable.
 - **Tank demo — Stage 5B live session-lane asset loading (`atari_tank_demo`).**
   Connects the Stage 5A loader to EDGE's reliable session lane (`Game::net.session`,
   never the realtime lane) and loads the tileset + four chunks from the Python
@@ -178,6 +195,13 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
   `.bss` unchanged at 359 bytes. See ADR-033.
 
 ### Changed
+- **Tank demo — faster tank motion.** Translation speed is now a single
+  compile-time `tank::kSpeedScale` (`demo/tank/tank_motion.h`, default **3** ≈ 1.5
+  px/frame, up from ~0.5); the 16-heading motion table is the unit-speed vectors
+  scaled by it **at compile time** (constexpr — no runtime multiply). Overridable
+  via `-DEDGE_TANK_SPEED_SCALE=<n>` (≤18 to keep the scaled components in `int8_t`).
+  `test_tank_motion` / `test_tank_camera` are now scale-aware (expectations × scale,
+  equal-speed tolerance × scale²).
 - **Tile subsystem terminology + naming cleanup — source-breaking API rename, no
   runtime change.** Source compatibility changed; runtime behaviour, ROM size, and
   RAM use did **not** (`atari_scroll_test.xex` and `atari_hw_test.xex` are
@@ -203,6 +227,22 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
   `MapChunk`/`ChunkGrid`/`ChunkLoader`/`ChunkManager`/`ChunkCache` names for future
   map-streaming work — **no chunk management or new demo is introduced**. See
   ADR-034.
+
+### Fixed
+- **Deferred-VBI re-entry guard now covers the `XITVBV` exit window (ADR-028).**
+  The guard cleared `edge_vbi_busy` *inside the trampoline* before `JMP XITVBV`,
+  leaving a hole: if the next VBI NMI arrived during `XITVBV` it ran a fresh service
+  nested in the OS's (non-re-entrant) VBLANK exit → the OS `RTS` returned one byte
+  off into ROM → garbage → `KIL`. Surfaced as a hard crash when scrolling to the
+  far-left edge **and then up** with a sprite shown — the heaviest frame
+  (`coarse_col=0`, where ANTIC's HSCROLL pre-fetch peaks DMA and starves the `-Os`
+  service over one frame). Pre-existing (reproduced at the original tank speed).
+  Fix: the trampoline keeps `edge_vbi_busy` set **through `XITVBV`**; the main loop
+  releases it after consuming the frame (`loop.h` run/run_until → `Core::frame_consumed()`
+  → `Hal::frame_consumed()`, `requires`-gated so HALs/mocks without the hook no-op).
+  A VBI in the exit window now also sees the flag and skips. Verified: the
+  far-left+up auto-drive repro no longer crashes; multiplexer (9 sprites/3 zones)
+  and arena demos unaffected; 33/33 host tests pass.
 
 ## [0.5.0] - 2026-06-07
 
