@@ -149,7 +149,8 @@ static void test_unchanged() {
     CHECK(tank::heading_cw(15) == 0 && tank::heading_ccw(0) == 15);
     tank::TankState s{ static_cast<i16>(320 << 4), static_cast<i16>(192 << 4), tank::H_E, 0 };
     tank::move_tank(s, +1);
-    CHECK(s.world_x_q4 == static_cast<i16>((320 << 4) + 8));   // forward adds dx
+    // forward adds dx (heading E base dx +8, scaled by kSpeedScale at compile time)
+    CHECK(s.world_x_q4 == static_cast<i16>((320 << 4) + 8 * tank::kSpeedScale));
     // clamp still holds at the edge.
     tank::TankState w{ static_cast<i16>(10 << 4), static_cast<i16>(200 << 4), tank::H_W, 0 };
     for (int i = 0; i < 40; ++i) tank::move_tank(w, +1);

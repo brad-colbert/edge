@@ -6,7 +6,8 @@
 // no floating point, no runtime multiply/divide/trig.
 //
 //   * 16 movement headings (N=0, clockwise, 22.5 deg apart) with wrap.
-//   * 16-entry ROM motion table in Q12.4 nominal px/frame (~|8| each ≈ 0.5 px).
+//   * 16-entry ROM motion table in Q12.4 nominal px/frame (unit ~|8|; scaled by
+//     kSpeedScale at compile time — default 3 ≈ 1.5 px/frame).
 //   * 8 displayed silhouettes; intermediate (odd) headings round to the next
 //     clockwise silhouette.
 //   * Q12.4 hull-centre world position, forward/reverse (add/subtract the same
@@ -34,17 +35,30 @@ enum Heading : u8 {
 inline constexpr u8 heading_cw (u8 h) { return static_cast<u8>((h + 1) & 15); }       // 15 -> 0
 inline constexpr u8 heading_ccw(u8 h) { return static_cast<u8>((h + 15) & 15); }      // 0 -> 15
 
-// ── Motion vectors (Q12.4 nominal px/frame), magnitude ~8 (|v|^2 ≈ 58..72) ──
+// ── Motion vectors (Q12.4 nominal px/frame) ────────────────────────────────
 // dy is negative for "up" (north). The table is point-symmetric, so reverse is
 // just subtraction of the forward vector (no separate reverse table).
+//
+// kSpeedScale sets the tank's translation speed. The base direction table is
+// unit-speed (magnitude ~8 Q12.4 ≈ 0.5 px/frame); the scale multiplies it at
+// COMPILE time (constexpr — no runtime multiply, honouring the no-mul rule). So
+//   1 → ~0.5 px/frame (original)   2 → ~1.0   3 → ~1.5 px/frame, etc.
+// Raise/lower this one constant to retune speed. Keep it small enough that the
+// scaled components stay in i8 range (≤127): 7*kSpeedScale ≤ 127 ⇒ scale ≤ 18.
 struct MotionVector { i8 dx_q4; i8 dy_q4; };
 
+#ifndef EDGE_TANK_SPEED_SCALE
+#define EDGE_TANK_SPEED_SCALE 3
+#endif
+inline constexpr i8 kSpeedScale = EDGE_TANK_SPEED_SCALE;
+
 inline const MotionVector& motion_vector(u8 heading) {
+    constexpr int S = kSpeedScale;
     static constexpr MotionVector kTable[16] = {
-        { 0, -8}, { 3, -7}, { 6, -6}, { 7, -3},   // N  NNE NE  ENE
-        { 8,  0}, { 7,  3}, { 6,  6}, { 3,  7},   // E  ESE SE  SSE
-        { 0,  8}, {-3,  7}, {-6,  6}, {-7,  3},   // S  SSW SW  WSW
-        {-8,  0}, {-7, -3}, {-6, -6}, {-3, -7},   // W  WNW NW  NNW
+        { i8(0*S), i8(-8*S)}, { i8(3*S), i8(-7*S)}, { i8(6*S), i8(-6*S)}, { i8(7*S), i8(-3*S)},  // N  NNE NE  ENE
+        { i8(8*S), i8( 0*S)}, { i8(7*S), i8( 3*S)}, { i8(6*S), i8( 6*S)}, { i8(3*S), i8( 7*S)},  // E  ESE SE  SSE
+        { i8(0*S), i8( 8*S)}, { i8(-3*S),i8( 7*S)}, { i8(-6*S),i8( 6*S)}, { i8(-7*S),i8( 3*S)},  // S  SSW SW  WSW
+        { i8(-8*S),i8( 0*S)}, { i8(-7*S),i8(-3*S)}, { i8(-6*S),i8(-6*S)}, { i8(-3*S),i8(-7*S)},  // W  WNW NW  NNW
     };
     return kTable[heading & 15];
 }

@@ -20,13 +20,16 @@ static unsigned g_failures = 0;
         }                                                                  \
     } while (0)
 
-// Expected forward motion table (must match tank_motion.h).
-static const tank::MotionVector kExpect[16] = {
+// Expected UNIT (unscaled) forward motion table; tank_motion.h multiplies this by
+// tank::kSpeedScale at compile time, so the expectations below are scaled by S to
+// stay correct for any configured speed.
+static const tank::MotionVector kBase[16] = {
     { 0, -8}, { 3, -7}, { 6, -6}, { 7, -3},
     { 8,  0}, { 7,  3}, { 6,  6}, { 3,  7},
     { 0,  8}, {-3,  7}, {-6,  6}, {-7,  3},
     {-8,  0}, {-7, -3}, {-6, -6}, {-3, -7},
 };
+static constexpr int S = tank::kSpeedScale;
 // 16 headings -> 8 silhouettes (intermediate/odd rounds clockwise).
 static const u8 kSil[16] = {0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,0};
 
@@ -45,10 +48,10 @@ static void test_headings() {
 static void test_vectors() {
     for (u8 h = 0; h < 16; ++h) {
         const tank::MotionVector v = tank::motion_vector(h);
-        CHECK(v.dx_q4 == kExpect[h].dx_q4);
-        CHECK(v.dy_q4 == kExpect[h].dy_q4);
+        CHECK(v.dx_q4 == static_cast<i16>(kBase[h].dx_q4 * S));
+        CHECK(v.dy_q4 == static_cast<i16>(kBase[h].dy_q4 * S));
         const i32 mag2 = i32(v.dx_q4) * v.dx_q4 + i32(v.dy_q4) * v.dy_q4;
-        CHECK(mag2 >= 54 && mag2 <= 74);   // ~64 +/- ~16%
+        CHECK(mag2 >= 54 * S * S && mag2 <= 74 * S * S);   // ~64*S^2 +/- ~16%
     }
 }
 
@@ -59,8 +62,8 @@ static void test_reverse() {
         tank::TankState s{ static_cast<i16>(320 << 4), static_cast<i16>(192 << 4), h, 0 };
         const i16 sx = s.world_x_q4, sy = s.world_y_q4;
         tank::move_tank(s, +1);
-        CHECK(s.world_x_q4 == static_cast<i16>(sx + kExpect[h].dx_q4));
-        CHECK(s.world_y_q4 == static_cast<i16>(sy + kExpect[h].dy_q4));
+        CHECK(s.world_x_q4 == static_cast<i16>(sx + kBase[h].dx_q4 * S));
+        CHECK(s.world_y_q4 == static_cast<i16>(sy + kBase[h].dy_q4 * S));
         tank::move_tank(s, -1);            // subtract the same vector
         CHECK(s.world_x_q4 == sx && s.world_y_q4 == sy);
     }
@@ -86,21 +89,22 @@ static void test_input() {
     CHECK(b.rotate == +1 && b.move == -1);
 }
 
-// 11, 12: Q12.4 accumulation + sub-pixel accumulation across frames.
+// 11, 12: Q12.4 accumulation across frames (scale-aware: dx/dy per frame = base*S).
 static void test_accumulation() {
-    // Heading E: dx=+8 q4 per forward frame. 2 frames = 16 q4 = exactly 1 nominal px.
+    // Heading E: dx = +8*S q4 per forward frame; accumulates exactly across frames.
     tank::TankState s{ static_cast<i16>(100 << 4), static_cast<i16>(100 << 4), tank::H_E, 0 };
     const i16 x0 = tank::world_x_nominal(s);
     tank::move_tank(s, +1);
-    CHECK(s.world_x_q4 == static_cast<i16>((100 << 4) + 8));   // accumulated in Q4
-    CHECK(tank::world_x_nominal(s) == x0);                     // <1 px so far (8/16)
+    CHECK(s.world_x_q4 == static_cast<i16>((100 << 4) + 8 * S));   // one frame in Q4
     tank::move_tank(s, +1);
-    CHECK(tank::world_x_nominal(s) == static_cast<i16>(x0 + 1)); // 16 q4 -> +1 px
-    // Heading NNE: dy=-7 q4/frame accumulates fractionally; after 3 frames = -21 q4.
+    CHECK(s.world_x_q4 == static_cast<i16>((100 << 4) + 16 * S));  // two frames accumulate
+    // After 2 frames of +8*S q4, nominal advanced by (16*S)/16 = S px.
+    CHECK(tank::world_x_nominal(s) == static_cast<i16>(x0 + S));
+    // Heading NNE: dx=+3*S, dy=-7*S q4/frame; after 3 frames they accumulate exactly.
     tank::TankState t{ static_cast<i16>(300 << 4), static_cast<i16>(300 << 4), tank::H_NNE, 0 };
     for (int i = 0; i < 3; ++i) tank::move_tank(t, +1);
-    CHECK(t.world_y_q4 == static_cast<i16>((300 << 4) - 21));
-    CHECK(t.world_x_q4 == static_cast<i16>((300 << 4) + 9));   // dx=+3 * 3
+    CHECK(t.world_y_q4 == static_cast<i16>((300 << 4) - 7 * S * 3));
+    CHECK(t.world_x_q4 == static_cast<i16>((300 << 4) + 3 * S * 3));
 }
 
 // 13-16: world clamps (centre stays in [8,632] x [8,376] nominal).
