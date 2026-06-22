@@ -1,6 +1,6 @@
 # Architecture Decision Records
 
-> **Applies to EDGE v0.5.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
+> **Applies to EDGE v0.6.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
 
 Decisions made during design, with rationale. These explain the
 "why" behind architectural choices and document tradeoffs.

@@ -1,6 +1,6 @@
 # EDGE API Reference
 
-> **Applies to EDGE v0.5.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
+> **Applies to EDGE v0.6.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
 
 This reference is organized in two layers:
 

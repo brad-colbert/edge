@@ -11,6 +11,8 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-06-21
+
 ### Added
 - **Tank demo — Stage 5C real FujiNet validation + launch scripts.** The
   `LiveSession` build now links the real **fujinet-lib** backend
