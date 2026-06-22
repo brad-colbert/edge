@@ -77,6 +77,10 @@ struct GameConfig {
 using Game = engine::Core<Platform, GameConfig>;
 
 static tank::PhysicalMap g_map;
+// The scroll-map placement guard (ScrollTileMap head-pad/alignment) is sized for the
+// platform's scan-wrap boundary; keep the demo-local constant honest against caps.
+static_assert(Platform::capabilities::screen_buffer_alignment == tank::kScanWrapBoundary,
+              "kScanWrapBoundary must match the platform scan-wrap granularity");
 
 static constexpr u8 kTurnPeriod = (Platform::capabilities::frames_per_second >= 60) ? 7 : 6;
 static constexpr u8 kTankColor  = 0x1E;

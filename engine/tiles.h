@@ -109,6 +109,57 @@ constexpr TileMap<Width, Height> make_map(const u8 (&in)[Width * Height]) {
     return m;
 }
 
+// ── ScrollTileMap (boundary-safe scroll-map storage) ──────────────────────
+//
+// A RAM TileMap whose cell rows are placed so no row straddles the display's
+// scan-address WRAP BOUNDARY. Some display hardware advances only the low bits
+// of its memory-scan counter, so a fetched scan line whose bytes span a
+// `Boundary`-sized page wraps to the page start and renders garbage. The display
+// program reloads the fetch address at every scroll line, which fixes crossings
+// *between* lines, but cannot fix a single line whose own fetch straddles a
+// boundary — that has to be avoided by where the buffer sits in memory.
+//
+// This type aligns the buffer to `Boundary` and inserts a head pad of
+// `Boundary % Width` cells, so the buffer's single interior boundary falls
+// exactly on a row edge (`Boundary - head_pad` is then a whole number of rows).
+// Every row therefore lies within one page and no line can straddle. `Boundary`
+// is the platform's scan-wrap granularity (Platform caps::screen_buffer_alignment);
+// pass 1 for platforms with no such constraint (degenerates to a plain TileMap
+// layout). The cell array, width/height, and accessors match TileMap, so a
+// ScrollTileMap is a drop-in for any scroll map bound via Core::scroll_map().
+//
+// Limited to buffers that cross at most one boundary (a single head pad cannot
+// row-align two crossings when `Width` does not divide `Boundary`); a static
+// assert rejects larger maps, which need a boundary-dividing row stride instead.
+namespace detail {
+template <u16 N> struct HeadPad { u8 bytes[N]; };
+template <>      struct HeadPad<0> {};   // empty base -> zero storage, cells at offset 0
+}  // namespace detail
+
+template <u16 Width, u16 Height, u16 Boundary>
+struct alignas(Boundary > 1 ? Boundary : 1) ScrollTileMap
+    : private detail::HeadPad<(Boundary > 1) ? (Boundary % Width) : 0> {
+    static constexpr u16 width    = Width;
+    static constexpr u16 height   = Height;
+    static constexpr u16 head_pad = (Boundary > 1) ? (Boundary % Width) : 0;
+
+    static_assert(Boundary <= 1 ||
+                      static_cast<u32>(head_pad) + static_cast<u32>(Width) * Height <=
+                          static_cast<u32>(Boundary) * 2,
+                  "ScrollTileMap crosses more than one scan-wrap boundary; a single "
+                  "head pad cannot row-align every crossing — use a row stride that "
+                  "divides Boundary instead");
+
+    u8 cells[Height * Width];
+
+    constexpr u8 tile_at(u16 col, u16 row) const {
+        return cells[static_cast<u16>(row * Width + col)];
+    }
+    void set_tile(u16 col, u16 row, u8 tile_code) {
+        cells[static_cast<u16>(row * Width + col)] = tile_code;
+    }
+};
+
 // ── TileDisplay ───────────────────────────────────────────────────────
 //
 // The Tiles coordinator. It loads a tileset into character-set RAM, points the

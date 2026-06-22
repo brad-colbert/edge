@@ -70,10 +70,19 @@ static_assert(PlayfieldGeometry::logical_payload_bytes == 3840, "logical payload
 static_assert(PlayfieldGeometry::physical_alloc_bytes  == 4224, "physical allocation is 4224 bytes");
 static_assert(PlayfieldGeometry::chunk_payload_bytes   == 960,  "chunk payload is 960 bytes");
 
+// ANTIC advances only the low 12 bits of its scan-address counter, so screen data
+// cannot cross a 4K page without garbling the line that straddles it. The 88-byte
+// physical stride means 4K boundaries fall mid-row, so the map must be PLACED so no
+// row straddles one (the per-line LMS reload only fixes line-start crossings).
+// Matches Platform::capabilities::screen_buffer_alignment (asserted in the demo).
+inline constexpr engine::u16 kScanWrapBoundary = 4096;
+
 // The final writable physical tile map type (bound via Game::scroll_map). Exactly
-// one of these exists in the demo; ANTIC DMA-reads it directly.
-using PhysicalMap = engine::TileMap<PlayfieldGeometry::physical_width,
-                                    PlayfieldGeometry::physical_height>;
+// one of these exists in the demo; ANTIC DMA-reads it directly. ScrollTileMap aligns
+// it + head-pads so its single 4K crossing lands on a row edge (no straddle).
+using PhysicalMap = engine::ScrollTileMap<PlayfieldGeometry::physical_width,
+                                          PlayfieldGeometry::physical_height,
+                                          kScanWrapBoundary>;
 static_assert(sizeof(PhysicalMap::cells) == 4224, "physical map is 4224 bytes");
 
 // Neutral fill for padding + pre-load clear. Tile code 0 is the ATank arena
