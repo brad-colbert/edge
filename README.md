@@ -122,6 +122,53 @@ For a fuller walkthrough, start with [`/documents/QUICK_START.md`](./documents/Q
 - [`/documents`](./documents) — end-user documentation
 - [`/cmake`](./cmake) — toolchain files for simulator and Atari builds
 
+## Requirements
+
+### Core (required for any build or test)
+
+- **[LLVM-MOS](https://github.com/llvm-mos/llvm-mos)** — the LLVM/Clang C++
+  cross compiler for the MOS 6502 and related processors. EDGE builds with
+  `mos-sim-clang++` (unit tests) and `mos-atari8-dos-clang++` (Atari `.xex`), and the
+  bundled `mos-sim` simulator runs the test suite. Install the
+  **[llvm-mos-sdk](https://github.com/llvm-mos/llvm-mos-sdk)** into `/usr/local`
+  (the toolchain files expect it on `/usr/local/bin`).
+- **[CMake](https://cmake.org/) ≥ 3.20** — the build system for both the test suite
+  and the Atari demos.
+- **[Python 3](https://www.python.org/)** — host-side tooling (`tools/net`,
+  `tools/mode4`). Standard library only; no extra packages.
+
+### Atari hardware & VBXE validation
+
+- **[Altirra](https://www.virtualdub.org/altirra.html)** — the reference Atari 8-bit
+  emulator and the only one with VBXE (FX core) support, used to validate the VBXE
+  demos and capture screenshots. On Linux it is driven headless through Wine by
+  `scripts/altirra_screenshot.sh` and `scripts/altirra_probe.sh`.
+- **[Wine](https://www.winehq.org/)** *(Linux only)* — runs the Windows Altirra build
+  (and the Mode4 charset tool) under Linux.
+- **[Fujisan](https://github.com/pedgarcia/fujisan)** — a cross-platform Atari 8-bit
+  emulator built on atari800 with built-in FujiNet/NetSIO support; the cross-check
+  emulator when Altirra misbehaves at startup.
+
+### FujiNet networking (optional — only for the networking lanes/demos)
+
+- **[fujinet-firmware](https://github.com/FujiNetWIFI/fujinet-firmware)** — the ESP32
+  FujiNet multifunction firmware that provides the `N:` network device. The
+  [fujinet-pc](https://github.com/FujiNetWIFI/fujinet-pc) port runs it on the desktop
+  as part of the emulator stack.
+- **[fujinet-emulator-bridge](https://github.com/FujiNetWIFI/fujinet-emulator-bridge)**
+  — bridges an emulator (Altirra) to FujiNet over the NetSIO UDP protocol (`netsiohub`
+  + the Altirra `netsio.atdevice`). EDGE's realtime (Netstream) lane is validated
+  against this stack.
+- **fujinet-lib (llvm-mos build)** — a pre-built C library (`libfujinet.a` + headers)
+  for the session lane's real TCP transport, only required when configuring with
+  `-DEDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON` (OFF by default; see
+  [`documents/PLATFORM_ATARI.md`](./documents/PLATFORM_ATARI.md)). Note that the
+  upstream [fujinet-lib](https://github.com/FujiNetWIFI/fujinet-lib) is built for CC65
+  and is **not** compatible with EDGE's llvm-mos toolchain; an llvm-mos-compatible
+  build is required and is **not yet published**.
+- **[Docker](https://www.docker.com/)** *(optional)* — runs the isolated UDP peer used
+  in the Mode-B networking validation stack.
+
 ## Build and test
 
 EDGE uses CMake and llvm-mos toolchains.
