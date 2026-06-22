@@ -1,6 +1,6 @@
 # Hardware validation demo (`atari_hw_test.xex`)
 
-> **Applies to EDGE v0.5.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
+> **Applies to EDGE v0.6.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
 
 A minimal Atari 8-bit program that drives every engine subsystem at once, so
 the engine's live ANTIC path can be confirmed on real hardware / emulators
@@ -100,6 +100,122 @@ The `#` left-margin column is intentionally **not** visible — it lives in the
 left border (the HSCROLL fetch margin). See the ANTIC scroll quirks captured in
 the engine memory / [`engine/scroll.h`](../engine/scroll.h) and ADR-027 in
 [`docs/DECISIONS.md`](../docs/DECISIONS.md).
+
+# Tank demo — Stage 4 following camera (`atari_tank_demo.xex`)
+
+A polished public-API tank demo ([`tank/`](tank/)). The playfield (Stage 2) is a
+full-screen **40×24 ANTIC Mode 4 viewport** onto an **80×48 logical tile map**
+assembled from a **2×2 grid of 40×24 map chunks**, stored in one **88×48 physical
+tile map** (4 padding cells on each side: `[4 pad][80 logical][4 pad]`, no vertical
+padding). The chunk payloads and 1K tileset are embedded ATank-derived assets (see
+[`tank/assets/PROVENANCE.md`](tank/assets/PROVENANCE.md)) copied directly into the
+single physical map at startup.
+
+The tank (Stage 3) is one normal-width **GTIA player** with tank-style steering:
+**sixteen movement headings** (N, NNE, NE, … 22.5° apart) but **eight displayed
+silhouettes** (N, NE, E, SE, S, SW, W, NW — adapted from ATank, doubled to 8×16 so
+they display as square 16×16). The hull-centre position is tracked in **Q12.4**
+nominal pixels and clamped to the logical world.
+
+Stage 4 makes the **camera follow the tank**: it keeps the tank centred while
+scrolling room remains and **clamps at all four logical-world edges**; once
+clamped, the tank slides from screen centre toward the corresponding viewport
+edge. The horizontal camera and sprite share **one color-clock quantization**
+(1 cc = 2 nominal px), so there is no one-pixel wobble at odd world X, and the
+camera + sprite are computed from the **same frame's** tank state (no lag). The
+tank stays fully visible at every legal world position.
+
+**No collision, terrain response, bullets, networking, or runtime map streaming.**
+Note: eight silhouettes are not true 22.5° artwork — adjacent headings share art.
+
+All geometry uses the Altirra-measured Stage 1.1 invariants (ADR-034 terminology).
+
+## Build
+
+```sh
+cmake -B build-atari -DCMAKE_TOOLCHAIN_FILE=cmake/atari-toolchain.cmake -DEDGE_BUILD_DEMO=ON
+cmake --build build-atari --target atari_tank_demo     # -> build-atari/atari_tank_demo.xex
+```
+
+The build turns `tank/assets/tank_tileset.fnt` and `tank/assets/chunk_*.scr` into
+ROM-resident byte-array headers (in the build tree). For deterministic headless
+screenshots, pin the boot state with `-DEDGE_TANK_HEADING=<0..15>` and/or
+`-DEDGE_TANK_POSITION=<0..14>` (clamps, world edges, centre, follow transitions,
+odd-X quantization — see `kValidationPositions`); unset = heading N at the centre.
+
+## Controls (tank-style)
+
+| Input | Effect |
+|---|---|
+| Joystick left / right | rotate counterclockwise / clockwise (one 22.5° step every ~7 NTSC frames) |
+| Joystick up | move forward along the current heading |
+| Joystick down | move backward (reverse) along the current heading |
+| left + up / right + up | turn while moving forward |
+| left + down / right + down | turn while reversing |
+| left + right | cancel rotation |
+| up + down | cancel movement |
+
+The tank retains its heading while stationary. Fire is unused. Horizontal motion
+is quantized to 2 nominal pixels (HPOSP is in color clocks).
+
+## What to look for
+
+| Observation | Proves |
+|---|---|
+| Driving through the interior scrolls the playfield while the tank stays centred | centered camera following |
+| The camera stops at each world edge; the tank then slides toward that viewport edge | camera clamp + centre→edge slide |
+| The tank returns to centre as it leaves an edge region | clamp is symmetric, no mode state |
+| Eight distinct silhouettes as you rotate; equal-feeling speed in every direction | heading→silhouette mapping + Q12.4 table |
+| No horizontal one-pixel wobble at odd world X; no one-frame camera/sprite lag | shared color-clock quantization, same-frame submit |
+| No visible padding checker; clean seams/bottom row throughout | camera stays in the padding-safe scroll range |
+| Playfield, palette, seams, and chunks unchanged from earlier stages | no scrolling/geometry regression |
+
+## Optional: network asset loading (Stages 5A/5B)
+
+The tileset and four map chunks can optionally be loaded from a server instead of
+the embedded assets. The asset source is chosen at configure time:
+
+```sh
+cmake -B build-atari -DCMAKE_TOOLCHAIN_FILE=cmake/atari-toolchain.cmake \
+      -DEDGE_BUILD_DEMO=ON -DEDGE_TANK_ASSET_SOURCE=<mode>
+cmake --build build-atari --target atari_tank_demo
+```
+
+| `EDGE_TANK_ASSET_SOURCE` | Behaviour |
+|---|---|
+| `Embedded` (default) | tileset + chunks compiled in; unchanged gameplay |
+| `SimulatedNetwork` | feeds the protocol from the embedded assets through the loader over several frames (no connection); `-DEDGE_TANK_NET_FAULT=<1..3>` forces bad-manifest / missing-row / premature-complete failures |
+| `LiveSession` | loads from a server over the reliable session lane; **no embedded tileset/chunks are linked** |
+
+Protocol (asset payload **and** session-transport layers): [`tank/ASSET_PROTOCOL.md`](tank/ASSET_PROTOCOL.md).
+The border shows coarse progress (amber loading → green complete → red failed); a
+failed load halts before gameplay. Map chunks are written directly into the single
+physical map; the tileset uses one page-aligned 1024-byte buffer installed via the
+public charset API (`bind_charset_page`).
+
+### LiveSession build + server
+
+```sh
+# Atari (requires the FujiNet session lane: build fujinet-lib, then configure with
+# EDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON + EDGE_FUJINETLIB_ROOT=...):
+cmake -B build-atari -DCMAKE_TOOLCHAIN_FILE=cmake/atari-toolchain.cmake \
+      -DEDGE_BUILD_DEMO=ON -DEDGE_TANK_ASSET_SOURCE=LiveSession \
+      -DEDGE_TANK_NET_HOST="192.168.1.10" -DEDGE_TANK_NET_PORT=9000 \
+      -DEDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON -DEDGE_FUJINETLIB_ROOT=/path/to/fujinet-lib
+cmake --build build-atari --target atari_tank_demo
+
+# Host server (Python stdlib only):
+python3 tools/net/edge_tank_asset_server.py --host 0.0.0.0 --port 9000
+#   --selftest          verify framing/payloads     --hex   print asset payloads
+#   --capture-session F  write the session-wire frames
+```
+
+The client connects, requests the transfer (its transfer id + an initial credit of
+2), and grants credit as it drains so the 256-byte RX ring never overflows; the
+server sends 66 messages (1 manifest + 16 tileset blocks + 48 chunk-row pairs + 1
+complete), ~5.6 KB on the wire. `EDGE_TANK_NET_HOST`/`PORT` are baked into the ROM.
+The live build still has no collision/terrain/bullets/realtime-lane/gameplay
+networking; the session is only used to load assets before gameplay.
 
 # VBXE demos
 

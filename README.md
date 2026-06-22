@@ -2,7 +2,7 @@
 
 # EDGE (Eight-bit Damned! Game Engine)
 
-> **Applies to EDGE v0.5.0** — see [CHANGELOG](./CHANGELOG.md) for version history.
+> **Applies to EDGE v0.6.0** — see [CHANGELOG](./CHANGELOG.md) for version history.
 
 EDGE is a C++20 game engine for constrained 6502-class systems, built around a small, deterministic, compile-time configured API instead of a heavy runtime.
 The project is Atari-first today, but its architecture is intended to support additional 6502-family platforms over time. Game code is written against portable engine subsystems while hardware details live behind a platform HAL and compile-time capability profiles.
@@ -42,7 +42,7 @@ Implemented today:
 - input snapshot model
 - sprite and missile management (P/M-style and full-colour pixel sprites)
 - sound effect playback
-- tile and charset helpers
+- tileset and tile-map helpers
 - hardware scrolling (`engine::ScrollRegion` + `Game::scroll_map`)
 - portable bitmap drawing via `Game::gfx()` (`engine/gfx.h`), blitter-accelerated
   on capable platforms and software-rendered on baseline

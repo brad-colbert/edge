@@ -197,6 +197,14 @@ public:
     // Sort all live slots (static + dynamic) by scanline then priority, then
     // build the indexed handler and next-pointer tables the dispatcher walks.
     void prepare_chain(u8* display_list = nullptr, u16 dl_size = 0) {
+        // Fast path: an empty hook chain that was already empty last call needs no
+        // work — the DLI bits are already cleared and raster delivery is already
+        // disabled. Skipping avoids walking the whole display list every frame on
+        // demos with no raster hooks (e.g. a single-sprite scroller), which was a
+        // major frame-service cost. The transition >0 -> 0 still runs once to clear
+        // stale DLI bits and disable raster.
+        if (total_count_ == 0 && last_prepared_count_ == 0) return;
+        last_prepared_count_ = total_count_;
         sort_slots();
 
         const u16 dispatcher = Platform::hal::raster_dispatch_addr();
@@ -325,6 +333,7 @@ private:
     u8 static_count_ = 0;
     u8 total_count_  = 0;
     u8 current_      = 0;   // ZP-intended (section placement deferred to linker)
+    u8 last_prepared_count_ = 0xFF;  // chain size at last prepare_chain (0xFF = none yet)
 
     u8 handler_lo_[MaxRasterHooks] = {};
     u8 handler_hi_[MaxRasterHooks] = {};

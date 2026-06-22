@@ -226,11 +226,18 @@ struct DisplayProgram {
     // time; the generic ScrollManager supplies only the coarse offsets (it never
     // touches the display list). A no-op for layouts with no scroll region.
     void patch_scroll(u16 map_base, u16 map_width, u16 coarse_col, u16 coarse_row) {
+        // Successive visible lines differ by exactly one map row, so walk the load
+        // address incrementally (one multiply for the first line, then += map_width)
+        // instead of a 16-bit multiply per line. The per-line multiply made this the
+        // single heaviest frame-service step and dropped scrolling demos to half
+        // frame rate (it runs every frame); the incremental form keeps it inside one
+        // frame. Result is byte-identical to `map_base + (coarse_row+i)*map_width +
+        // coarse_col` for every i.
+        u16 a = static_cast<u16>(map_base + coarse_row * map_width + coarse_col);
         for (u16 i = 0; i < scroll_lms_count; ++i) {
-            const u16 a = static_cast<u16>(
-                map_base + static_cast<u16>(coarse_row + i) * map_width + coarse_col);
             bytes[scroll_lms_pos[i]]     = lo(a);
             bytes[scroll_lms_pos[i] + 1] = hi(a);
+            a = static_cast<u16>(a + map_width);
         }
     }
 

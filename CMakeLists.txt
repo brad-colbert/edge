@@ -83,7 +83,23 @@ if(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB)
             "EDGE_FUJINETLIB_LIBRARY does not exist: '${EDGE_FUJINETLIB_LIBRARY}'")
     endif()
 
+    # Stage 5C focused guard: reject the prohibited legacy toolchain mount in any
+    # fujinet-lib dependency path (NEVER use /mnt/old_ubuntu_22). Narrow on
+    # purpose — only the FujiNet dependency variables, not a global FS policy.
+    foreach(_fnpath
+            "${EDGE_FUJINETLIB_ROOT}"
+            "${EDGE_FUJINETLIB_INCLUDE_DIR}"
+            "${EDGE_FUJINETLIB_LIBRARY}")
+        if(_fnpath MATCHES "/mnt/old_ubuntu_22")
+            message(FATAL_ERROR
+                "Prohibited path /mnt/old_ubuntu_22 referenced by a fujinet-lib variable: '${_fnpath}'")
+        endif()
+    endforeach()
+
     add_compile_definitions(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB=1)
+    message(STATUS "EDGE FujiNet session backend: RealFujinetLib")
+    message(STATUS "  include: ${EDGE_FUJINETLIB_INCLUDE_DIR}")
+    message(STATUS "  library: ${EDGE_FUJINETLIB_LIBRARY}")
 endif()
 
 option(EDGE_ATARI_FUJINET_REALTIME_NETSTREAM
@@ -222,6 +238,123 @@ if(EDGE_BUILD_DEMO)
     set_target_properties(atari_scroll_test PROPERTIES OUTPUT_NAME "atari_scroll_test.xex")
     target_link_options(atari_scroll_test PRIVATE
         "LINKER:--Map=$<TARGET_FILE_DIR:atari_scroll_test>/atari_scroll_test.map")
+
+    # Stage 1.1 ANTIC Mode 4 scroll + PMG geometry probe — independent .xex
+    # (synthetic in-code tileset/map; no charset header, no ATank assets).
+    add_executable(atari_mode4_geometry_probe demo/atari_mode4_geometry_probe.cpp)
+    target_compile_options(atari_mode4_geometry_probe PRIVATE
+        -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra)
+    target_include_directories(atari_mode4_geometry_probe PRIVATE ${CMAKE_SOURCE_DIR})
+    set_target_properties(atari_mode4_geometry_probe PROPERTIES
+        OUTPUT_NAME "atari_mode4_geometry_probe.xex")
+    target_link_options(atari_mode4_geometry_probe PRIVATE
+        "LINKER:--Map=$<TARGET_FILE_DIR:atari_mode4_geometry_probe>/atari_mode4_geometry_probe.map")
+    # Optional: pin the boot test case for deterministic headless screenshots
+    # (-DEDGE_PROBE_MODE=<0|1|2> -DEDGE_PROBE_INDEX=<n>). Unset = interactive.
+    if(DEFINED EDGE_PROBE_MODE)
+        target_compile_definitions(atari_mode4_geometry_probe PRIVATE
+            PROBE_FORCE_MODE=${EDGE_PROBE_MODE} PROBE_FORCE_INDEX=${EDGE_PROBE_INDEX})
+    endif()
+
+    # Tank demo. Asset source selected at configure time (target-private):
+    #   EDGE_TANK_ASSET_SOURCE = Embedded (default) | SimulatedNetwork | LiveSession
+    # Embedded/SimulatedNetwork compile the ATank-derived assets in (binaries under
+    # demo/tank/assets/ are turned into build-tree-only byte-array headers, listed
+    # as target sources so the demo cannot compile before they exist). LiveSession
+    # links NO embedded tileset/chunks — they arrive over the session lane.
+    set(EDGE_TANK_ASSET_SOURCE "Embedded" CACHE STRING
+        "Tank demo asset source: Embedded | SimulatedNetwork | LiveSession")
+    set_property(CACHE EDGE_TANK_ASSET_SOURCE PROPERTY STRINGS
+        Embedded SimulatedNetwork LiveSession)
+    if(EDGE_TANK_ASSET_SOURCE STREQUAL "Embedded")
+        set(_TANK_SRC 0)
+    elseif(EDGE_TANK_ASSET_SOURCE STREQUAL "SimulatedNetwork")
+        set(_TANK_SRC 1)
+    elseif(EDGE_TANK_ASSET_SOURCE STREQUAL "LiveSession")
+        set(_TANK_SRC 2)
+    else()
+        message(FATAL_ERROR "EDGE_TANK_ASSET_SOURCE must be Embedded, SimulatedNetwork, or LiveSession")
+    endif()
+
+    set(GENERATE_BYTES_HEADER_SCRIPT ${CMAKE_SOURCE_DIR}/cmake/generate_bytes_header.cmake)
+    set(TANK_ASSET_SRC_DIR ${CMAKE_SOURCE_DIR}/demo/tank/assets)
+    set(TANK_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated/tank)
+    set(TANK_GEN_HEADERS "")
+    if(NOT _TANK_SRC EQUAL 2)   # Embedded / SimulatedNetwork: generate embedded assets
+        set(TANK_TILESET_HEADER ${TANK_GEN_DIR}/tank_tileset.gen.h)
+        add_custom_command(
+            OUTPUT ${TANK_TILESET_HEADER}
+            COMMAND ${CMAKE_COMMAND}
+                    -DINPUT=${TANK_ASSET_SRC_DIR}/tank_tileset.fnt
+                    -DOUTPUT=${TANK_TILESET_HEADER}
+                    -DSYMBOL=tileset_bytes -DNAMESPACE=demo::tank::assets
+                    -P ${GENERATE_CHARSET_HEADER_SCRIPT}
+            DEPENDS ${TANK_ASSET_SRC_DIR}/tank_tileset.fnt ${GENERATE_CHARSET_HEADER_SCRIPT}
+            COMMENT "Generating tank_tileset.gen.h" VERBATIM)
+        list(APPEND TANK_GEN_HEADERS ${TANK_TILESET_HEADER})
+        foreach(C 0_0 1_0 0_1 1_1)
+            set(_h ${TANK_GEN_DIR}/chunk_${C}.gen.h)
+            add_custom_command(
+                OUTPUT ${_h}
+                COMMAND ${CMAKE_COMMAND}
+                        -DINPUT=${TANK_ASSET_SRC_DIR}/chunk_${C}.scr
+                        -DOUTPUT=${_h}
+                        -DSYMBOL=chunk_${C} -DNAMESPACE=demo::tank::assets -DEXPECT_BYTES=960
+                        -P ${GENERATE_BYTES_HEADER_SCRIPT}
+                DEPENDS ${TANK_ASSET_SRC_DIR}/chunk_${C}.scr ${GENERATE_BYTES_HEADER_SCRIPT}
+                COMMENT "Generating chunk_${C}.gen.h" VERBATIM)
+            list(APPEND TANK_GEN_HEADERS ${_h})
+        endforeach()
+    endif()
+
+    add_executable(atari_tank_demo demo/tank/atari_tank_demo.cpp ${TANK_GEN_HEADERS})
+    target_compile_options(atari_tank_demo PRIVATE
+        -std=c++20 -fno-exceptions -fno-rtti -O2 -Wall -Wextra)
+    target_include_directories(atari_tank_demo PRIVATE ${CMAKE_SOURCE_DIR} ${TANK_GEN_DIR})
+    target_compile_definitions(atari_tank_demo PRIVATE EDGE_TANK_ASSET_SOURCE=${_TANK_SRC})
+    set_target_properties(atari_tank_demo PROPERTIES OUTPUT_NAME "atari_tank_demo.xex")
+    target_link_options(atari_tank_demo PRIVATE
+        "LINKER:--Map=$<TARGET_FILE_DIR:atari_tank_demo>/atari_tank_demo.map")
+    # Deterministic boot state (target-private): -DEDGE_TANK_HEADING=<0..15>,
+    # -DEDGE_TANK_POSITION=<0..14>. SimulatedNetwork: -DEDGE_TANK_NET_FAULT=<0..3>.
+    # LiveSession endpoint: -DEDGE_TANK_NET_HOST="ip" -DEDGE_TANK_NET_PORT=<n>.
+    if(DEFINED EDGE_TANK_HEADING)
+        target_compile_definitions(atari_tank_demo PRIVATE EDGE_TANK_HEADING=${EDGE_TANK_HEADING})
+    endif()
+    if(DEFINED EDGE_TANK_POSITION)
+        target_compile_definitions(atari_tank_demo PRIVATE EDGE_TANK_POSITION=${EDGE_TANK_POSITION})
+    endif()
+    if(_TANK_SRC EQUAL 1 AND DEFINED EDGE_TANK_NET_FAULT)
+        target_compile_definitions(atari_tank_demo PRIVATE EDGE_TANK_NET_FAULT=${EDGE_TANK_NET_FAULT})
+    endif()
+    if(_TANK_SRC EQUAL 2)
+        # Live transport backend selection (Stage 5C). A LiveSession build is only
+        # network-capable when the real fujinet-lib backend is linked in; without
+        # it the session HAL is a stub that reports Ok without ever connecting. Make
+        # the distinction impossible to miss: a build-embedded marker, a configure
+        # line, and a loud warning for the stub case.
+        if(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB)
+            target_include_directories(atari_tank_demo PRIVATE ${EDGE_FUJINETLIB_INCLUDE_DIR})
+            target_link_libraries(atari_tank_demo PRIVATE ${EDGE_FUJINETLIB_LIBRARY})
+            target_compile_definitions(atari_tank_demo PRIVATE EDGE_TANK_LIVE_BACKEND_REAL=1)
+            message(STATUS "atari_tank_demo LiveSession — Live transport backend: RealFujinetLib")
+        else()
+            target_compile_definitions(atari_tank_demo PRIVATE EDGE_TANK_LIVE_BACKEND_REAL=0)
+            message(WARNING
+                "atari_tank_demo LiveSession selected WITHOUT the real fujinet-lib backend "
+                "(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB=OFF).\n"
+                "  Live transport backend: Stub — the session lane returns Ok without connecting; "
+                "this CANNOT validate a real transfer.\n"
+                "  For real validation: -DEDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON "
+                "-DEDGE_FUJINETLIB_ROOT=<fujinetlib-llvm checkout>")
+        endif()
+        if(DEFINED EDGE_TANK_NET_HOST)
+            target_compile_definitions(atari_tank_demo PRIVATE EDGE_TANK_NET_HOST="${EDGE_TANK_NET_HOST}")
+        endif()
+        if(DEFINED EDGE_TANK_NET_PORT)
+            target_compile_definitions(atari_tank_demo PRIVATE EDGE_TANK_NET_PORT=${EDGE_TANK_NET_PORT})
+        endif()
+    endif()
 
     # VBXE Phase 4a bring-up smoke test — independent .xex (no charset header).
     add_executable(atari_vbxe_bringup demo/vbxe_bringup.cpp)

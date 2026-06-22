@@ -11,7 +11,126 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-06-21
+
 ### Added
+- **Tank demo — Stage 5C real FujiNet validation + launch scripts.** The
+  `LiveSession` build now links the real **fujinet-lib** backend
+  (`-DEDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON -DEDGE_FUJINETLIB_ROOT=…`); a build
+  marker (`EDGE-LIVE-BACKEND:RealFujinetLib` vs `…:Stub`), a configure print, and a
+  loud warning make a stub build impossible to mistake for a real one. **Validated
+  end-to-end on real FujiNet** (Altirra NetSIO → netsiohub → fujinet-pc → asset
+  server): all 66 asset messages (5,619 framed wire bytes) transfer with the credit
+  window of 2 honored, the loader completes (16/16 tiles, 96/96 rows), and gameplay
+  begins with a playfield pixel-identical to Embedded — this **supersedes the Stage
+  5B "unproven" note** below. The Atari session adapter now stages one bulk
+  `network_read_nb` and serves the engine's byte-at-a-time drain from it (~30–90×
+  fewer SIO transactions; the per-byte path desynced framing over emulated NetSIO),
+  and the Python server gains `--linger` (holds the socket open after COMPLETE so
+  the firmware delivers the final messages before FIN). New helper scripts
+  `scripts/run_tank_embedded.sh` and `scripts/run_tank_networked.sh` build + launch
+  the demo in Altirra (the networked one also starts the asset server). A focused
+  CMake guard rejects `/mnt/old_ubuntu_22` in any fujinet-lib path variable.
+- **Tank demo — Stage 5B live session-lane asset loading (`atari_tank_demo`).**
+  Connects the Stage 5A loader to EDGE's reliable session lane (`Game::net.session`,
+  never the realtime lane) and loads the tileset + four chunks from the Python
+  server over TCP/FujiNet. Asset source is now a configure-time selector
+  `EDGE_TANK_ASSET_SOURCE = Embedded (default) | SimulatedNetwork | LiveSession`.
+  The session wire frame is `[kind][size_lo][size_hi][payload]` (engine framing —
+  not a bare length prefix); new session kinds carry the asset payload
+  (server→client) and the client's transfer **request** + **credit** grants
+  (client→server). Because the engine's 256-byte RX ring drops bytes on overflow
+  (no safe natural backpressure), a **credit window of 2** (≤184 B in flight; max
+  frame 92 B) paces the transfer; the client tops up credit as it drains. A pure,
+  templated `NetAssetClient<Session>` (`demo/tank/net_session_loader.h`) owns the
+  connect→request→receive→install state machine, frame-based connect/inactivity
+  timeouts, and compact transport+loader error codes — host-tested with a fake
+  session (`test_net_session_loader`, 33/33 suite). **LiveSession links no embedded
+  tileset/chunks** (linker-map verified: the 4,864 asset bytes are absent); it
+  keeps one page-aligned 1,024-B network tileset buffer, the one 4,224-B physical
+  map, loader/coverage state, and the session rings. The Python server
+  (`tools/net/edge_tank_asset_server.py`) now speaks the real session wire format,
+  parses the request, adopts the transfer id, obeys credit, and has a `--selftest`
+  (validated end-to-end host↔host). Embedded + Simulated Altirra-validated;
+  **live FujiNet hardware validation is unproven in this environment** (fujinet-lib
+  is unavailable to the supported toolchain) — the live build boots and correctly
+  halts on connect failure. No engine networking changes; demo-local protocol only.
+- **Tank demo — Stage 5A network asset protocol + loader core (`atari_tank_demo`).**
+  Adds a transport-neutral way to load the demo's tileset (1×1024 B) and four map
+  chunks (4×960 B) from a server — **without** any FujiNet/session-lane/realtime
+  integration (that is Stage 5B). A demo-local, little-endian, fixed-layout
+  protocol (`demo/tank/asset_protocol.h`, spec in `demo/tank/ASSET_PROTOCOL.md`)
+  defines MANIFEST / TILESET_BLOCK / CHUNK_ROWS / COMPLETE / ERROR messages, all
+  ≤89 B (under the 128-B session payload). A fixed-memory loader
+  (`demo/tank/asset_loader.h`) consumes already-framed payloads, validates every
+  field, writes chunk rows **directly into the one 88×48 physical map** (no staging
+  buffer, no second map) and the tileset into a single page-aligned 1024-B buffer
+  (network mode's accepted duplicate), tracks coverage with fixed masks (u16 +
+  4×u32), and exposes state/error/progress. The tileset is installed only on a
+  valid COMPLETE, via the public charset API (`bind_charset_page`) — no access to
+  private engine charset storage. New host test `test_asset_loader` (38 checks:
+  manifest/version/geometry/transfer-id validation, tileset & chunk range checks,
+  duplicate/out-of-order handling, coverage, premature-COMPLETE, failure+reset,
+  full round-trip incl. shuffled order). A target-private simulated-loader build
+  (`EDGE_TANK_ASSET_SOURCE=SimulatedNetwork`, see Stage 5B) drives a multi-frame
+  load from the embedded assets through the loader, then enters the unchanged
+  Stage 4 gameplay; `EDGE_TANK_NET_FAULT` selects deterministic fault modes. Adds
+  `tools/net/edge_tank_asset_server.py`
+  (stdlib-only: hex/capture/TCP). Altirra-validated: simulated load → install →
+  gameplay is identical to embedded mode; fault modes halt without entering
+  gameplay. No engine APIs changed; not a generic asset protocol.
+- **Tank demo — Stage 4 centered + clamped following camera (`atari_tank_demo`).**
+  Replaces the Stage 3 fixed camera with one that **follows the tank**: it keeps
+  the tank centred while scrolling room remains and **clamps at all four logical-
+  world edges**, after which the tank slides from screen centre toward the
+  corresponding viewport edge (no camera-mode state machine — it falls out of
+  clamping the desired origin). The horizontal camera and PMG X share **one
+  color-clock quantization** (the player world X is quantized to color clocks once
+  and drives both `Game::scroll` and the sprite), eliminating the one-pixel wobble
+  at odd world X; the camera and sprite are derived from the **same frame's** tank
+  state, so there is no camera/sprite lag. Pure helpers (`shifts/subtracts/clamps`
+  only — no float/multiply/divide/trig) live in `demo/tank/tank_camera.h`, shared
+  with the new `test_tank_camera` host test (30 checks incl. full legal-position
+  sweeps for visibility, monotonic PMG X, and odd/even-X coherence). Altirra-
+  validated (centre, four clamps, the four follow transitions, odd-X). The tank is
+  fully visible at every legal world position. Still **no collision, terrain,
+  bullets, networking, or map streaming**.
+- **Tank demo — Stage 3 PMG tank + sixteen-heading steering (`atari_tank_demo`).**
+  Adds one normal-width GTIA player tank to the Stage 2 playfield: **16 movement
+  headings** (22.5° apart, with wrap) but **8 displayed silhouettes** (N, NE, E,
+  SE, S, SW, W, NW — ATank's eight directional shapes doubled to 8×16 so they
+  display as square 16×16; intermediate headings round clockwise to the nearest
+  silhouette). The hull-centre is tracked in **Q12.4 nominal pixels** and moved by
+  a 16-entry ROM motion table (|v|≈8 Q4, ~equal speed; reverse subtracts the same
+  vector — no reverse table; no float/multiply/divide/trig). Tank-style joystick
+  controls (left/right rotate, up/down forward/reverse, left+right and up+down
+  cancel, turn-while-move), one 22.5° step every ~7 NTSC (~6 PAL) frames. The tank
+  centre is clamped to the logical world; the **camera is fixed at the world
+  centre** this stage (the Stage 2 free-camera is removed). World→screen→PMG
+  conversion is signed and the player is hidden when fully off-screen (no `u8`
+  wrap). Motion math is in `demo/tank/tank_motion.h` (shared with the
+  `test_tank_motion` host test); silhouettes in `demo/tank/tank_shapes.h` (128 ROM
+  bytes). Altirra-validated (all 8 silhouettes, fixed camera, viewport-edge
+  placement, offscreen hide). Eight silhouettes are not true 22.5° artwork.
+  (Camera following arrives in Stage 4, above; collision, bullets, and networking
+  remain for later.)
+- **Tank demo — Stage 2 static four-chunk playfield (`atari_tank_demo`).** A
+  polished public-API demo ([`demo/tank/`](demo/tank/)): a full-screen 40×24 ANTIC
+  Mode 4 viewport onto an 80×48 logical tile map assembled from a 2×2 grid of
+  40×24 map chunks, stored in one 88×48 physical `engine::TileMap` (4 padding cells
+  each side, no vertical padding) and bound via `Game::scroll_map()`. Embedded
+  ATank-derived assets (1K tileset + four 960-byte chunks; see
+  [`demo/tank/assets/PROVENANCE.md`](demo/tank/assets/PROVENANCE.md)) are turned
+  into ROM-resident byte arrays at build time and copied **directly** into the
+  single physical map at startup — no staging buffer, no per-frame copy. A
+  temporary joystick free camera (nominal-pixel units → EDGE scroll units, clamped
+  in the demo) scrolls the playfield. Uses the Altirra-measured Stage 1.1 geometry
+  invariants; Altirra-validated (corners, seams, four-chunk centre, fine/coarse
+  transitions, max camera — no padding intrusion or bottom-row tearing). Geometry,
+  chunk placement, and camera math live in `demo/tank/playfield_geometry.h`, shared
+  with the `test_tank_playfield` host test. (The movable tank is added in Stage 3,
+  above.) Adds a generic `cmake/generate_bytes_header.cmake` (neutral companion to
+  the charset generator) for raw binary assets.
 - **Realtime networking diagnostic demo (Stage 9S.3)** — a two-ended user-facing
   diagnostic for the realtime lane, NOT a game and NOT a protocol layer.
   `demo/edge_net_realtime_meter.cpp` is an Atari client that uses **only** the public
@@ -76,6 +195,75 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
   Mode A no-device clean-failure**, and **fujinet-pc + NetSIO + Altirra + Docker
   UDP peer (Mode B)**; **not** validated on physical FujiNet hardware. Production
   `.bss` unchanged at 359 bytes. See ADR-033.
+
+### Changed
+- **Tank demo — faster tank motion.** Translation speed is now a single
+  compile-time `tank::kSpeedScale` (`demo/tank/tank_motion.h`, default **3** ≈ 1.5
+  px/frame, up from ~0.5); the 16-heading motion table is the unit-speed vectors
+  scaled by it **at compile time** (constexpr — no runtime multiply). Overridable
+  via `-DEDGE_TANK_SPEED_SCALE=<n>` (≤18 to keep the scaled components in `int8_t`).
+  `test_tank_motion` / `test_tank_camera` are now scale-aware (expectations × scale,
+  equal-speed tolerance × scale²).
+- **Tile subsystem terminology + naming cleanup — source-breaking API rename, no
+  runtime change.** Source compatibility changed; runtime behaviour, ROM size, and
+  RAM use did **not** (`atari_scroll_test.xex` and `atari_hw_test.xex` are
+  byte-identical before/after; all 27 host tests pass). The following public names
+  were renamed with **no compatibility aliases** — **breaking** for any downstream
+  source that uses the old names. Recompilation alone is not sufficient; callers
+  must update their source:
+  - `engine::TileManager` → `engine::TileDisplay`
+  - `engine::CharsetData` → `engine::TilesetData`
+  - `engine::make_charset` → `engine::make_tileset`
+  - `TileMap::tiles` → `TileMap::cells` — the tile-map's backing cell array is a
+    **public** member, so code that indexes it directly (`map.tiles[i]`) must
+    change to `map.cells[i]`.
+
+  Unchanged: the `Game::tiles` façade, the `TileMap` type with its `tile_at` /
+  `set_tile` / `make_map` API, the `Charset1K` / `Charset512` size aliases, and the
+  `init_charset` / `bind_charset_page` operations (which keep the "charset" spelling
+  because they act on character-set RAM / the character-base hardware).
+  `TileDisplay` coordinates the displayed tileset/charset and viewport — it owns no
+  map and performs no map-cell lookup. Established canonical terms (glyph, tileset,
+  charset, tile, tile code, map cell, tile map, map chunk, chunk grid, viewport,
+  playfield, screen) and reserved the
+  `MapChunk`/`ChunkGrid`/`ChunkLoader`/`ChunkManager`/`ChunkCache` names for future
+  map-streaming work — **no chunk management or new demo is introduced**. See
+  ADR-034.
+
+### Fixed
+- **Scroll demos ran at half frame rate — `frame_service` overran one frame
+  (engine-wide perf).** A scrolling, single-sprite demo (`atari_tank_demo`) was
+  pinned to a steady **30 fps** (measured: OS `RTCLOK $14` advanced by exactly 2 per
+  `frame_step`), which read as a motion stutter when scrolling — worst horizontally,
+  where ANTIC HSCROLL steps a coarse 2 px (1 color clock) at an uneven sub-cell
+  cadence. Root cause was two per-frame steps that ran every frame regardless of
+  need: (1) `patch_scroll` rewrote **all** scroll-region LMS load addresses with a
+  16-bit multiply per visible line, and (2) `InterruptManager::prepare_chain`
+  walked the **entire** display list to re-arm raster delivery even with **zero**
+  hooks. Together they pushed the service just past one 60 Hz frame. Fixes (all
+  engine-wide — every scroll demo benefits): `patch_scroll` now walks the load
+  address incrementally (`+= map_width`, one multiply total, byte-identical result);
+  `ScreenManager::apply_scroll` skips the LMS rewrite while the **coarse** offset is
+  unchanged (fine registers still update every frame; cache invalidated by
+  `bind_scroll_map`); `prepare_chain` early-returns when the hook chain is empty and
+  was empty last call. With these the tank demo also moves from `-Os` to `-O2` (the
+  zero page now has room, so all three asset sources link). Verified **stable
+  60 fps** (240/240 frames at one VBI), 33/33 host tests pass, and the tank,
+  multiplexer (9 sprites/3 zones), and arena demos all render correctly.
+- **Deferred-VBI re-entry guard now covers the `XITVBV` exit window (ADR-028).**
+  The guard cleared `edge_vbi_busy` *inside the trampoline* before `JMP XITVBV`,
+  leaving a hole: if the next VBI NMI arrived during `XITVBV` it ran a fresh service
+  nested in the OS's (non-re-entrant) VBLANK exit → the OS `RTS` returned one byte
+  off into ROM → garbage → `KIL`. Surfaced as a hard crash when scrolling to the
+  far-left edge **and then up** with a sprite shown — the heaviest frame
+  (`coarse_col=0`, where ANTIC's HSCROLL pre-fetch peaks DMA and starves the `-Os`
+  service over one frame). Pre-existing (reproduced at the original tank speed).
+  Fix: the trampoline keeps `edge_vbi_busy` set **through `XITVBV`**; the main loop
+  releases it after consuming the frame (`loop.h` run/run_until → `Core::frame_consumed()`
+  → `Hal::frame_consumed()`, `requires`-gated so HALs/mocks without the hook no-op).
+  A VBI in the exit window now also sees the flag and skips. Verified: the
+  far-left+up auto-drive repro no longer crashes; multiplexer (9 sprites/3 zones)
+  and arena demos unaffected; 33/33 host tests pass.
 
 ## [0.5.0] - 2026-06-07
 

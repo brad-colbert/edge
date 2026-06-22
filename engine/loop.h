@@ -44,6 +44,7 @@ template <typename Core, typename Cb>
     for (;;) {
         while (!Core::frame_ready_) { }
         Core::frame_ready_ = false;
+        Core::frame_consumed();   // release the VBI guard now the frame is consumed
         sync_after_vbi();
         cb(Core::input);
         if (Core::hooks.post_render) Core::hooks.post_render();
@@ -56,6 +57,7 @@ void run_until(Cb cb) {
     for (;;) {
         while (!Core::frame_ready_) { }
         Core::frame_ready_ = false;
+        Core::frame_consumed();   // release the VBI guard now the frame is consumed
         sync_after_vbi();
         const bool done = cb(Core::input);
         if (Core::hooks.post_render) Core::hooks.post_render();

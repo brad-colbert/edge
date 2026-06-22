@@ -236,6 +236,10 @@ public:
         // the map buffer, and set the initial (unscrolled) load addresses.
         views_.template for_screen<S>().template get<idx>().ptr = map_base;
         dl.patch_scroll(scroll_map_base_, scroll_map_width_, 0, 0);
+        // Invalidate the apply_scroll coarse cache so the next frame re-patches
+        // regardless of the prior (possibly different-program) coarse offset.
+        last_coarse_col_ = 0xFFFF;
+        last_coarse_row_ = 0xFFFF;
 
         using Region = typename Layout::template region_at<idx>;
         using ModeT  = typename Region::mode_type;
@@ -255,8 +259,19 @@ public:
     void apply_scroll(ScrollT& scroll) {
         if (!scroll_bound_ || !scroll.active() || scroll.suspended()) return;
         scroll.write_fine();
-        scroll_patch_(scroll_prog_, scroll_map_base_, scroll_map_width_,
-                      scroll.coarse_col(), scroll.coarse_row());
+        // The fine registers move the picture every frame, but the per-line LMS
+        // bytes only change when the COARSE offset crosses a cell — which is a small
+        // fraction of frames at normal scroll speeds. Rewriting the whole LMS list
+        // every frame is the heaviest frame-service step (it tipped scrolling demos
+        // to half frame rate), so skip it when the coarse offset is unchanged. The
+        // cache is invalidated by bind_scroll_map, so a rebound program re-patches.
+        const u16 cc = scroll.coarse_col();
+        const u16 cr = scroll.coarse_row();
+        if (cc != last_coarse_col_ || cr != last_coarse_row_) {
+            scroll_patch_(scroll_prog_, scroll_map_base_, scroll_map_width_, cc, cr);
+            last_coarse_col_ = cc;
+            last_coarse_row_ = cr;
+        }
     }
 
     // Typed region view for region N of screen S (compile-time type safety:
@@ -318,6 +333,10 @@ private:
     u16    scroll_map_base_  = 0;
     u16    scroll_map_width_ = 0;
     bool   scroll_bound_     = false;
+    // Last coarse offset written to the LMS list; apply_scroll skips the rewrite
+    // while it is unchanged. 0xFFFF = invalid (force a patch next frame).
+    u16    last_coarse_col_  = 0xFFFF;
+    u16    last_coarse_row_  = 0xFFFF;
 };
 
 } // namespace engine

@@ -148,7 +148,7 @@ constexpr auto arena_charset = make_arena_charset();
 
 // ── Room layout (constexpr, baked) ────────────────────────────────────────
 //
-// 40 columns x 23 rows of tile indices for the play area. Bordered with wall (0x01);
+// 40 columns x 23 rows of tile codes for the play area. Bordered with wall (0x01);
 // symmetric interior bars for cover; sparse floor dots for texture.
 
 struct Room { u8 t[23][40]; };

@@ -159,7 +159,7 @@ public:
     using Sprites   = SpriteManager<Platform, GameConfig::max_sprites>;
     using Sound     = SoundManager<Platform, GameConfig::sound_channels>;
     using Scroll    = ScrollManager<Platform>;
-    using Tiles     = TileManager<Platform>;
+    using Tiles     = TileDisplay<Platform>;
     using Interrupts = InterruptManager<Platform, kMaxRasterHooks, kMaxFrameHooks>;
     using GfxRegion = typename cdetail::gfx_region<GameConfig>::type;
     using Gfx       = BitmapOps<Platform, GfxRegion>;
@@ -184,12 +184,12 @@ public:
 
     // ── Initialisation ──
     //
-    // With a charset: enable sprites, bring up the initial screen, load the
-    // charset into the engine's char-set buffer and bind the backend's charset
-    // base to it, then install the frame service. The no-charset form leaves the
+    // With a tileset: enable sprites, bring up the initial screen, load the
+    // tileset into the engine's char-set buffer and bind the backend's charset
+    // base to it, then install the frame service. The no-tileset form leaves the
     // charset base at its power-on default.
-    template <typename Charset>
-    static void init(const Charset& cs) {
+    template <typename Tileset>
+    static void init(const Tileset& cs) {
         using caps = engine::caps_of_t<Platform>;
         if constexpr (caps::has_blitter) {
             // Overlay bring-up (HAL sets up its memory window, display list, and
@@ -356,7 +356,7 @@ public:
 
     // ── Scroll map binding ──
     //
-    // Bind a game-held map (an engine::TileMap, or any value exposing `tiles[]`
+    // Bind a game-held map (an engine::TileMap, or any value exposing `cells[]`
     // and a `width` constant) as screen S's scroll source and start scrolling.
     // Call after init(). The map's width/height must match the screen's scroll
     // region (checked at compile time). The frame service then drives the fine
@@ -370,7 +370,7 @@ public:
                       "scroll map width does not match the screen's scroll region");
         static_assert(Layout::region_map_height[idx] == Map::height,
                       "scroll map height does not match the screen's scroll region");
-        screen.template bind_scroll_map<S>(scroll, &m.tiles[0], Map::width);
+        screen.template bind_scroll_map<S>(scroll, &m.cells[0], Map::width);
     }
 
     // ── Game loop forwarders (loop.h) ──
@@ -379,6 +379,15 @@ public:
     template <typename Cb>
     static void run_until(Cb cb) { engine::run_until<Core>(cb); }
     static bool frame_overrun() { return engine::frame_overrun<Core>(); }
+
+    // Called by the loop once it has consumed a frame (after clearing frame_ready_),
+    // so the backend can release any per-frame interrupt guard held across the VBI
+    // exit. The Atari HAL clears its VBI re-entry guard here (closing the XITVBV
+    // pile-up window); a HAL (or test mock) without the hook makes this a no-op.
+    static void frame_consumed() {
+        if constexpr (requires { Platform::hal::frame_consumed(); })
+            Platform::hal::frame_consumed();
+    }
 
     // ── Per-frame service ──
     //

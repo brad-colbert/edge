@@ -1,6 +1,6 @@
 # Architecture Decision Records
 
-> **Applies to EDGE v0.5.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
+> **Applies to EDGE v0.6.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
 
 Decisions made during design, with rationale. These explain the
 "why" behind architectural choices and document tradeoffs.
@@ -321,7 +321,7 @@ When should they be converted to hardware format?
 Provide `constexpr` asset builders:
 
 - `Game::make_sprite<W,H>(data)`
-- `Game::make_charset(data)`
+- `Game::make_tileset(data)`
 - `Game::make_sound(data)`
 
 These compile into ROM-resident data with no runtime conversion.
@@ -1308,6 +1308,29 @@ clear, ADR-022, was the first such trim). The busy flag is global
 mutable state in the trampoline, acceptable because the deferred
 VBI is strictly single-instance.
 
+**Addendum (XITVBV-window pile-up):**
+The original guard cleared `edge_vbi_busy` *inside the trampoline*,
+just before `JMP XITVBV`. That left a hole: `XITVBV` is the OS
+deferred-VBI exit, and if the next VBI NMI arrives during that
+short window the guard is already clear, so a *fresh* service runs
+nested inside the previous `XITVBV`. The OS stage-1/2 VBLANK is not
+re-entrant mid-cleanup — its internal `RTS` returns one byte off
+into OS ROM, decodes garbage, and `KIL`s. This is distinct from the
+in-service re-entry above (which the busy flag did catch); it is a
+*pile-up* at exit, reachable whenever the service finishes right at
+the next vblank (observed on the heaviest scroll + sprite frame:
+far-left coarse_col=0, where ANTIC's HSCROLL pre-fetch peaks DMA
+and starves the `-Os` service over one frame). Reproduced at the
+original tank speed too — pre-existing, not speed-induced.
+
+Fix: keep `edge_vbi_busy` **set through `XITVBV`** (the trampoline
+no longer clears it) and release it from the **main loop** once the
+frame is consumed — `loop.h` (run/run_until) → `Core::frame_consumed()`
+→ `Hal::frame_consumed()`. A VBI arriving in the XITVBV window then
+also sees the flag and skips, so the guard now covers both the
+in-service and at-exit windows. `Core::frame_consumed()` is
+`requires`-gated so a HAL/mock without the hook is a no-op.
+
 ## ADR-029: P/M Hardware Missiles on the Blitter Backend
 
 **Status:** Accepted
@@ -1681,3 +1704,66 @@ uses the Netstream asm path exclusively.
   only) + `tools/net/edge_realtime_peer.py` exercise and measure the lane on-screen
   (no H: device), the practical readout path on real hardware. Validation status is
   unchanged: emulator/FujiNet-PC Mode B only; **not** physical-hardware validated.
+## ADR-034: Tile Subsystem Terminology and `TileDisplay` Naming
+
+**Status:** Accepted
+
+**Context:**
+The tile subsystem used "tile" in more than one sense and named its
+coordinator misleadingly. `engine/tiles.h`'s `TileManager` only copied a
+character set into RAM, bound the active character-set page, and tracked
+viewport coordinates — yet its header comment claimed it "owns three
+things" including "the tilemap" and stored the viewport "for tilemap
+lookups." It owns no map and performs no lookup. Separately, some prose
+implied a "tile" could mean a 40×24 screen-sized block of map data,
+colliding with the conventional game-engine meaning already implemented by
+`TileMap` (a grid of character-sized cells). A planned map-streaming demo
+needs unambiguous names for the larger loading unit before it is built.
+
+**Decision:**
+Fix terminology and naming as a semantic cleanup, implementing no new
+functionality:
+
+- A **tile** is one character-sized graphical element. A **map chunk** is a
+  rectangular loading and management subdivision of a tile map. The
+  **viewport** is a moving visible window and is independent of chunk
+  boundaries.
+- Canonical terms (glyph, tileset, charset, tile, tile code, map cell, tile
+  map, map chunk, chunk grid, viewport, playfield, screen) are defined once
+  in [ARCHITECTURE.md](ARCHITECTURE.md) "Tile terminology" and used
+  consistently in code, docs, demos, and tests.
+- Rename `TileManager` → **`TileDisplay`**: it coordinates the displayed
+  tileset/charset and viewport state; it is not a map-resource or map-chunk
+  manager. The `Game::tiles` façade member is unchanged.
+- Rename the portable asset `CharsetData` → **`TilesetData`** and its
+  builder `make_charset` → **`make_tileset`** (a tileset is the portable
+  graphical asset). The size aliases `Charset1K`/`Charset512` keep the
+  "charset" spelling because they name the character-set RAM footprint a
+  tileset fills; `init_charset`/`bind_charset_page` likewise stay "charset"
+  because they operate on character-set RAM / the character-base hardware.
+- `TileMap` keeps its name and accessors (`tile_at`, `set_tile`); its
+  backing array is named `cells[]` (map cells) and the stored byte is a
+  *tile code*.
+- The names `MapChunk`, `ChunkGrid`, `ChunkLoader`, `ChunkManager`,
+  `ChunkCache`, and "chunk-local" coordinates are reserved for future use.
+  **No chunk loading, residency, caching, streaming, or new demo is
+  introduced by this change.**
+
+**Rationale:**
+The rename makes the API describe what the code actually does and reserves
+the vocabulary the future map-streaming work needs, without a subsystem
+redesign. The split between "tileset" (portable asset) and "charset"
+(character-set RAM / hardware) follows the engine's portability rule:
+generic concepts get portable names; operations genuinely tied to
+character-mode hardware keep the hardware term. The changes are
+identifier/comment level — generated code, ROM size, and RAM use are
+unchanged (verified: `atari_scroll_test.xex` and `atari_hw_test.xex` are
+byte-identical before and after; all 27 host tests pass).
+
+**Consequences:**
+No backward-compatibility aliases are retained — `TileManager`,
+`CharsetData`, and `make_charset` had no callers outside this repository's
+own demos/tests, and the engine has no stated source-compatibility policy,
+so all call sites were migrated. Should an external compatibility need
+arise later, a transitional `using` alias can be added and documented as
+such.

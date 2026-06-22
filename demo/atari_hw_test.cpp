@@ -62,7 +62,7 @@ using Game = engine::Core<Platform, GameConfig>;
 
 // ── Assets (constexpr, ROM-resident) ─────────────────────────────────────
 
-constexpr auto user_charset = engine::make_charset(demo::assets::kUserCharsetBytes);
+constexpr auto user_charset = engine::make_tileset(demo::assets::kUserCharsetBytes);
 
 constexpr auto arrow = engine::make_sprite<8, 8>({
     0b00011000,

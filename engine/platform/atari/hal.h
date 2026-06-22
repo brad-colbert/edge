@@ -43,27 +43,38 @@ namespace atari {
 // install_vbi() to point at the service. Never executed under mos-sim (no NMI).
 //
 // RE-ENTRY GUARD (edge_vbi_busy): the deferred VBI is an NMI, and a heavy service
-// (e.g. the 9-sprite sprite multiplexer) can overrun a frame. The next frame's VBI
-// NMI would then re-enter this trampoline *while it is still running* — and the
-// inner save loop would overwrite edge_vbi_zp_save with the outer call's
-// already-allocated $80-$9F. On unwind the main thread's llvm-mos soft-stack
-// pointer (__rc0/__rc1 at $80/$81) comes back one service frame lower than it went
-// in; that drift accumulates every overrun until the pointer walks down into the
-// code and the next service's stack writes corrupt it → crash. The guard makes a
-// re-entrant VBI a no-op (straight to XITVBV): one frame's service is skipped (a
-// cosmetic hiccup) instead of corrupting the soft stack. A in-service flag, not a
-// disable of NMIs, because the VBI NMI itself must keep being delivered.
+// (e.g. the sprite multiplexer, or a scrolling+sprite frame) can overrun a frame.
+// The next frame's VBI NMI would then re-enter this trampoline *while it is still
+// running* — and the inner save loop would overwrite edge_vbi_zp_save with the
+// outer call's already-allocated $80-$9F. On unwind the main thread's llvm-mos
+// soft-stack pointer (__rc0/__rc1 at $80/$81) comes back one service frame lower
+// than it went in; that drift accumulates every overrun until the pointer walks
+// down into the code and the next service's stack writes corrupt it → crash. The
+// guard makes a re-entrant VBI a no-op (straight to XITVBV): one frame's service
+// is skipped (a cosmetic hiccup) instead of corrupting the soft stack. A flag, not
+// a disable of NMIs, because the VBI NMI itself must keep being delivered.
+//
+// IMPORTANT (XITVBV-window pile-up): the guard is NOT cleared here on the way out.
+// XITVBV is the OS deferred-VBI exit; if the next VBI NMI arrives during that short
+// window it would run a *fresh* service nested inside the previous XITVBV — the
+// OS's stage-1/2 VBLANK is not re-entrant mid-cleanup, so its internal RTS lands
+// one byte off → wild jump → crash (observed at the heaviest scroll+sprite frame).
+// So edge_vbi_busy stays set THROUGH XITVBV and is released only after the main
+// loop has consumed the frame — Core::frame_consumed() -> Hal::frame_consumed()
+// (loop.h, run/run_until). A VBI in the XITVBV window then also sees busy and skips.
 extern "C" {
 [[gnu::naked]] void edge_vbi_trampoline();
 extern uint8_t edge_vbi_jsr;   // first byte of the JSR; operand begins at +1
+extern volatile uint8_t edge_vbi_busy;   // in-service guard; released by the main loop
 }
 
 asm(R"(
     .globl edge_vbi_trampoline
     .globl edge_vbi_jsr
+    .globl edge_vbi_busy
 edge_vbi_trampoline:
     lda edge_vbi_busy
-    bne .Ledge_vbi_skip        ; already mid-service → don't re-enter; just exit
+    bne .Ledge_vbi_skip        ; busy (mid-service OR prev frame not yet consumed) → skip
     inc edge_vbi_busy
     ldx #31
 .Ledge_vbi_save:
@@ -79,9 +90,8 @@ edge_vbi_jsr:
     sta $80,x
     dex
     bpl .Ledge_vbi_restore
-    dec edge_vbi_busy
 .Ledge_vbi_skip:
-    jmp $e462                  ; XITVBV
+    jmp $e462                  ; XITVBV (busy stays set across it; main loop clears)
 edge_vbi_busy:
     .byte 0
 edge_vbi_zp_save:
@@ -406,6 +416,13 @@ struct Hal {
         os::VVBLKD[1] = static_cast<uint8_t>(t >> 8);
         nmien_set(nmien::VBI);              // records the intended mask in the shadow
     }
+
+    // Release the VBI re-entry guard. The trampoline leaves edge_vbi_busy SET on
+    // the way out (through XITVBV); the main loop calls this once it has consumed
+    // the frame, so a VBI arriving during XITVBV — or while a heavy service is
+    // still running — sees the guard and skips instead of piling up and corrupting
+    // the stack. See the edge_vbi_busy comment above.
+    static void frame_consumed() { edge_vbi_busy = 0; }
 };
 
 // Enable or disable playfield DMA. Call this on an opaque overlay screen to

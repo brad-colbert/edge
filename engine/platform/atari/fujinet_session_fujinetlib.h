@@ -91,6 +91,16 @@ struct FujinetLibSessionAdapter {
     static constexpr u16 device_spec_capacity() { return kTcpDeviceSpecCapacity; }
 
 #if defined(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB)
+    // Bulk-read staging buffer (Stage 5C). The engine session lane drains the RX
+    // one byte at a time; routed straight to network_read_nb that is one full
+    // network_status + sio_read SIO transaction PER BYTE — thousands of slow SIO
+    // round-trips for one asset transfer, and over emulated NetSIO an occasional
+    // dropped/garbled byte desynchronises the session framing (observed as a false
+    // UnexpectedKind partway through). Staging one bulk read here and serving the
+    // byte-at-a-time drain from it cuts SIO transactions ~30-90x: far more reliable
+    // and much faster, with no change to the generic recv seam.
+    static constexpr u16 kRxStageCapacity = 256;
+
     struct State {
         char devicespec[kTcpDeviceSpecCapacity] = {};
         u16 devicespec_len = 0;
@@ -101,6 +111,9 @@ struct FujinetLibSessionAdapter {
         u8 last_device_error = 0;
         u16 last_bw = 0;
         u8 last_conn = 0;
+        u8 rx_stage[kRxStageCapacity] = {};
+        u16 rx_stage_len = 0;   // valid bytes currently staged
+        u16 rx_stage_pos = 0;   // next byte to hand out
     };
 
     static State& state() {
@@ -168,6 +181,8 @@ struct FujinetLibSessionAdapter {
         s.last_device_error = fn_device_error;
         s.last_error.status = NetStatus::Ok;
         s.last_error.detail = 0;
+        s.rx_stage_len = 0;          // fresh connection: drop any staged bytes
+        s.rx_stage_pos = 0;
         return NetStatus::Ok;
     }
 
@@ -197,6 +212,8 @@ struct FujinetLibSessionAdapter {
         s.connected = false;
         s.last_error.status = NetStatus::Closed;
         s.last_error.detail = 0;
+        s.rx_stage_len = 0;
+        s.rx_stage_pos = 0;
     }
 
     static bool session_connected() {
@@ -277,28 +294,49 @@ struct FujinetLibSessionAdapter {
             return NetStatus::Closed;
         }
 
-        i16 result = network_read_nb(s.devicespec, (u8*)bytes, capacity);
-        s.last_fn_error = fn_network_error;
-        s.last_device_error = fn_device_error;
-        s.last_bw = fn_network_bw;
-        s.last_conn = fn_network_conn;
-
-        if (result > 0) {
+        if (capacity == 0) {
             s.last_error.status = NetStatus::Ok;
             s.last_error.detail = 0;
             return NetStatus::Ok;
-        } else if (result == 0) {
-            s.last_error.status = NetStatus::WouldBlock;
-            s.last_error.detail = 0;
-            return NetStatus::WouldBlock;
-        } else {
-            u8 err_code = -static_cast<i8>(result);
-            s.last_error.status = map_fn_error(err_code);
-            s.last_error.detail = pack_fujinet_detail(s.last_fn_error,
-                                                      s.last_device_error,
-                                                      err_code);
-            return s.last_error.status;
         }
+
+        // Refill the stage with ONE bulk SIO read when it runs dry. This is the
+        // only place that talks to fujinet-lib; the engine's per-byte drain is
+        // served from the stage, so a 92-byte message costs ~1 SIO read, not 92.
+        if (s.rx_stage_pos >= s.rx_stage_len) {
+            s.rx_stage_pos = 0;
+            s.rx_stage_len = 0;
+            i16 result = network_read_nb(s.devicespec, s.rx_stage, kRxStageCapacity);
+            s.last_fn_error = fn_network_error;
+            s.last_device_error = fn_device_error;
+            s.last_bw = fn_network_bw;
+            s.last_conn = fn_network_conn;
+
+            if (result > 0) {
+                s.rx_stage_len = static_cast<u16>(result);
+            } else if (result == 0) {
+                s.last_error.status = NetStatus::WouldBlock;
+                s.last_error.detail = 0;
+                return NetStatus::WouldBlock;
+            } else {
+                u8 err_code = -static_cast<i8>(result);
+                s.last_error.status = map_fn_error(err_code);
+                s.last_error.detail = pack_fujinet_detail(s.last_fn_error,
+                                                          s.last_device_error,
+                                                          err_code);
+                return s.last_error.status;
+            }
+        }
+
+        // Serve up to `capacity` bytes from the stage (the engine asks for 1).
+        u16 avail = static_cast<u16>(s.rx_stage_len - s.rx_stage_pos);
+        u16 n = (capacity < avail) ? capacity : avail;
+        u8* dst = static_cast<u8*>(bytes);
+        for (u16 i = 0; i < n; ++i) dst[i] = s.rx_stage[s.rx_stage_pos++];
+
+        s.last_error.status = NetStatus::Ok;
+        s.last_error.detail = 0;
+        return NetStatus::Ok;
     }
 
     static NetError session_last_error() {
