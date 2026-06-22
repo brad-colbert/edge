@@ -14,11 +14,17 @@
 namespace tank {
 
 struct Palette {
-    static constexpr engine::u8 colbk  = 4;    // background / arena floor
-    static constexpr engine::u8 colpf0 = 0;    // walls (black)
-    static constexpr engine::u8 colpf1 = 7;    // light detail
-    static constexpr engine::u8 colpf2 = 27;   // accent (greenish)
-    static constexpr engine::u8 colpf3 = 54;   // unused (inverse) accent
+    // Colours chosen in the Mode4 editor, translated to true Atari (GTIA NTSC)
+    // register values. NOTE: Mode4's on-screen swatches use a DIFFERENT palette
+    // than the hardware, so the raw bytes it saves (02 07 12 5b 3a) render as the
+    // wrong hues on a real Atari/Altirra (e.g. its "green" 0x5b is magenta in
+    // NTSC). These values reproduce the *appearance* of the Mode4 swatches.
+    // Mode4 panel order: Colr4(BG), Colr0..Colr3 -> COLBK, COLPF0..COLPF3.
+    static constexpr engine::u8 colbk  = 0x04;  // Colr4(BG) — dark grey
+    static constexpr engine::u8 colpf0 = 0x0e;  // Colr0     — light grey / white (walls)
+    static constexpr engine::u8 colpf1 = 0x32;  // Colr1     — brick red
+    static constexpr engine::u8 colpf2 = 0xc6;  // Colr2     — green
+    static constexpr engine::u8 colpf3 = 0x84;  // Colr3     — blue (unused by the maps)
 };
 
 }  // namespace tank
