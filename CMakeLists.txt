@@ -309,7 +309,7 @@ if(EDGE_BUILD_DEMO)
 
     add_executable(atari_tank_demo demo/tank/atari_tank_demo.cpp ${TANK_GEN_HEADERS})
     target_compile_options(atari_tank_demo PRIVATE
-        -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra)
+        -std=c++20 -fno-exceptions -fno-rtti -O2 -Wall -Wextra)
     target_include_directories(atari_tank_demo PRIVATE ${CMAKE_SOURCE_DIR} ${TANK_GEN_DIR})
     target_compile_definitions(atari_tank_demo PRIVATE EDGE_TANK_ASSET_SOURCE=${_TANK_SRC})
     set_target_properties(atari_tank_demo PROPERTIES OUTPUT_NAME "atari_tank_demo.xex")

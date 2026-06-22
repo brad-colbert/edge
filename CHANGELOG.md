@@ -229,6 +229,25 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
   ADR-034.
 
 ### Fixed
+- **Scroll demos ran at half frame rate — `frame_service` overran one frame
+  (engine-wide perf).** A scrolling, single-sprite demo (`atari_tank_demo`) was
+  pinned to a steady **30 fps** (measured: OS `RTCLOK $14` advanced by exactly 2 per
+  `frame_step`), which read as a motion stutter when scrolling — worst horizontally,
+  where ANTIC HSCROLL steps a coarse 2 px (1 color clock) at an uneven sub-cell
+  cadence. Root cause was two per-frame steps that ran every frame regardless of
+  need: (1) `patch_scroll` rewrote **all** scroll-region LMS load addresses with a
+  16-bit multiply per visible line, and (2) `InterruptManager::prepare_chain`
+  walked the **entire** display list to re-arm raster delivery even with **zero**
+  hooks. Together they pushed the service just past one 60 Hz frame. Fixes (all
+  engine-wide — every scroll demo benefits): `patch_scroll` now walks the load
+  address incrementally (`+= map_width`, one multiply total, byte-identical result);
+  `ScreenManager::apply_scroll` skips the LMS rewrite while the **coarse** offset is
+  unchanged (fine registers still update every frame; cache invalidated by
+  `bind_scroll_map`); `prepare_chain` early-returns when the hook chain is empty and
+  was empty last call. With these the tank demo also moves from `-Os` to `-O2` (the
+  zero page now has room, so all three asset sources link). Verified **stable
+  60 fps** (240/240 frames at one VBI), 33/33 host tests pass, and the tank,
+  multiplexer (9 sprites/3 zones), and arena demos all render correctly.
 - **Deferred-VBI re-entry guard now covers the `XITVBV` exit window (ADR-028).**
   The guard cleared `edge_vbi_busy` *inside the trampoline* before `JMP XITVBV`,
   leaving a hole: if the next VBI NMI arrived during `XITVBV` it ran a fresh service
