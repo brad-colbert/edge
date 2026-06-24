@@ -23,6 +23,7 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$REPO/scripts/lib/atari_emu.sh"
 BUILD_DIR="$REPO/build-atari-emb"
 XEX="$BUILD_DIR/atari_tank_demo.xex"
 
@@ -37,21 +38,14 @@ if [ ! -f "$XEX" ] || [ "${REBUILD:-0}" = "1" ]; then
 fi
 [ -f "$XEX" ] || { echo "build produced no .xex: $XEX" >&2; exit 1; }
 
-# ── Locate Altirra ───────────────────────────────────────────────────────────
-ALT_DIR="${ALTIRRA_DIR:-}"
-if [ -z "$ALT_DIR" ]; then
-    ALT_DIR="$(ls -d "$HOME"/Dropbox/Projects/Atari/Altirra/Altirra-*/ 2>/dev/null | sort -V | tail -n 1)"
-    ALT_DIR="${ALT_DIR%/}"
-fi
-[ -n "$ALT_DIR" ] && [ -d "$ALT_DIR" ] || {
-    echo "Altirra dir not found; set ALTIRRA_DIR=/path/to/Altirra-install" >&2; exit 2; }
+# ── Locate Altirra (ALTIRRA_DIR override, else common locations) ─────────────
+ALT_DIR="$(edge_find_altirra)" || exit 2
 
 export DISPLAY="${DISPLAY:-:0}"
 TV="${ALTIRRA_TV:-/ntsc}"
 read -r -a EXTRA <<< "${ALTIRRA_EXTRA:-}"
 
-to_wine() { printf 'Z:%s' "$(printf '%s' "$1" | tr '/' '\\')"; }
-XEX_WIN="$(to_wine "$(readlink -f "$XEX")")"
+XEX_WIN="$(edge_to_wine "$(readlink -f "$XEX")")"
 
 echo "== launching Embedded tank demo in Altirra (close the window to quit) =="
 echo "   xex: $XEX"

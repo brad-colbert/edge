@@ -169,6 +169,31 @@ For a fuller walkthrough, start with [`/documents/QUICK_START.md`](./documents/Q
 - **[Docker](https://www.docker.com/)** *(optional)* — runs the isolated UDP peer used
   in the Mode-B networking validation stack.
 
+## Getting started
+
+After cloning, three scripts take you from a bare checkout to a running demo:
+
+```sh
+scripts/setup.sh        # verify the toolchain is installed (read-only doctor)
+scripts/build_demos.sh  # build every Atari demo .xex into build-atari/
+scripts/run_tank_embedded.sh   # build + launch the tank demo in Altirra
+```
+
+`setup.sh` checks for the core tools (llvm-mos toolchains, CMake, Python) and
+prints the exact remedy for anything missing. `build_demos.sh` configures the
+Atari build and builds the aggregate `demos` target. The detailed
+[Requirements](#requirements) and [Build and test](#build-and-test) sections
+below cover the same ground manually.
+
+Useful environment knobs (all optional; sensible defaults):
+
+| Variable | Used by | Meaning |
+| --- | --- | --- |
+| `ALTIRRA_DIR` | `run_tank_*.sh`, `setup.sh` | Path to your Altirra install (else common locations are searched) |
+| `FUJINETLIB_ROOT` | `run_tank_networked.sh` | fujinet-lib (llvm-mos) checkout for the live networking demo |
+| `BUILD_DIR` | `build_demos.sh` | Build directory (default `build-atari`) |
+| `RECONF=1` | `build_demos.sh` | Force a fresh CMake configure |
+
 ## Build and test
 
 EDGE uses CMake and llvm-mos toolchains.

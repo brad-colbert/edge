@@ -19,7 +19,7 @@
 # checks and warns; it does not start them):
 #   * netsiohub bridge (UDP 9997)      — the NetSIO endpoint Altirra talks to
 #   * fujinet-pc firmware (TCP :8000)  — does the actual N:TCP to the server
-#     start with:  (cd ~/Projects.local/fujinet-firmware/build/dist && ./run-fujinet)
+#     start it from your fujinet-pc build's dist dir (its run-fujinet helper).
 # On real Atari hardware with a physical FujiNet, neither is needed.
 #
 # Controls + the /debug rationale + teardown caveat: see run_tank_embedded.sh.
@@ -27,12 +27,13 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$REPO/scripts/lib/atari_emu.sh"
 BUILD_DIR="$REPO/build-atari-live"
 XEX="$BUILD_DIR/atari_tank_demo.xex"
 
 NET_HOST="${NET_HOST:-$(hostname -I | awk '{print $1}')}"
 NET_PORT="${NET_PORT:-9000}"
-FUJINETLIB_ROOT="${FUJINETLIB_ROOT:-/home/brad/Dropbox/Projects/Atari/fujinetlib-llvm}"
+FUJINETLIB_ROOT="${FUJINETLIB_ROOT:-$REPO/third_party/fujinetlib-llvm}"
 LINGER="${LINGER:-10}"
 
 [ -f "$FUJINETLIB_ROOT/build/libfujinet.a" ] || {
@@ -62,23 +63,16 @@ fi
 ss -lun 2>/dev/null | grep -q ':9997' || \
     echo "WARNING: netsiohub (UDP 9997) not detected — the live load will stall." >&2
 ss -lnt 2>/dev/null | grep -q ':8000' || \
-    echo "WARNING: fujinet-pc firmware (:8000) not detected — start it with:
-         (cd ~/Projects.local/fujinet-firmware/build/dist && ./run-fujinet)" >&2
+    echo "WARNING: fujinet-pc firmware (:8000) not detected — start your fujinet-pc
+         build (its run-fujinet helper) before the live load, or the transfer stalls." >&2
 
-# ── Locate Altirra ───────────────────────────────────────────────────────────
-ALT_DIR="${ALTIRRA_DIR:-}"
-if [ -z "$ALT_DIR" ]; then
-    ALT_DIR="$(ls -d "$HOME"/Dropbox/Projects/Atari/Altirra/Altirra-*/ 2>/dev/null | sort -V | tail -n 1)"
-    ALT_DIR="${ALT_DIR%/}"
-fi
-[ -n "$ALT_DIR" ] && [ -d "$ALT_DIR" ] || {
-    echo "Altirra dir not found; set ALTIRRA_DIR=/path/to/Altirra-install" >&2; exit 2; }
+# ── Locate Altirra (ALTIRRA_DIR override, else common locations) ─────────────
+ALT_DIR="$(edge_find_altirra)" || exit 2
 
 export DISPLAY="${DISPLAY:-:0}"
 TV="${ALTIRRA_TV:-/ntsc}"
 read -r -a EXTRA <<< "${ALTIRRA_EXTRA:-}"
-to_wine() { printf 'Z:%s' "$(printf '%s' "$1" | tr '/' '\\')"; }
-XEX_WIN="$(to_wine "$(readlink -f "$XEX")")"
+XEX_WIN="$(edge_to_wine "$(readlink -f "$XEX")")"
 
 # ── Start the asset server; stop it (and Altirra) on exit ────────────────────
 SRV_LOG="$(mktemp /tmp/edge_tank_server.XXXXXX.log)"
