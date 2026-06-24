@@ -98,6 +98,51 @@ edge_vbi_zp_save:
     .fill 32
 )");
 
+// ── Immediate-VBI fine-scroll flush ──────────────────────────────────
+//
+// The fine-scroll registers HSCROL ($D404) / VSCROL ($D405) move the whole picture
+// every frame, but the engine's frame service runs in the *deferred* VBI (VVBLKD,
+// above) — a heavy routine whose trampoline save-loop and input read can push the
+// register write a few scanlines into the visible region. The topmost scanlines
+// then display the previous frame's fine offset, which during horizontal motion
+// reads as a one-frame lag (jitter) at the top of the screen.
+//
+// Fix: flush the fine registers from the IMMEDIATE VBI (VVBLKI), which the OS NMI
+// reaches at the very top of vertical blank — before its own housekeeping and well
+// before the first visible scanline. HSCROL/VSCROL have no OS shadow, so this early
+// direct write is never overwritten. The deferred service no longer writes the
+// chip; it only stages the two computed bytes (set_fine_scroll_x/y below), and this
+// handler copies them out.
+//
+// This is a bare naked routine: two LDA abs / STA $D40x pairs and a chain-on. It
+// touches ONLY A (restored by the OS at the eventual XITVBV), uses NO llvm-mos soft
+// stack ($80-$9F) so it needs no save/restore, and deliberately does NOT consult
+// edge_vbi_busy — the flush is idempotent (re-flushing the same staged bytes during
+// a deferred overrun is visually identical) and must stay independent of the
+// deferred re-entry guard. It exits via JMP SYSVBV ($E45F), the immediate-VBI
+// continuation (NOT XITVBV — see os.h). Never executed under mos-sim (no NMI).
+extern "C" {
+[[gnu::naked]] void edge_imm_vbi_trampoline();
+extern volatile uint8_t edge_fine_hscrol;   // staged HSCROL, flushed by the immediate VBI
+extern volatile uint8_t edge_fine_vscrol;   // staged VSCROL
+}
+
+asm(R"(
+    .globl edge_imm_vbi_trampoline
+    .globl edge_fine_hscrol
+    .globl edge_fine_vscrol
+edge_imm_vbi_trampoline:
+    lda edge_fine_hscrol
+    sta $d404                  ; HSCROL — lands in VBLANK, before scanline 0
+    lda edge_fine_vscrol
+    sta $d405                  ; VSCROL
+    jmp $e45f                  ; SYSVBV: finish OS VBLANK, then JMP (VVBLKD)
+edge_fine_hscrol:
+    .byte 0
+edge_fine_vscrol:
+    .byte 0
+)");
+
 // All-static HAL (no instance state); the engine calls it via Platform::hal
 // (DECISIONS.md ADR-007 — static dispatch, never virtual).
 struct Hal {
@@ -114,8 +159,13 @@ struct Hal {
         *os::CHBAS  = v;
         *reg::CHBASE = v;
     }
-    static void set_fine_scroll_x(uint8_t v) { *reg::HSCROL = v; }
-    static void set_fine_scroll_y(uint8_t v) { *reg::VSCROL = v; }
+    // Stage the fine-scroll bytes rather than writing the chip directly: the
+    // immediate VBI (edge_imm_vbi_trampoline, above) flushes these to HSCROL/VSCROL
+    // at the top of vertical blank, before the first visible scanline, so the fine
+    // offset is live for the whole frame and the top of the screen no longer lags
+    // by a frame during horizontal scroll.
+    static void set_fine_scroll_x(uint8_t v) { edge_fine_hscrol = v; }
+    static void set_fine_scroll_y(uint8_t v) { edge_fine_vscrol = v; }
 
     // ── DLI dispatcher addresses ──
     //
@@ -407,11 +457,20 @@ struct Hal {
         const uint16_t t =
             static_cast<uint16_t>(reinterpret_cast<uintptr_t>(&edge_vbi_trampoline));
 
+        // Also point the OS immediate-VBI vector (VVBLKI) at the bare fine-scroll
+        // flush, so HSCROL/VSCROL land at the top of vertical blank ahead of the
+        // heavy deferred service. It chains on via SYSVBV, so the deferred VBI
+        // (VVBLKD, below) still fires every frame.
+        const uint16_t i =
+            static_cast<uint16_t>(reinterpret_cast<uintptr_t>(&edge_imm_vbi_trampoline));
+
         // NMIEN is write-only (reads return NMIST), so it can't be RMW'd: blank
-        // all NMIs while the two-byte os::VVBLKD vector is swapped to avoid a VBI
-        // firing on a half-written vector, then re-enable the VBI NMI. The DLI
+        // all NMIs while the two-byte os::VVBLKI/VVBLKD vectors are swapped to avoid
+        // a VBI firing on a half-written vector, then re-enable the VBI NMI. The DLI
         // NMI (nmien::DLI) is armed separately by code that installs a DLI.
         *reg::NMIEN = 0x00;                 // raw blank during the vector swap
+        os::VVBLKI[0] = static_cast<uint8_t>(i & 0xFF);
+        os::VVBLKI[1] = static_cast<uint8_t>(i >> 8);
         os::VVBLKD[0] = static_cast<uint8_t>(t & 0xFF);
         os::VVBLKD[1] = static_cast<uint8_t>(t >> 8);
         nmien_set(nmien::VBI);              // records the intended mask in the shadow

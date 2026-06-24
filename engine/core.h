@@ -389,6 +389,13 @@ public:
             Platform::hal::frame_consumed();
     }
 
+    // Called by the loop right after the game callback has committed this frame's
+    // scroll position, before it waits for the next frame boundary. Publishes the
+    // fine-scroll position so the backend latches THIS frame's value (keeping fine
+    // and coarse scroll coherent — see Screen::publish_fine_scroll). No-op unless a
+    // scroll map is bound.
+    static void publish_scroll() { screen.publish_fine_scroll(scroll); }
+
     // ── Per-frame service ──
     //
     // The backend's frame interrupt runs this once per frame in the

@@ -274,6 +274,20 @@ public:
         }
     }
 
+    // Publish only the fine-scroll position to the backend. Called from the game
+    // loop right after the game commits its frame (engine/loop.h), so the value the
+    // backend latches at the next frame boundary reflects THIS frame's position.
+    // The backend may latch the fine registers at a different point in the frame
+    // than the coarse load addresses (apply_scroll, run from the frame service); if
+    // the fine value were published only there it could lag the coarse offset by a
+    // frame and shear the picture during motion. write_fine() carries no display-
+    // program side effects, so it is safe to call outside the frame service.
+    template <typename ScrollT>
+    void publish_fine_scroll(ScrollT& scroll) {
+        if (!scroll_bound_ || !scroll.active() || scroll.suspended()) return;
+        scroll.write_fine();
+    }
+
     // Typed region view for region N of screen S (compile-time type safety:
     // text ops on a bitmap region, or vice versa, do not compile).
     template <typename S, u8 N>
