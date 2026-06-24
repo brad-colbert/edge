@@ -491,6 +491,27 @@ if(EDGE_BUILD_DEMO)
         OUTPUT_NAME "edge_net_realtime_meter.xex")
     target_link_options(edge_net_realtime_meter PRIVATE
         "LINKER:--Map=$<TARGET_FILE_DIR:edge_net_realtime_meter>/edge_net_realtime_meter.map")
+
+    # Aggregate convenience target: build every always-available demo .xex with
+    # one `cmake --build <dir> --target demos`. This is the stable name the
+    # scripts/build_demos.sh wrapper and the README point at. The network-only
+    # targets (fujinet_net_test, fujinet_session_validate) are intentionally
+    # excluded — they are conditionally defined and need an external fujinet-lib
+    # checkout. The default ALL target still builds whatever is enabled.
+    add_custom_target(demos DEPENDS
+        atari_hw_test
+        atari_scroll_test
+        atari_mode4_geometry_probe
+        atari_tank_demo
+        atari_vbxe_bringup
+        atari_vbxe_gfx
+        atari_vbxe_text
+        atari_vbxe_sprites
+        multiplex_demo
+        arena_native
+        arena_vbxe
+        net_dual_lane_demo
+        edge_net_realtime_meter)
     return()
 endif()
 

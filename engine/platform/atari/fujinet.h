@@ -61,7 +61,7 @@ struct NullNetwork {
 // - session_* : fujinet-lib / CIO N: TCP client nonblocking path
 struct FujinetNetwork {
 	// Realtime lane seam.
-	static NetStatus realtime_open_udp_seq(const char* host, u16 remote_port, u16 local_port) {
+	static NetStatus realtime_open_udp_seq(const char* host, u16 remote_port, [[maybe_unused]] u16 local_port) {
 #if defined(EDGE_ATARI_FUJINET_REALTIME_NETSTREAM)
 		return fujinet_netstream::NetstreamRealtimeAdapter::realtime_open_udp_seq(host, remote_port, local_port);
 #else
@@ -70,7 +70,7 @@ struct FujinetNetwork {
 		return NetStatus::Ok;
 #endif
 	}
-	static NetStatus realtime_bind_udp_seq(u16 local_port) {
+	static NetStatus realtime_bind_udp_seq([[maybe_unused]] u16 local_port) {
 #if defined(EDGE_ATARI_FUJINET_REALTIME_NETSTREAM)
 		return fujinet_netstream::NetstreamRealtimeAdapter::realtime_bind_udp_seq(local_port);
 #else
