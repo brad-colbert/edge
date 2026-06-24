@@ -57,8 +57,17 @@ EDGE_ATARI_OS(CHBAS,  0x02F4);   // shadow of CHBASE (character set base page)
 // XITVBV exits a deferred VBI handler (restores the OS-saved A/X/Y and RTIs);
 // SETVBV installs a VBI vector through the OS. Plain addresses (called, not
 // dereferenced as data).
-inline constexpr uint16_t XITVBV = 0xE462;   // deferred-VBI exit
+//
+// EXIT CONVENTION (contiguous triplet): an IMMEDIATE VBI handler (installed at
+// VVBLKI) runs at the very top of the VBLANK NMI, before the OS finishes its own
+// VBLANK processing, and must hand control back by JMP SYSVBV — NOT XITVBV. SYSVBV
+// finishes OS stage-1/stage-2 housekeeping and then JMP (VVBLKD), so the deferred
+// chain still fires. A DEFERRED handler (VVBLKD) instead exits via XITVBV (pull the
+// OS-saved A/X/Y and RTI). Using XITVBV from an immediate handler skips the rest of
+// the OS VBLANK and unwinds a frame that was never pushed → hang/crash.
 inline constexpr uint16_t SETVBV = 0xE45C;   // set VBI vector
+inline constexpr uint16_t SYSVBV = 0xE45F;   // immediate-VBI continuation (OS VBLANK → JMP (VVBLKD))
+inline constexpr uint16_t XITVBV = 0xE462;   // deferred-VBI exit
 
 } // namespace os
 } // namespace atari
