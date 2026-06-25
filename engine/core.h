@@ -408,6 +408,15 @@ public:
         //    after a few minutes of no console/keyboard input).
         Platform::hal::suppress_idle_dim();
 
+        // 0b. Re-arm raster delivery off the last-built chain NOW, in vertical blank,
+        //     before any visible scanline. The chain rebuild (step 6) runs late — a
+        //     heavy frame can have the beam already past an early hook's scanline by
+        //     then, leaving the raster vector at the terminal so that hook is skipped
+        //     for the frame (a flicker, e.g. a high colour split dropping out during
+        //     motion). This makes an early hook fire reliably every frame; step 6
+        //     rebuilds and re-arms again. No-op until the chain has been built once.
+        interrupts.rearm_delivery();
+
         // (Raster interrupts are gated off only around the chain rewrite in step 6,
         //  not for the whole service — see the comment there. Disabling for the
         //  whole service suppressed earlier user raster hooks every frame when the

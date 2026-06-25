@@ -55,6 +55,8 @@ extern "C" {
 // Patch-site labels: each sits on the first byte of an instruction whose operand
 // install_dispatch() rewrites. The operand begins at (label + 1).
 extern uint8_t edge_dli_op_curx;   // LDX current_            (abs, 2-byte operand)
+extern uint8_t edge_dli_op_cnt;    // CPX total_count_        (abs, 2-byte operand)
+extern uint8_t edge_dli_op_rst;    // STA current_ (=0 resync)(abs, 2-byte operand)
 extern uint8_t edge_dli_op_hlo;    // LDA handler_lo_,X       (abs, 2-byte operand)
 extern uint8_t edge_dli_op_hhi;    // LDA handler_hi_,X       (abs, 2-byte operand)
 extern uint8_t edge_dli_op_curx2;  // LDX current_ (reload)   (abs, 2-byte operand)
@@ -91,6 +93,8 @@ asm(R"(
     .globl edge_dli_dispatch
     .globl edge_dli_terminal
     .globl edge_dli_op_curx
+    .globl edge_dli_op_cnt
+    .globl edge_dli_op_rst
     .globl edge_dli_op_hlo
     .globl edge_dli_op_hhi
     .globl edge_dli_op_curx2
@@ -114,6 +118,23 @@ edge_dli_dispatch:
     bpl .Ledge_dli_save
 edge_dli_op_curx:
     ldx $ffff               ; X = current_  (abs operand patched)
+edge_dli_op_cnt:
+    cpx $ffff               ; compare current_ with total_count_ (abs operand patched)
+    bcc .Ledge_dli_inrange  ; current_ < live slot count → a real slot, dispatch it
+    ; Out of range: current_ is a stale one-past-end index left by a prior frame's
+    ; dispatch whose prepare_chain had not yet reset it to 0 when this DLI fired (a
+    ; heavy frame service can overrun past an early hook's scanline). Firing slot
+    ; current_ would JSR a garbage pointer; SKIPPING it would drop the hook for the
+    ; frame — a visible flicker (e.g. the colour split vanishing on heavy frames).
+    ; Instead re-sync to the chain head: reset current_ to 0 and dispatch slot 0
+    ; now. The first DLI of a frame is always the first (lowest-scanline) hook, so
+    ; slot 0 is the correct one; the tail then re-points VDSLST from next_[0] and
+    ; bumps current_, keeping the rest of the chain in step.
+    lda #0
+edge_dli_op_rst:
+    sta $ffff               ; current_ = 0  (abs operand patched)
+    tax                     ; X = 0 → dispatch slot 0
+.Ledge_dli_inrange:
 edge_dli_op_hlo:
     lda $ffff,x             ; handler_lo_[current_]  (operand patched)
     sta edge_dli_jsr+1
@@ -203,7 +224,7 @@ edge_mux_op_inc:
 // current_; the remaining arguments are the RAM addresses of the parallel tables.
 // Every patched site uses absolute (2-byte) addressing — current_ lives in BSS,
 // not a reserved zero-page byte, so it is addressed absolutely like the tables.
-inline void install_dispatch(uint16_t cur,
+inline void install_dispatch(uint16_t cur, uint16_t count,
                              uint16_t handler_lo, uint16_t handler_hi,
                              uint16_t next_lo, uint16_t next_hi) {
     // Absolute two-byte operands (little-endian).
@@ -212,6 +233,8 @@ inline void install_dispatch(uint16_t cur,
         opcode[2] = static_cast<uint8_t>(addr >> 8);
     };
     patch16(&edge_dli_op_curx,  cur);
+    patch16(&edge_dli_op_cnt,   count);
+    patch16(&edge_dli_op_rst,   cur);
     patch16(&edge_dli_op_curx2, cur);
     patch16(&edge_dli_op_inc,   cur);
     patch16(&edge_dli_op_hlo, handler_lo);

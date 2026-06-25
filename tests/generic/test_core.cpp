@@ -84,7 +84,7 @@ struct MockHal {
     static void set_raster_vector(u16) {}
     static void enable_raster()  {}
     static void disable_raster() {}
-    static void install_raster_dispatch(u16, u16, u16, u16, u16) {}
+    static void install_raster_dispatch(u16, u16, u16, u16, u16, u16) {}
     static void mux_noop() {}
     static void (*multiplex_dli())() { return &mux_noop; }
     static void install_multiplex_dli(u16, u16) {}
