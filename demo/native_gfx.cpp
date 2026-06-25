@@ -22,8 +22,8 @@
 //
 // ── Setup notes ───────────────────────────────────────────────────────────
 //  * Needs no VBXE. Run with BASIC DISABLED so the demo owns RAM. NTSC.
-//  * The software view addresses pixels with u8 x, so the 320-wide F mode can only
-//    reach x ≤ 255 — its right ~64px stay blank by design.
+//  * All three modes draw to their full width (the software view uses u16 x, so the
+//    320-wide F mode reaches x = 319 like D/E fill their 160).
 
 #include <stdint.h>
 
@@ -85,8 +85,10 @@ static void palette_hires() {
 // the ink pixel values (in hi-res all three collapse to 1). `tag` (1..3) marks the
 // mode with that many small squares.
 template <typename G>
-static void draw_scene(G& g, u8 right, u8 bottom, u8 bpp, u8 a, u8 b, u8 c, u8 tag) {
-    const u8 L = 4, R = static_cast<u8>(right - 4), T = 6, B = static_cast<u8>(bottom - 6);
+static void draw_scene(G& g, u16 right, u8 bottom, u8 bpp, u8 a, u8 b, u8 c, u8 tag) {
+    // x is u16 so ANTIC F (320 wide) fills its full width like D/E fill theirs.
+    const u16 L = 4, R = static_cast<u16>(right - 4);
+    const u8  T = 6, B = static_cast<u8>(bottom - 6);
 
     g.clear(0);
 
@@ -104,12 +106,12 @@ static void draw_scene(G& g, u8 right, u8 bottom, u8 bpp, u8 a, u8 b, u8 c, u8 t
         g.fill_rect(12, static_cast<u16>(T + 4 + i * span), 40, barH, inks[i]);
 
     // Two crossing diagonals on the right (software Bresenham via plot).
-    const u8 d0 = static_cast<u8>(right - 90), d1 = static_cast<u8>(right - 12);
+    const u16 d0 = static_cast<u16>(right - 90), d1 = static_cast<u16>(right - 12);
     g.line(d0, static_cast<u8>(T + 6), d1, static_cast<u8>(B - 6), b);
     g.line(d1, static_cast<u8>(T + 6), d0, static_cast<u8>(B - 6), c);
 
     // Dotted accent across the lower band (plot every few pixels).
-    for (u8 x = static_cast<u8>(L + 4); x < static_cast<u8>(R - 4); x = static_cast<u8>(x + 6))
+    for (u16 x = static_cast<u16>(L + 4); x < static_cast<u16>(R - 4); x = static_cast<u16>(x + 6))
         g.plot(x, static_cast<u8>(B - 4), a);
 
     // A 16×16 chequer, packed at this mode's bpp, then blitted near the right.
@@ -124,7 +126,7 @@ static void draw_scene(G& g, u8 right, u8 bottom, u8 bpp, u8 a, u8 b, u8 c, u8 t
             const u8 sh = static_cast<u8>((ppb - 1 - (x % ppb)) * bpp);
             img[y * stride + x / ppb] = static_cast<u8>(img[y * stride + x / ppb] | (v << sh));
         }
-    g.blit(static_cast<u8>(R - 26), static_cast<u8>(T + 8), img, IMG_W, IMG_H);
+    g.blit(static_cast<u16>(R - 26), static_cast<u8>(T + 8), img, IMG_W, IMG_H);
 
     // Mode tag: `tag` small squares along the top (1 = D, 2 = E, 3 = F).
     for (u8 i = 0; i < tag; ++i)
@@ -153,7 +155,7 @@ static void activate(u8 mode) {
             Game::set_screen<ScreenF>([] {});
             palette_hires();
             gF.attach(Game::screen.canvas_base<ScreenF>());
-            draw_scene(gF, 255, 191, 1, 1, 1, 1, 3);
+            draw_scene(gF, 319, 191, 1, 1, 1, 1, 3);        // full 320-wide extent
             break;
     }
 }

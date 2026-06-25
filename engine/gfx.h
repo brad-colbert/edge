@@ -76,7 +76,7 @@ public:
             Platform::hal::overlay_bitmap_plot(x, y, color);
         } else {
             static_assert(has_software_view, "baseline BitmapOps needs a bitmap Region");
-            view_.plot(static_cast<u8>(x), static_cast<u8>(y), color);
+            view_.plot(x, y, color);
         }
     }
 
@@ -88,8 +88,7 @@ public:
             Platform::hal::overlay_bitmap_fill_rect(lo, y, len, 1, color);
         } else {
             static_assert(has_software_view, "baseline BitmapOps needs a bitmap Region");
-            view_.hline(static_cast<u8>(x1), static_cast<u8>(x2),
-                        static_cast<u8>(y), color);
+            view_.hline(x1, x2, y, color);
         }
     }
 
@@ -102,7 +101,7 @@ public:
         } else {
             static_assert(has_software_view, "baseline BitmapOps needs a bitmap Region");
             for (u16 y = lo; y < static_cast<u16>(lo + len); ++y)
-                view_.plot(static_cast<u8>(x), static_cast<u8>(y), color);
+                view_.plot(x, y, color);
         }
     }
 
@@ -113,8 +112,8 @@ public:
         } else {
             static_assert(has_software_view, "baseline BitmapOps needs a bitmap Region");
             for (u16 r = 0; r < h; ++r)
-                view_.hline(static_cast<u8>(x), static_cast<u8>(x + w - 1),
-                            static_cast<u8>(y + r), color);
+                view_.hline(x, static_cast<u16>(x + w - 1),
+                            static_cast<u16>(y + r), color);
         }
     }
 
@@ -153,8 +152,7 @@ public:
             Platform::hal::overlay_bitmap_blit(x, y, src, w, h);
         } else {
             static_assert(has_software_view, "baseline BitmapOps needs a bitmap Region");
-            view_.blit(static_cast<u8>(x), static_cast<u8>(y), src,
-                       static_cast<u8>(w), static_cast<u8>(h));
+            view_.blit(x, y, src, static_cast<u8>(w), static_cast<u8>(h));
         }
     }
 

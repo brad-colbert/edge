@@ -238,8 +238,8 @@ at each screen's front-aligned canvas (`Game::gfx()` binds a single packing).
 cmake --build build-atari --target native_gfx        # -> native_gfx.xex
 ```
 
-Run with BASIC disabled. Needs **no VBXE**. The software view addresses pixels with
-`u8` x, so ANTIC F's 320-wide field is only drawn to x ≤ 255 (right ~64px blank).
+Run with BASIC disabled. Needs **no VBXE**. All three modes draw to their full
+width (the software `BitmapRegionView` uses `u16` x, so ANTIC F reaches x = 319).
 
 | Observation | Proves |
 |---|---|
