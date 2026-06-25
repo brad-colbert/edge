@@ -85,7 +85,10 @@ struct BitmapRegionView {
     static constexpr u8  bpp             = tr::bits_per_pixel(Mode);
     static constexpr u8  pixels_per_byte = static_cast<u8>(8 / bpp);
     static constexpr u8  pixel_mask      = static_cast<u8>((1u << bpp) - 1);
-    static constexpr u8  width           = bytes_per_line * pixels_per_byte;
+    // u16: a 1bpp mode is 8*bytes_per_line pixels wide (320 for a 40-byte line),
+    // which overflows u8. Coordinates are u16 to match the public BitmapOps API and
+    // to address the full width of the widest modes.
+    static constexpr u16 width           = static_cast<u16>(bytes_per_line) * pixels_per_byte;
     static constexpr u8  height          = Lines;
     static constexpr u16 length          = static_cast<u16>(bytes_per_line) * Lines;
 
@@ -93,15 +96,15 @@ struct BitmapRegionView {
     const u16* row_table = nullptr;   // null => shift-and-add row addressing
 
     // Byte offset of the start of scanline `y`.
-    u16 row_base(u8 y) const {
+    u16 row_base(u16 y) const {
         return row_table ? row_table[y]
-                         : static_cast<u16>(y) * bytes_per_line;
+                         : static_cast<u16>(y * bytes_per_line);
     }
 
     // Set one pixel to `color` (0..pixel_mask). Read-modify-write of the packed
     // byte; the leftmost pixel of a byte occupies the high bits.
-    void plot(u8 x, u8 y, u8 color) const {
-        u16 idx   = row_base(y) + (x / pixels_per_byte);
+    void plot(u16 x, u16 y, u8 color) const {
+        u16 idx   = static_cast<u16>(row_base(y) + x / pixels_per_byte);
         u8  shift = static_cast<u8>((pixels_per_byte - 1 - (x % pixels_per_byte)) * bpp);
         u8  keep  = static_cast<u8>(~(pixel_mask << shift));
         ptr[idx]  = static_cast<u8>((ptr[idx] & keep) |
@@ -109,8 +112,8 @@ struct BitmapRegionView {
     }
 
     // Read one pixel's colour value.
-    u8 point(u8 x, u8 y) const {
-        u16 idx   = row_base(y) + (x / pixels_per_byte);
+    u8 point(u16 x, u16 y) const {
+        u16 idx   = static_cast<u16>(row_base(y) + x / pixels_per_byte);
         u8  shift = static_cast<u8>((pixels_per_byte - 1 - (x % pixels_per_byte)) * bpp);
         return static_cast<u8>((ptr[idx] >> shift) & pixel_mask);
     }
@@ -127,9 +130,9 @@ struct BitmapRegionView {
     // Horizontal line from x1..x2 inclusive on scanline y. Pixel-wise for
     // correctness; a whole-byte run with masked endpoints is a future
     // optimisation (API_DESIGN.md "Bitmap Drawing").
-    void hline(u8 x1, u8 x2, u8 y, u8 color) const {
-        if (x2 < x1) { u8 t = x1; x1 = x2; x2 = t; }
-        for (u8 x = x1; ; ++x) {
+    void hline(u16 x1, u16 x2, u16 y, u8 color) const {
+        if (x2 < x1) { u16 t = x1; x1 = x2; x2 = t; }
+        for (u16 x = x1; ; ++x) {
             plot(x, y, color);
             if (x == x2) break;
         }
@@ -137,14 +140,14 @@ struct BitmapRegionView {
 
     // Blit a w×h block of packed source pixels (same bpp as this mode) to
     // (x, y). `src` rows are packed ceil(w / pixels_per_byte) bytes each.
-    void blit(u8 x, u8 y, const u8* src, u8 w, u8 h) const {
+    void blit(u16 x, u16 y, const u8* src, u8 w, u8 h) const {
         const u8 src_stride = static_cast<u8>((w + pixels_per_byte - 1) / pixels_per_byte);
         for (u8 r = 0; r < h; ++r) {
             const u8* srow = src + static_cast<u16>(r) * src_stride;
             for (u8 c = 0; c < w; ++c) {
                 u8 sh = static_cast<u8>((pixels_per_byte - 1 - (c % pixels_per_byte)) * bpp);
                 u8 col = static_cast<u8>((srow[c / pixels_per_byte] >> sh) & pixel_mask);
-                plot(static_cast<u8>(x + c), static_cast<u8>(y + r), col);
+                plot(static_cast<u16>(x + c), static_cast<u16>(y + r), col);
             }
         }
     }
@@ -346,6 +349,38 @@ struct DisplayLayout {
         u16 acc = 0;
         for (u8 i = 0; i < n; ++i) acc += region_ram[i];
         return acc;
+    }
+
+    // Front-pad (bytes) to insert before region 0's data so that, when the shared
+    // buffer is aligned to `page`, every `page`-sized scan boundary the screen data
+    // crosses lands exactly on a mode-line edge.
+    //
+    // The display hardware's scan-address counter can wrap within a `page`, so a mode
+    // line whose own bytes straddle a boundary fetches its tail from the page start —
+    // corruption a per-line address reload can't fix (it only reloads at line starts;
+    // the straddling line is already wrong). Shifting the canvas by this pad makes the
+    // boundary fall on a line start instead, so no line straddles. The page size and
+    // the reload mechanism are platform specifics supplied by the backend (the caller
+    // passes caps::screen_buffer_alignment). Returns 0 when no non-scroll screen
+    // region crosses a boundary:
+    // scroll regions reload the full address every line (crossings are moot) and
+    // overlay regions hold no screen bytes. Assumes a region crosses at most the
+    // first boundary after its start (true for buffers up to 2 pages — the baseline
+    // bitmap maximum). Used only when the buffer exceeds one page (single-page
+    // buffers are aligned to >= their size and never cross).
+    static constexpr u16 canvas_pad(u16 page) {
+        u16 off = 0;
+        for (u8 i = 0; i < region_count; ++i) {
+            const u16 ram = region_ram[i];
+            if (!region_is_overlay[i] && !region_is_scroll[i]) {
+                const u16 bpl = region_bytes_per_line[i];
+                const u16 b   = static_cast<u16>((off / page + 1) * page);  // first boundary > off
+                if (bpl != 0 && b < static_cast<u16>(off + ram))           // region straddles it
+                    return static_cast<u16>((page - (off % page)) % bpl);
+            }
+            off = static_cast<u16>(off + ram);
+        }
+        return 0;
     }
 
     // The N-th region descriptor type, and its view type.

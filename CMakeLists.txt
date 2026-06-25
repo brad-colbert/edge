@@ -376,6 +376,17 @@ if(EDGE_BUILD_DEMO)
     target_link_options(atari_vbxe_gfx PRIVATE
         "LINKER:--Map=$<TARGET_FILE_DIR:atari_vbxe_gfx>/atari_vbxe_gfx.map")
 
+    # Native (ANTIC bitmap) primitive-drawing demo — the baseline counterpart to
+    # atari_vbxe_gfx. FIRE cycles three native bitmap modes (ANTIC D/E/F) sharing one
+    # screen buffer.
+    add_executable(native_gfx demo/native_gfx.cpp)
+    target_compile_options(native_gfx PRIVATE
+        -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra)
+    target_include_directories(native_gfx PRIVATE ${CMAKE_SOURCE_DIR})
+    set_target_properties(native_gfx PROPERTIES OUTPUT_NAME "native_gfx.xex")
+    target_link_options(native_gfx PRIVATE
+        "LINKER:--Map=$<TARGET_FILE_DIR:native_gfx>/native_gfx.map")
+
     # VBXE 80-column text-mode demo — independent .xex.
     add_executable(atari_vbxe_text demo/vbxe_text.cpp)
     target_compile_options(atari_vbxe_text PRIVATE
@@ -505,6 +516,7 @@ if(EDGE_BUILD_DEMO)
         atari_tank_demo
         atari_vbxe_bringup
         atari_vbxe_gfx
+        native_gfx
         atari_vbxe_text
         atari_vbxe_sprites
         multiplex_demo

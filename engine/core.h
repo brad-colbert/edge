@@ -350,7 +350,7 @@ public:
             using Layout = typename S::display;
             constexpr u8 bidx = Layout::bitmap_region_index();
             if constexpr (bidx < Layout::region_count)
-                gfx_.attach(screen.buffer() + Layout::offset(bidx));
+                gfx_.attach(screen.template canvas_base<S>() + Layout::offset(bidx));
         }
     }
 

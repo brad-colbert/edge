@@ -1,6 +1,6 @@
 # Hardware validation demo (`atari_hw_test.xex`)
 
-> **Applies to EDGE v0.6.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
+> **Applies to EDGE v0.7.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
 
 A minimal Atari 8-bit program that drives every engine subsystem at once, so
 the engine's live ANTIC path can be confirmed on real hardware / emulators
@@ -216,6 +216,40 @@ server sends 66 messages (1 manifest + 16 tileset blocks + 48 chunk-row pairs + 
 complete), ~5.6 KB on the wire. `EDGE_TANK_NET_HOST`/`PORT` are baked into the ROM.
 The live build still has no collision/terrain/bullets/realtime-lane/gameplay
 networking; the session is only used to load assets before gameplay.
+
+# Native bitmap primitive-drawing demo (`native_gfx.xex`)
+
+The baseline (stock ANTIC/GTIA, no VBXE) counterpart to `atari_vbxe_gfx`. It draws a
+picture with the **same** portable bitmap primitives the VBXE demo uses, but the
+canvas is an ANTIC `BitmapRegion` drawn by its software `BitmapRegionView` — the
+`gfx::Baseline` path the blitter demo doesn't exercise. **Press FIRE to cycle three
+native bitmap modes that all share ONE screen buffer:**
+
+- **ANTIC D** (GR.7) — 160×96 4-colour, 2 scanlines/line → full height, **3840 B**
+- **ANTIC E** — 160×192 4-colour, 1 scanline/line → **7680 B**
+- **ANTIC F** (GR.8) — 320×192 hi-res 2-colour, 1 scanline/line → **7680 B**
+
+The shared buffer is sized for the largest screen (E/F, 7680 B); ANTIC D uses only
+the first half. A row of 1/2/3 squares at the top tags the current mode. Each mode
+packs pixels differently, so the demo keeps one `engine::BitmapOps` per mode pointed
+at each screen's front-aligned canvas (`Game::gfx()` binds a single packing).
+
+```sh
+cmake --build build-atari --target native_gfx        # -> native_gfx.xex
+```
+
+Run with BASIC disabled. Needs **no VBXE**. All three modes draw to their full
+width (the software `BitmapRegionView` uses `u16` x, so ANTIC F reaches x = 319).
+
+| Observation | Proves |
+|---|---|
+| Framed safe-area border | `hline` / `vline` (software, packed write) |
+| Colour-bar rectangles down the left (3 colours; 1 in hi-res F) | `fill_rect` |
+| Two crossing diagonals on the right | `line` (software Bresenham via `plot`) |
+| Dotted accent line across the lower band | `plot` |
+| Small chequered 16×16 image | `blit` of a source packed at the region bpp |
+| FIRE swaps mode/resolution; 1/2/3 tag squares track it | runtime `set_screen` between bitmap modes over a shared buffer |
+| Steady picture, no corrupt row across the 192-line E/F field | the screen manager front-aligns the >4KB canvas so no mode line straddles the 4K scan boundary |
 
 # VBXE demos
 

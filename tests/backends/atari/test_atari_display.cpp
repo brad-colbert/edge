@@ -139,6 +139,36 @@ static void test_4k_crossing() {
     CHECK(read16(g_cross_dl.bytes, p1) == 0x5018);
 }
 
+// ── canvas_pad front-aligns a >4K bitmap so no mode line straddles a boundary ──
+//
+// The LMS above reloads the address at the line that ENTERS the new page, but the
+// PREVIOUS line ($4028-based: line 101 = $4FF0..$5017) straddles the boundary, and
+// the scan-address counter wraps within a page, so that line fetches its tail from
+// the page start — visible corruption a per-line reload cannot fix. The screen
+// manager front-shifts the canvas by DisplayLayout::canvas_pad so the boundary lands
+// on a line start instead. For Mode E (40 bytes/line) over a page-aligned buffer the
+// pad is 4096 % 40 = 16, putting line 102 exactly on $5000 (4096 = 102*40 + 16) and
+// leaving line 101 wholly inside page $4000. (Wired through ScreenManager::
+// canvas_base<S>(); exercised end-to-end on hardware by demo/native_gfx.cpp.)
+static atari::DisplayProgram<CrossLayout> g_aligned_dl;
+
+static void test_canvas_pad_alignment() {
+    constexpr u16 page = 4096;
+    CHECK(CrossLayout::canvas_pad(page) == 16);        // 4096 % 40
+    CHECK(TextLayout::canvas_pad(page) == 0);          // fits one page → no shift
+
+    // Page-aligned buffer, canvas front-shifted by the pad.
+    constexpr u16 canvas = static_cast<u16>(0x4000 + CrossLayout::canvas_pad(page));  // $4010
+    CHECK((0x5000 - canvas) % 40 == 0);                // boundary on a 40-byte edge
+
+    g_aligned_dl.build(canvas, canvas);
+    CHECK(g_aligned_dl.lms_count == 2);
+    CHECK(read16(g_aligned_dl.bytes, g_aligned_dl.region_lms_pos[0]) == canvas);
+    // Crossing LMS now reloads $5000 exactly — line 102's start — so the straddle
+    // that $5018 (the unaligned case above) implied for line 101 is gone.
+    CHECK(read16(g_aligned_dl.bytes, g_aligned_dl.lms_pos[1]) == 0x5000);
+}
+
 // ── No crossing when a region fits within a 4K page ────────────────────
 
 static atari::DisplayProgram<TextLayout> g_nocross_dl;
@@ -268,6 +298,7 @@ static void test_overlay_below_antic() {
 
 int main() {
     test_4k_crossing();
+    test_canvas_pad_alignment();
     test_no_crossing();
     test_set_screen_bytes();
     test_pure_overlay();
