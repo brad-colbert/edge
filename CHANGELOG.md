@@ -11,7 +11,41 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-24
+
+### Added
+- **Native (ANTIC bitmap) primitive-drawing demo (`native_gfx`).** The baseline
+  (stock ANTIC/GTIA, no VBXE) counterpart to `atari_vbxe_gfx`: the same portable
+  bitmap primitives (`clear` / `fill_rect` / `hline` / `vline` / `line` / `plot` /
+  `blit`) drawn through a software `BitmapRegionView`, exercising the `gfx::Baseline`
+  path the blitter demo doesn't. **FIRE cycles three native bitmap modes that share
+  ONE screen buffer** — ANTIC D (GR.7, 160×96 4-colour, 3840 B), ANTIC E (160×192
+  4-colour, 7680 B), and ANTIC F (GR.8, 320×192 hi-res, 7680 B); D uses half the
+  buffer, E/F use all of it. A row of 1/2/3 squares tags the active mode. The first
+  demo to exercise a baseline bitmap display list. Altirra-verified for all three
+  modes.
+
+### Changed
+- **Baseline `BitmapRegionView` coordinates widened to `u16`.** The software bitmap
+  view (and the `BitmapOps` baseline path) addressed pixels with `u8` x, capping the
+  canvas at 255 px, so a 320-wide hi-res mode (ANTIC F) left its right ~64 px blank.
+  Coordinates are now `u16` — matching the already-`u16` public `BitmapOps` API — and
+  the truncating casts are gone, so native bitmaps draw to their full width. Source-
+  compatible: `u8` args still promote and no mode ≤ 255 px changes behaviour.
+
 ### Fixed
+- **Baseline bitmap 4K scan-boundary straddle (full-screen native bitmaps).** A
+  screen buffer larger than one 4K page (e.g. a 192-line, 7680-byte Mode E/F bitmap)
+  crosses a `$x000` scan boundary, and the one mode line whose bytes straddle it had
+  its tail fetched from the page start — the scan-address counter wraps within a page,
+  and the per-line LMS reload only fixes lines that *start* in the new page, so the
+  straddling line stayed corrupt. No base alignment removes it (4096 is not a multiple
+  of the 40-byte line). `DisplayLayout::canvas_pad(page)` (= `page % bytes_per_line`)
+  plus a page-aligned buffer now front-shift each screen's canvas
+  (`ScreenManager::canvas_base<S>()`, used by `dl.build`, the view bind, and the
+  `core.h` gfx attach) so the boundary lands exactly on a mode-line start and nothing
+  straddles. Guarded so platforms with no scan boundary (alignment ≤ 1) never pad. New
+  regression test `test_canvas_pad_alignment`; Altirra-verified corrupt-row-free.
 - **Arena demo — play-screen crash, colour-split flicker/flash, and a 1-row colour
   bleed.** Entering the play screen could freeze the machine (a wild jump into zero
   page → `KIL`), and the HUD/play colour split flickered or dropped out during
@@ -508,5 +542,6 @@ any custom backend implementing the display-traits contract.
   CMake, surfaced in the demo HUD, and stamped across the documentation.
 
 [Unreleased]: https://github.com/
+[0.7.0]: https://github.com/
 [0.2.0]: https://github.com/
 [0.1.0]: https://github.com/

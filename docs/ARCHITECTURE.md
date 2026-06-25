@@ -1,6 +1,6 @@
 # Architecture
 
-> **Applies to EDGE v0.6.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
+> **Applies to EDGE v0.7.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
 
 System design, component relationships, and the abstraction
 boundaries that make the engine portable across 6502 platforms
