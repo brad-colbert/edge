@@ -184,10 +184,10 @@ struct Hal {
     // Patch the C++ DLI dispatcher's operands with the InterruptManager's table
     // and current_ addresses. Called once from engine::Core::init via
     // InterruptManager::arm_dispatch (the single manager instance never moves).
-    static void install_raster_dispatch(uint16_t cur,
+    static void install_raster_dispatch(uint16_t cur, uint16_t count,
                                      uint16_t handler_lo, uint16_t handler_hi,
                                      uint16_t next_lo, uint16_t next_hi) {
-        install_dispatch(cur, handler_lo, handler_hi, next_lo, next_hi);
+        install_dispatch(cur, count, handler_lo, handler_hi, next_lo, next_hi);
     }
 
     // The raw zone-boundary handler the sprite multiplexer registers as its

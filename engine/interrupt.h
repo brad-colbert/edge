@@ -241,13 +241,31 @@ public:
         else                  Platform::hal::disable_raster();
     }
 
+    // Re-point the raster vector at the already-built chain head and reset the walk
+    // index — called from the frame service IN VERTICAL BLANK, before any visible
+    // scanline. prepare_chain rebuilds and re-arms the chain, but it runs late in a
+    // heavy frame service (after the sprite commit); by then the beam may already
+    // have passed an early hook's scanline, leaving the raster vector at the terminal
+    // so that hook is skipped for the frame — a visible flicker (e.g. a colour split
+    // high on the screen vanishing when the player moves). Re-arming here, every
+    // frame, guarantees an early hook fires off the last-built chain; prepare_chain
+    // then rebuilds it (for dynamic multiplex hooks) and re-arms again with the same
+    // machinery. No-op until the chain has been built once, or with no hooks (raster
+    // stays disabled). Carries no display-program side effects.
+    void rearm_delivery() {
+        if (last_prepared_count_ == 0xFF || total_count_ == 0) return;
+        current_ = 0;
+        Platform::hal::set_raster_vector(first_entry_);
+    }
+
     // One-time setup: patch the backend C++ raster dispatcher's operands with this
     // manager's table and current_ addresses (the single instance never moves, so
     // the addresses are stable). engine::Core::init calls this. Portable: the
     // backend-specific patching lives behind Platform::hal (Dependency Rule 2).
     void arm_dispatch() {
         Platform::hal::install_raster_dispatch(
-            addr(&current_), addr(handler_lo_), addr(handler_hi_),
+            addr(&current_), addr(&total_count_),
+            addr(handler_lo_), addr(handler_hi_),
             addr(next_lo_), addr(next_hi_));
     }
 

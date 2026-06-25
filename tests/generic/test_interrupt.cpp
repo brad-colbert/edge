@@ -37,10 +37,12 @@ struct MockHal {
 
     // Dispatcher install — record the args so arm_dispatch's wiring is observable.
     static bool dispatch_armed;
-    static u16  arm_cur, arm_hlo, arm_hhi, arm_nlo, arm_nhi;
-    static void install_raster_dispatch(u16 cur, u16 hlo, u16 hhi, u16 nlo, u16 nhi) {
+    static u16  arm_cur, arm_cnt, arm_hlo, arm_hhi, arm_nlo, arm_nhi;
+    static void install_raster_dispatch(u16 cur, u16 count, u16 hlo, u16 hhi,
+                                        u16 nlo, u16 nhi) {
         dispatch_armed = true;
-        arm_cur = cur; arm_hlo = hlo; arm_hhi = hhi; arm_nlo = nlo; arm_nhi = nhi;
+        arm_cur = cur; arm_cnt = count;
+        arm_hlo = hlo; arm_hhi = hhi; arm_nlo = nlo; arm_nhi = nhi;
     }
 
     // RasterContext stores — stubbed (RasterContext is compiled, not exercised).
@@ -58,8 +60,8 @@ u8   MockHal::last_colpf0    = 0;
 u16  MockHal::raster_vector         = 0;
 bool MockHal::raster_enabled    = false;
 bool MockHal::dispatch_armed = false;
-u16  MockHal::arm_cur = 0, MockHal::arm_hlo = 0, MockHal::arm_hhi = 0,
-     MockHal::arm_nlo = 0, MockHal::arm_nhi = 0;
+u16  MockHal::arm_cur = 0, MockHal::arm_cnt = 0, MockHal::arm_hlo = 0,
+     MockHal::arm_hhi = 0, MockHal::arm_nlo = 0, MockHal::arm_nhi = 0;
 
 struct MockPlatform {
     using hal = MockHal;
@@ -226,8 +228,10 @@ static void test_arm_dispatch() {
     IM im;
     im.arm_dispatch();
     CHECK(MockHal::dispatch_armed);
-    // The handler/next table bases and current_ are distinct, real addresses.
+    // The handler/next table bases, current_, and total_count_ are distinct addrs.
     CHECK(MockHal::arm_cur != 0);
+    CHECK(MockHal::arm_cnt != 0);
+    CHECK(MockHal::arm_cnt != MockHal::arm_cur);   // total_count_ vs current_
     CHECK(MockHal::arm_hlo != 0);
     CHECK(MockHal::arm_hlo != MockHal::arm_hhi);   // handler_lo_ vs handler_hi_
     CHECK(MockHal::arm_nlo != MockHal::arm_nhi);   // next_lo_   vs next_hi_

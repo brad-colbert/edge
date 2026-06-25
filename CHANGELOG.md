@@ -11,6 +11,38 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
 
 ## [Unreleased]
 
+### Fixed
+- **Arena demo — play-screen crash, colour-split flicker/flash, and a 1-row colour
+  bleed.** Entering the play screen could freeze the machine (a wild jump into zero
+  page → `KIL`), and the HUD/play colour split flickered or dropped out during
+  motion. Root cause was the **C++ DLI dispatcher reading a stale chain index**: on
+  arena's heavy frame the service overran past the early split scanline before
+  `InterruptManager::prepare_chain` reset the walk index `current_`, so the
+  dispatcher fetched a one-past-end handler pointer (`$00` high byte) and `JSR`ed
+  into zero page. Three engine-wide robustness fixes plus one demo change:
+  - **`dli_dispatch.h`** — the C++ dispatcher now bounds-checks `current_` against
+    the live hook count; an out-of-range (stale) index re-syncs to the chain head
+    (`current_ = 0`) and delivers slot 0 instead of jumping through garbage. Fixes
+    the crash and the flicker.
+  - **`InterruptManager::rearm_delivery()` (interrupt.h / core.h)** — `frame_service`
+    now re-points the raster vector at the last-built chain head **in vertical
+    blank**, before any visible scanline. `prepare_chain` rebuilds the chain late in
+    a heavy service, by which point the beam may have passed an early hook's
+    scanline; re-arming up front guarantees an early hook (e.g. a high colour split)
+    fires every frame. Fixes the movement flash.
+  - **Arena raw colour-split DLI** — the play-area palette swap is now a hand-written
+    raw DLI (writes `COLBK`/`COLPF0-3` directly, no `$80-$9F` dispatcher save) that
+    chains through the engine's raster tail like the multiplexer's zone DLIs. The
+    shared C++ dispatcher's register-save overhead (~448 cycles) had delayed the
+    colour latch ~1 row, tinting the play area's top wall with the HUD palette; the
+    raw DLI latches inside the boundary's horizontal blank, with no bleed. The split
+    scanline is also decoupled from the sprite/collision origin so it can be tuned
+    without moving sprites.
+
+  Verified on Altirra (no crash through sustained play, no flash across movement
+  frames, clean colour boundary) with no regression to `atari_hw_test`, the
+  multiplexer demo (9 sprites / 3 zones), or the tank demo; 33/33 host tests pass.
+
 ## [0.6.0] - 2026-06-21
 
 ### Added

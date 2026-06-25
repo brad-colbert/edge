@@ -73,23 +73,60 @@ EDGE_COLD static void set_hud_palette() {
 // Normally black; the death-flash (play_step) raises it to kFlashColor for a few frames.
 // A one-shot register write wouldn't survive — this DLI overwrites COLBK each frame — so
 // the flash flows through the same rendering path as the rest of the play palette.
-static u8 g_play_bg = 0x00;
+// `extern "C"` (C linkage) so the raw DLI below can read it by name; `volatile` because
+// it is written by the game loop and read by the DLI (an NMI).
+extern "C" volatile uint8_t g_play_bg = 0x00;
 
-// Play-area palette, applied mid-frame by the raster hook below.
-static void play_palette_split() {
-    engine::RasterContext<Platform> ctx{};
-    ctx.set_background_color(g_play_bg); // COLBK  : black (flashes white on a hit)
-    ctx.set_playfield_color<0>(0x96);   // COLPF0 : medium blue
-    ctx.set_playfield_color<1>(0x2A);   // COLPF1 : orange
-    ctx.set_playfield_color<2>(0x24);   // COLPF2 : brown
-    ctx.set_playfield_color<3>(0xC6);   // COLPF3 : green
+// Play-area palette split — a RAW display-list interrupt (no C++ dispatcher). The shared
+// C++ raster dispatcher saves the llvm-mos $80-$9F imaginary registers (~448 cycles)
+// before it calls a C++ hook; that delays the colour latch by ~1 row, tinting the play
+// area's top-wall row with the HUD palette (a visible "bleed"). This hand-written handler
+// writes the five colour registers directly — it saves only A/X/Y, NOT $80-$9F — so the
+// swap latches inside the boundary's horizontal blank, with no bleed. It chains through
+// the engine's raster-hook tail (edge_dli_op_curx2) exactly like the sprite multiplexer's
+// raw zone DLIs: that tail re-points VDSLST from the chain, advances the walk index,
+// restores A/X/Y, and RTIs. (COLBK $D01A, COLPF0-3 $D016-$D019 — the play palette that
+// play_step / play_enter set up; g_play_bg carries the death flash.)
+extern "C" {
+[[gnu::naked]] void play_palette_split();
+extern uint8_t edge_dli_op_curx2;   // engine raster-chain tail (platform/atari/dli_dispatch.h)
 }
+asm(R"(
+    .globl play_palette_split
+play_palette_split:
+    pha
+    txa
+    pha
+    tya
+    pha
+    lda g_play_bg
+    sta $d01a              ; COLBK  : play background (death-flash aware)
+    lda #$96
+    sta $d016              ; COLPF0 : medium blue
+    lda #$2a
+    sta $d017              ; COLPF1 : orange
+    lda #$24
+    sta $d018              ; COLPF2 : brown
+    lda #$c6
+    sta $d019              ; COLPF3 : green
+    jmp edge_dli_op_curx2
+)");
 
 // Boundary between region 0 (HUD) and region 1 (play): the display list opens
 // with 3 dl_blank(8) (24 scanlines), then the 1-row HUD (8 scanlines), so the
-// play area begins at scanline 24 + 1*8 = 32. (Same derivation as the row-12
-// split in atari_hw_test.cpp; tune on hardware if the seam is off.)
+// play area begins at scanline 24 + 1*8 = 32.
 static constexpr u8 kSplitScanline = 32;
+
+// Scanline that carries the play-area DLI. ANTIC raises the DLI on the LAST scanline
+// of the mode line holding the DLI bit, and the new colours latch on the NEXT line.
+// So to recolour starting at the play area's first row (kSplitScanline), the DLI must
+// sit one Mode-4 row (kCellH=8 scanlines) earlier — on the HUD row. With the DLI on
+// the play area's own first row instead, the swap latched one row late and the play
+// area's top wall + first row rendered in the HUD palette (the colour "bleed").
+// Kept separate from kSplitScanline so tuning the seam never moves the sprite/
+// collision origin (kPlayTopY), which derives from kSplitScanline below. Tune on
+// hardware if the seam is off.
+static constexpr u8 kSplitDli = kSplitScanline - 8;
 
 static constexpr u8 kFlashColor = 0x0E;  // white play-area flash on player damage (ANTIC COLBK)
 
@@ -344,7 +381,7 @@ EDGE_COLD static void play_enter() {
     // Colour split for the play area (removed again when we leave the screen). g_play_bg
     // is black now; the death-flash raises it briefly mid-round.
     g_play_bg = 0x00;
-    Game::interrupts.add_raster_hook(kSplitScanline, &play_palette_split);
+    Game::interrupts.add_raw_raster_hook(kSplitDli, &play_palette_split);
 
     player_init();
     // Draw the player up front so it's visible during the GET READY pause (player_update
@@ -573,7 +610,7 @@ int main() {
 
         Game::set_screen<PlayScreen>(&play_enter);
         Game::run_until(play_step);
-        Game::interrupts.remove_raster_hook(kSplitScanline);
+        Game::interrupts.remove_raster_hook(kSplitDli);
         Game::sprite_hide(0);   // don't carry the player onto title / game-over
         // Likewise hide every live enemy and empty the pool for the next round.
         enemies.for_each_indexed(
