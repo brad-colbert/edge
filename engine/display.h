@@ -348,6 +348,38 @@ struct DisplayLayout {
         return acc;
     }
 
+    // Front-pad (bytes) to insert before region 0's data so that, when the shared
+    // buffer is aligned to `page`, every `page`-sized scan boundary the screen data
+    // crosses lands exactly on a mode-line edge.
+    //
+    // The display hardware's scan-address counter can wrap within a `page`, so a mode
+    // line whose own bytes straddle a boundary fetches its tail from the page start —
+    // corruption a per-line address reload can't fix (it only reloads at line starts;
+    // the straddling line is already wrong). Shifting the canvas by this pad makes the
+    // boundary fall on a line start instead, so no line straddles. The page size and
+    // the reload mechanism are platform specifics supplied by the backend (the caller
+    // passes caps::screen_buffer_alignment). Returns 0 when no non-scroll screen
+    // region crosses a boundary:
+    // scroll regions reload the full address every line (crossings are moot) and
+    // overlay regions hold no screen bytes. Assumes a region crosses at most the
+    // first boundary after its start (true for buffers up to 2 pages — the baseline
+    // bitmap maximum). Used only when the buffer exceeds one page (single-page
+    // buffers are aligned to >= their size and never cross).
+    static constexpr u16 canvas_pad(u16 page) {
+        u16 off = 0;
+        for (u8 i = 0; i < region_count; ++i) {
+            const u16 ram = region_ram[i];
+            if (!region_is_overlay[i] && !region_is_scroll[i]) {
+                const u16 bpl = region_bytes_per_line[i];
+                const u16 b   = static_cast<u16>((off / page + 1) * page);  // first boundary > off
+                if (bpl != 0 && b < static_cast<u16>(off + ram))           // region straddles it
+                    return static_cast<u16>((page - (off % page)) % bpl);
+            }
+            off = static_cast<u16>(off + ram);
+        }
+        return 0;
+    }
+
     // The N-th region descriptor type, and its view type.
     template <u8 N>
     using region_at = pack_element_t<N, Regions...>;

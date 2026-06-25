@@ -376,6 +376,25 @@ if(EDGE_BUILD_DEMO)
     target_link_options(atari_vbxe_gfx PRIVATE
         "LINKER:--Map=$<TARGET_FILE_DIR:atari_vbxe_gfx>/atari_vbxe_gfx.map")
 
+    # Native (ANTIC bitmap) primitive-drawing demo — the baseline counterpart to
+    # atari_vbxe_gfx. One source, two .xex: BITMAP_E (4-colour) and BITMAP_F (hi-res).
+    add_executable(native_gfx demo/native_gfx.cpp)
+    target_compile_options(native_gfx PRIVATE
+        -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra)
+    target_include_directories(native_gfx PRIVATE ${CMAKE_SOURCE_DIR})
+    set_target_properties(native_gfx PROPERTIES OUTPUT_NAME "native_gfx.xex")
+    target_link_options(native_gfx PRIVATE
+        "LINKER:--Map=$<TARGET_FILE_DIR:native_gfx>/native_gfx.map")
+
+    add_executable(native_gfx_hires demo/native_gfx.cpp)
+    target_compile_options(native_gfx_hires PRIVATE
+        -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra)
+    target_compile_definitions(native_gfx_hires PRIVATE NATIVE_GFX_HIRES)
+    target_include_directories(native_gfx_hires PRIVATE ${CMAKE_SOURCE_DIR})
+    set_target_properties(native_gfx_hires PROPERTIES OUTPUT_NAME "native_gfx_hires.xex")
+    target_link_options(native_gfx_hires PRIVATE
+        "LINKER:--Map=$<TARGET_FILE_DIR:native_gfx_hires>/native_gfx_hires.map")
+
     # VBXE 80-column text-mode demo — independent .xex.
     add_executable(atari_vbxe_text demo/vbxe_text.cpp)
     target_compile_options(atari_vbxe_text PRIVATE
@@ -505,6 +524,8 @@ if(EDGE_BUILD_DEMO)
         atari_tank_demo
         atari_vbxe_bringup
         atari_vbxe_gfx
+        native_gfx
+        native_gfx_hires
         atari_vbxe_text
         atari_vbxe_sprites
         multiplex_demo

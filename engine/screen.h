@@ -156,12 +156,31 @@ public:
         while (p < n && p < caps::screen_buffer_alignment) p <<= 1;
         return p;
     }
-    static constexpr u16 buffer_align =
-        buffer_size <= caps::screen_buffer_alignment ? pow2_ceil(buffer_size) : u16{1};
-    // A single-page buffer aligned to >= its own size cannot straddle a boundary.
+    // A multi-page buffer cannot fit in one alignment boundary, so it WILL cross. We
+    // page-align it (to the alignment boundary) and front-shift each screen's canvas
+    // by DisplayLayout::canvas_pad so the crossing lands on a mode-line edge — see
+    // crosses_page / canvas_pad_for below. Single-page buffers are aligned to >= their
+    // own size and never cross, so they keep the smallest such power-of-two alignment.
+    // A platform with alignment <= 1 declares no scan boundary, so nothing straddles
+    // (the per-line reload alone suffices); only a real boundary that the buffer
+    // exceeds forces a crossing.
+    static constexpr bool crosses_page =
+        caps::screen_buffer_alignment > 1 && buffer_size > caps::screen_buffer_alignment;
+    static constexpr u16  buffer_align =
+        crosses_page ? caps::screen_buffer_alignment : pow2_ceil(buffer_size);
     static_assert(buffer_size > caps::screen_buffer_alignment || buffer_align >= buffer_size,
                   "single-page screen buffer must be aligned to >= its size to keep "
                   "every mode line within one screen-buffer alignment boundary");
+
+    // Per-screen front pad that aligns this screen's 4K crossing(s) to mode-line
+    // edges (0 unless the shared buffer spans multiple pages). The buffer reserves
+    // `pad_slack` spare bytes at the front so the shifted canvas still fits.
+    template <typename S>
+    static constexpr u16 canvas_pad_for =
+        crosses_page ? S::display::canvas_pad(caps::screen_buffer_alignment) : u16{0};
+    // Pad is (alignment % bytes_per_line) < bytes_per_line; every baseline mode line
+    // is <= 64 bytes, so 64 spare bytes always cover it.
+    static constexpr u16 pad_slack = crosses_page ? u16{64} : u16{0};
 
     // Switch to screen S: build its display program against the real buffer base
     // (the backend builder inserts any backend-specific reload instructions),
@@ -175,10 +194,11 @@ public:
         // so bind_scroll_map()/apply_scroll() patch the same program the display
         // hardware executes.
         auto& dl = program_for<S>();
-        dl.build(addr(screen_buffer_), addr(&dl.bytes[0]));
+        u8* const canvas = canvas_base<S>();
+        dl.build(addr(canvas), addr(&dl.bytes[0]));
 
         // Rebind this screen's region views to their buffer slices.
-        views_.template for_screen<S>().set_base(screen_buffer_);
+        views_.template for_screen<S>().set_base(canvas);
 
         // Program the display. Blank DMA and install the program in all cases.
         Platform::hal::display_dma_disable();
@@ -311,6 +331,13 @@ public:
     u16       active_dl_size() const { return active_dl_size_; }
     u8*       buffer()               { return screen_buffer_; }
 
+    // Base of screen S's canvas: the buffer base front-shifted by its page-crossing
+    // alignment pad (0 unless the shared buffer spans multiple pages). set_screen()
+    // builds the display list and binds the views against this; the gfx attach in
+    // engine/core.h must use it too so its writes match what the hardware fetches.
+    template <typename S>
+    u8* canvas_base() { return screen_buffer_ + canvas_pad_for<S>; }
+
 private:
     static u16 addr(const void* p) {
         return static_cast<u16>(reinterpret_cast<uintptr_t>(p));
@@ -334,7 +361,7 @@ private:
         static_cast<DP*>(p)->patch_scroll(base, width, col, row);
     }
 
-    alignas(buffer_align) u8 screen_buffer_[buffer_size] = {};
+    alignas(buffer_align) u8 screen_buffer_[buffer_size + pad_slack] = {};
     typename detail::screen_views_of<screens>::type views_;
 
     u8*       active_dl_      = nullptr;   // last built list (points into a static)
