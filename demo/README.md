@@ -217,34 +217,39 @@ complete), ~5.6 KB on the wire. `EDGE_TANK_NET_HOST`/`PORT` are baked into the R
 The live build still has no collision/terrain/bullets/realtime-lane/gameplay
 networking; the session is only used to load assets before gameplay.
 
-# Native bitmap primitive-drawing demo (`native_gfx.xex` / `native_gfx_hires.xex`)
+# Native bitmap primitive-drawing demo (`native_gfx.xex`)
 
-The baseline (stock ANTIC/GTIA, no VBXE) counterpart to `atari_vbxe_gfx`. It draws
-a static picture through the **same** portable `Game::gfx()` API, but the canvas is
-an ANTIC `BitmapRegion` drawn by its software `BitmapRegionView` — so this exercises
-the `gfx::Baseline` path that the VBXE demo's blitter path does not. One source
-([`native_gfx.cpp`](native_gfx.cpp)) builds two `.xex` (mode chosen by a macro):
+The baseline (stock ANTIC/GTIA, no VBXE) counterpart to `atari_vbxe_gfx`. It draws a
+picture with the **same** portable bitmap primitives the VBXE demo uses, but the
+canvas is an ANTIC `BitmapRegion` drawn by its software `BitmapRegionView` — the
+`gfx::Baseline` path the blitter demo doesn't exercise. **Press FIRE to cycle three
+native bitmap modes that all share ONE screen buffer:**
 
-- **`native_gfx`** — `BITMAP_E`: 160×192, 4 colours (2bpp).
-- **`native_gfx_hires`** (`-DNATIVE_GFX_HIRES`) — `BITMAP_F`: 320×192, hi-res 2-colour
-  (1bpp). The view addresses pixels with `u8` x, so only x ≤ 255 is reachable — the
-  right ~64px stay blank by design.
+- **ANTIC D** (GR.7) — 160×96 4-colour, 2 scanlines/line → full height, **3840 B**
+- **ANTIC E** — 160×192 4-colour, 1 scanline/line → **7680 B**
+- **ANTIC F** (GR.8) — 320×192 hi-res 2-colour, 1 scanline/line → **7680 B**
+
+The shared buffer is sized for the largest screen (E/F, 7680 B); ANTIC D uses only
+the first half. A row of 1/2/3 squares at the top tags the current mode. Each mode
+packs pixels differently, so the demo keeps one `engine::BitmapOps` per mode pointed
+at each screen's front-aligned canvas (`Game::gfx()` binds a single packing).
 
 ```sh
 cmake --build build-atari --target native_gfx        # -> native_gfx.xex
-cmake --build build-atari --target native_gfx_hires  # -> native_gfx_hires.xex
 ```
 
-Run with BASIC disabled. Needs **no VBXE**.
+Run with BASIC disabled. Needs **no VBXE**. The software view addresses pixels with
+`u8` x, so ANTIC F's 320-wide field is only drawn to x ≤ 255 (right ~64px blank).
 
 | Observation | Proves |
 |---|---|
 | Framed safe-area border | `hline` / `vline` (software, packed write) |
-| Colour-bar rectangles down the left (3 colours / 1 in hi-res) | `fill_rect` |
+| Colour-bar rectangles down the left (3 colours; 1 in hi-res F) | `fill_rect` |
 | Two crossing diagonals on the right | `line` (software Bresenham via `plot`) |
 | Dotted accent line across the lower band | `plot` |
 | Small chequered 16×16 image | `blit` of a source packed at the region bpp |
-| Steady picture, no corrupt row across the 192-line field | the screen manager front-aligns the >4KB canvas so no mode line straddles the 4K scan boundary |
+| FIRE swaps mode/resolution; 1/2/3 tag squares track it | runtime `set_screen` between bitmap modes over a shared buffer |
+| Steady picture, no corrupt row across the 192-line E/F field | the screen manager front-aligns the >4KB canvas so no mode line straddles the 4K scan boundary |
 
 # VBXE demos
 
