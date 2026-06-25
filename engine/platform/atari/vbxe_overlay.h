@@ -473,6 +473,37 @@ struct OverlayHal {
         blit_rect(dest, 1, 1, color);
     }
 
+    // Draw an arbitrary line (integer Bresenham) into the canvas, batching the
+    // whole line into one MEMAC-window write pass. Going pixel-by-pixel through
+    // overlay_bitmap_plot() would run a full blitter submit + spin-wait per pixel
+    // (blit_rect 1x1); instead — exactly like overlay_bitmap_blit — a single
+    // NmiGuard spans the line and we wait once for the blitter to be idle (so the
+    // compositor's async master copy isn't reading the canvas while we write),
+    // then poke one byte per pixel through the window. Same Bresenham as the
+    // generic engine/gfx.h software path (kept there for the baseline canvas).
+    static void overlay_bitmap_line(u16 ax, u16 ay, u16 bx, u16 by, u8 color) {
+        NmiGuard cs;
+        wait_blitter_idle();
+        const u32 base = canvas_fb();
+        engine::i16 x0 = static_cast<engine::i16>(ax), y0 = static_cast<engine::i16>(ay);
+        const engine::i16 x1 = static_cast<engine::i16>(bx), y1 = static_cast<engine::i16>(by);
+        const engine::i16 dx  = x1 >= x0 ? static_cast<engine::i16>(x1 - x0) : static_cast<engine::i16>(x0 - x1);
+        const engine::i16 ady = y1 >= y0 ? static_cast<engine::i16>(y1 - y0) : static_cast<engine::i16>(y0 - y1);
+        const engine::i16 dy  = static_cast<engine::i16>(-ady);
+        const engine::i16 sx  = x0 < x1 ? 1 : -1;
+        const engine::i16 sy  = y0 < y1 ? 1 : -1;
+        engine::i16 err = static_cast<engine::i16>(dx + dy);
+        for (;;) {
+            const u32 dest = base + static_cast<u32>(static_cast<u16>(y0)) * fb_stride
+                           + static_cast<u16>(x0);
+            Memac::write(dest, &color, 1);
+            if (x0 == x1 && y0 == y1) break;
+            const engine::i16 e2 = static_cast<engine::i16>(2 * err);
+            if (e2 >= dy) { err = static_cast<engine::i16>(err + dy); x0 = static_cast<engine::i16>(x0 + sx); }
+            if (e2 <= dx) { err = static_cast<engine::i16>(err + dx); y0 = static_cast<engine::i16>(y0 + sy); }
+        }
+    }
+
     // Copy a w×h 8bpp source image (row-packed, stride == w) into the canvas. The
     // source is CPU RAM, so this must go through the MEMAC window (the blitter reads
     // VRAM only). One NmiGuard spans all rows (no VBI interleave), and we wait for
@@ -558,6 +589,7 @@ struct NullOverlay {
     static void overlay_bitmap_clear(u8) {}
     static void overlay_bitmap_fill_rect(u16, u16, u16, u16, u8) {}
     static void overlay_bitmap_plot(u16, u16, u8) {}
+    static void overlay_bitmap_line(u16, u16, u16, u16, u8) {}
     static void overlay_bitmap_blit(u16, u16, const u8*, u16, u16) {}
     static void overlay_text_font(const u8*, u16) {}
     static void overlay_text_clear(u8, u8) {}

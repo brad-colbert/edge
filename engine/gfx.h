@@ -118,23 +118,30 @@ public:
         }
     }
 
-    // Arbitrary line (integer Bresenham). Backend-agnostic: plots pixel by pixel
-    // through plot(), which dispatches per backend.
+    // Arbitrary line (integer Bresenham). On blitter platforms the whole line is
+    // handed to a single batched seam (one window pass) — drawing it pixel by pixel
+    // through plot() would run a full blitter round-trip per pixel. The baseline
+    // canvas keeps the software Bresenham below (its plot() is a cheap packed write).
     void line(u16 ax, u16 ay, u16 bx, u16 by, u8 color) {
-        i16 x0 = static_cast<i16>(ax), y0 = static_cast<i16>(ay);
-        const i16 x1 = static_cast<i16>(bx), y1 = static_cast<i16>(by);
-        const i16 dx  = x1 >= x0 ? static_cast<i16>(x1 - x0) : static_cast<i16>(x0 - x1);
-        const i16 ady = y1 >= y0 ? static_cast<i16>(y1 - y0) : static_cast<i16>(y0 - y1);
-        const i16 dy  = static_cast<i16>(-ady);
-        const i16 sx  = x0 < x1 ? 1 : -1;
-        const i16 sy  = y0 < y1 ? 1 : -1;
-        i16 err = static_cast<i16>(dx + dy);
-        for (;;) {
-            plot(static_cast<u16>(x0), static_cast<u16>(y0), color);
-            if (x0 == x1 && y0 == y1) break;
-            const i16 e2 = static_cast<i16>(2 * err);
-            if (e2 >= dy) { err = static_cast<i16>(err + dy); x0 = static_cast<i16>(x0 + sx); }
-            if (e2 <= dx) { err = static_cast<i16>(err + dx); y0 = static_cast<i16>(y0 + sy); }
+        if constexpr (caps::has_blitter) {
+            Platform::hal::overlay_bitmap_line(ax, ay, bx, by, color);
+        } else {
+            static_assert(has_software_view, "baseline BitmapOps needs a bitmap Region");
+            i16 x0 = static_cast<i16>(ax), y0 = static_cast<i16>(ay);
+            const i16 x1 = static_cast<i16>(bx), y1 = static_cast<i16>(by);
+            const i16 dx  = x1 >= x0 ? static_cast<i16>(x1 - x0) : static_cast<i16>(x0 - x1);
+            const i16 ady = y1 >= y0 ? static_cast<i16>(y1 - y0) : static_cast<i16>(y0 - y1);
+            const i16 dy  = static_cast<i16>(-ady);
+            const i16 sx  = x0 < x1 ? 1 : -1;
+            const i16 sy  = y0 < y1 ? 1 : -1;
+            i16 err = static_cast<i16>(dx + dy);
+            for (;;) {
+                plot(static_cast<u16>(x0), static_cast<u16>(y0), color);
+                if (x0 == x1 && y0 == y1) break;
+                const i16 e2 = static_cast<i16>(2 * err);
+                if (e2 >= dy) { err = static_cast<i16>(err + dy); x0 = static_cast<i16>(x0 + sx); }
+                if (e2 <= dx) { err = static_cast<i16>(err + dx); y0 = static_cast<i16>(y0 + sy); }
+            }
         }
     }
 
