@@ -102,13 +102,18 @@ static u8  g_player_speed = 0;       // 1 while the player is moving (for the TX
 static u16 g_tx_seq       = 0;
 static u8  g_tx_frame     = 0;
 
+// Playfield background. Darker than the shared tank palette's 0x04 dark-grey
+// (same hue 0, lower luminance) but not black — local to this demo so the original
+// tank demo's palette is unchanged.
+static constexpr u8 kPlayfieldBg = 0x02;
+
 static void set_palette() {
     using P = tank::Palette;
     Platform::hal::set_color_pf(0, P::colpf0);
     Platform::hal::set_color_pf(1, P::colpf1);
     Platform::hal::set_color_pf(2, P::colpf2);
     Platform::hal::set_color_pf(3, P::colpf3);
-    Platform::hal::set_color_pf(4, P::colbk);
+    Platform::hal::set_color_pf(4, kPlayfieldBg);
 }
 
 // Project a world point into the PLAYER's camera frame. tank_camera.h's screen_*
