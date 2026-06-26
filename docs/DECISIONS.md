@@ -1767,3 +1767,51 @@ own demos/tests, and the engine has no stated source-compatibility policy,
 so all call sites were migrated. Should an external compatibility need
 arise later, a transitional `using` alias can be added and documented as
 such.
+
+## ADR-035: Direct Sprite Binding as an Alternative to Multiplexing
+
+**Status:** Accepted
+
+**Context:**
+The sprite multiplexer always sorts the active sprites by Y and rebuilds the
+logical-slot → hardware-player assignment every frame (ADR-024), even when the
+sprite count is ≤ 4 and a single zone is formed. That per-frame reassignment means
+two sprites that cross in Y trade hardware players for the frame of the crossing.
+Because zone 0's colour is committed through the PCOLR shadow — a frame behind the
+shape write — the two sprites' colours visibly flip for one frame at the crossing.
+The networked two-tank demo (`demo/tank_net/`) has a second tank that chases the
+player and therefore crosses it in Y continuously, making this swap a constant,
+distracting artefact. The game wants each tank pinned to its own hardware player and
+colour for the whole frame, which the multiplexer cannot guarantee.
+
+**Decision:**
+Add an opt-in **direct binding** mode to `SpriteManager`, selected per game with
+`GameConfig::sprite_binding = engine::SpriteBinding::Direct` (default
+`Multiplexed`; threaded through `engine::Core` via a `cdetail` trait, like the
+other optional config fields). In direct mode `update_zones()` builds a single zone
+with `player_assignment[p] = p` for each shown slot and **performs no Y-sort and no
+reassignment**; `zone_count_` stays 1, so `build_raster_hooks()` installs no
+boundary hooks and `commit_pm()` runs unchanged. A `static_assert` enforces
+`max_sprites ≤ 4` (one hardware player per slot). The default remains the
+multiplexer, so every existing game/demo is unaffected.
+
+**Rationale:**
+The fix lives entirely in the zone-building step and reuses the existing shape-blit,
+exact-extent clear, and commit path — no new commit code, no new hardware access.
+Pinning slot → player removes the only source of the cross-in-Y swap (the per-frame
+reassignment) at its root, rather than masking it (e.g. forcing the colour write
+earlier), and it costs less per frame than multiplexing (no sort, no boundary DLIs).
+It is deliberately not the default: multiplexing is what lets a game exceed four
+hardware players, and direct binding gives that up. Games choose direct binding only
+when a stable slot→player/colour mapping matters more than multiplexing — which, by
+construction, only applies when the sprite count already fits in the four players.
+
+**Consequences:**
+Direct binding caps a screen at four simultaneous sprites; a game that needs more
+must use the multiplexer (and accept the crossing behaviour) or split zones itself.
+The mode is covered by host regression tests
+(`tests/generic/test_sprites.cpp::test_direct_bind_no_swap` /
+`test_direct_bind_hide`) proving the slot→player mapping and colour stay fixed across
+a Y crossing, and it is validated live in the tank_net demo on Altirra Mode B. The
+multiplexer's own latent single-zone swap (the same Y-sort reassignment for ≤ 4
+multiplexed sprites) is unchanged and remains a known issue for multiplexed games.

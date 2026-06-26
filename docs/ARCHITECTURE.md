@@ -412,6 +412,24 @@ across all zones. The game uses bounding-box overlap checks to
 disambiguate. For non-multiplexed games (≤ 4 sprites), each
 player maps to exactly one sprite with no ambiguity.
 
+**Direct binding** — an opt-in alternative to multiplexing,
+selected per game with `GameConfig::sprite_binding =
+SpriteBinding::Direct` (default is `Multiplexed`; requires
+`max_sprites ≤ 4`). It pins logical slot *i* to hardware player
+*i* for the whole frame: `update_zones()` builds a single zone
+with `player_assignment[p] = p` and **does not sort by Y or
+reassign players**, so `build_raster_hooks()` installs no
+boundary hooks and `commit_pm()` runs unchanged. The reason it
+exists: even at ≤ 4 sprites the multiplexer's single zone still
+re-derives the slot→player assignment from the per-frame Y-sort,
+so when two sprites cross in Y the assignment swaps — and because
+zone 0's colour goes through the PCOLR shadow (a frame behind the
+shape), the two sprites' colours flip for one frame. Games where
+sprites routinely cross in Y and must keep a stable player/colour
+(e.g. a chasing second tank) use direct binding to avoid that;
+the trade-off is no multiplexing, so the slot count is hard-capped
+at the four hardware players.
+
 Missiles are not multiplexed in the initial implementation
 (see ADR-025). The 4 hardware missiles are available directly.
 ZoneInfo reserves space for future missile multiplexing.

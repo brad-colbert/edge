@@ -63,6 +63,8 @@ struct MockPlatform {
 };
 
 using SM = engine::SpriteManager<MockPlatform, 9, 4>;
+// Direct-bind manager: 2 slots pinned 1:1 to hardware players (no multiplexer).
+using SMD = engine::SpriteManager<MockPlatform, 2, 4, engine::SpriteBinding::Direct>;
 using IM = engine::InterruptManager<MockPlatform>;
 
 // A shape whose rows are all 0xFF, so committed bytes are easy to spot.
@@ -261,6 +263,75 @@ static void test_sprite_color_follows_sprite() {
     CHECK(mgr.logical(1).color == 0xBB);
 }
 
+// ── Direct binding: fixed slot->player, no swap on a Y crossing ────────
+//
+// The regression guard for the multiplexer's Y-cross player/colour swap: with
+// Direct binding, slot i always drives hardware player i regardless of relative Y,
+// so two sprites that cross never trade players or colours.
+
+static void test_direct_bind_no_swap() {
+    static SMD mgr;
+    static u8 buf[2048] = {};
+
+    mgr.sprite_color(0, 0xAA);
+    mgr.sprite_color(1, 0xBB);
+
+    // Slot 0 above slot 1.
+    mgr.sprite(0, g_shape, 100, 50);
+    mgr.sprite(1, g_shape, 110, 60);
+    mgr.update_zones();
+    CHECK(mgr.zone_count() == 1);          // always a single zone, no boundary hooks
+    CHECK(mgr.active_count() == 2);
+    mgr.commit(buf);
+
+    CHECK(mgr.player_for_sprite(0) == 0);  // fixed 1:1 binding
+    CHECK(mgr.player_for_sprite(1) == 1);
+    CHECK(MockHal::hposp[0] == 100);
+    CHECK(MockHal::hposp[1] == 110);
+    CHECK(MockHal::colpm[0] == 0xAA);
+    CHECK(MockHal::colpm[1] == 0xBB);
+    for (u8 r = 0; r < 8; ++r) {
+        CHECK(buf[pbase(0) + 50 + r] == 0xFF);
+        CHECK(buf[pbase(1) + 60 + r] == 0xFF);
+    }
+
+    // Cross in Y: slot 0 drops below slot 1. The multiplexer would swap players and
+    // colours here (see test_sprite_color_follows_sprite); Direct binding does not.
+    mgr.sprite(0, g_shape, 100, 70);
+    mgr.update_zones();
+    mgr.commit(buf);
+
+    CHECK(mgr.player_for_sprite(0) == 0);  // NOT swapped
+    CHECK(mgr.player_for_sprite(1) == 1);
+    CHECK(MockHal::hposp[0] == 100);
+    CHECK(MockHal::hposp[1] == 110);
+    CHECK(MockHal::colpm[0] == 0xAA);      // colour stays on its player (no flip)
+    CHECK(MockHal::colpm[1] == 0xBB);
+    for (u8 r = 0; r < 8; ++r) {
+        CHECK(buf[pbase(0) + 50 + r] == 0);     // slot 0's old range cleared
+        CHECK(buf[pbase(0) + 70 + r] == 0xFF);  // slot 0's new range written
+        CHECK(buf[pbase(1) + 60 + r] == 0xFF);  // slot 1 unchanged
+    }
+}
+
+// ── Direct binding: hiding a slot frees its player, leaves the other ───
+
+static void test_direct_bind_hide() {
+    static SMD mgr;
+    mgr.sprite(0, g_shape, 100, 40);
+    mgr.sprite(1, g_shape, 110, 50);
+    mgr.sprite_hide(0);
+    mgr.update_zones();
+
+    CHECK(mgr.zone_count() == 1);
+    CHECK(mgr.active_count() == 1);
+    CHECK(mgr.player_for_sprite(0) == 0xFF);   // hidden slot is on no player
+    CHECK(mgr.player_for_sprite(1) == 1);      // slot 1 keeps its own player
+    const ZoneInfo& z0 = mgr.zone(0);
+    CHECK(z0.player_assignment[0] == ZoneInfo::UNUSED);
+    CHECK(z0.player_assignment[1] == 1);
+}
+
 // ── build_raster_hooks registers one boundary hook per extra zone ───────
 
 static void test_raster_hook_registration() {
@@ -312,6 +383,8 @@ int main() {
     test_commit_dirty_tracking();
     test_sprite_hide();
     test_sprite_color_follows_sprite();
+    test_direct_bind_no_swap();
+    test_direct_bind_hide();
     test_raster_hook_registration();
     test_missile_render_and_hide();
 

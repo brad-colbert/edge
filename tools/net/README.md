@@ -158,3 +158,60 @@ docker rm -f nspeer-rt && docker network rm nspeer
 Validated this way 2026-06-15: HUD `ACTIVE`, `TX`/`RX`/`GOT` advancing, `DELAY ~4f
 (~66ms)`, signed `OFFSET`, `RTT`, `JIT`, with realistic loss on the raw 16-byte
 Netstream path (no retransmit). **Not** validated on physical FujiNet hardware.
+
+## `edge_tank_adversary.py`
+
+Server-driven adversary for the networked two-tank demo
+(`demo/tank_net/atari_tank_net_demo.cpp`). Same generic UDP transport + unframed
+16-byte reassembly as `edge_realtime_peer.py`; the only demo-specific knowledge (the
+`TankPacket16` layout, magic `0xAD`) is isolated in its `decode`/`encode` helpers.
+
+It streams an **authoritative adversary STATE snapshot** (world position, heading,
+speed) to the Atari at ~10 Hz, and consumes the Atari's own player snapshots so the
+adversary AI can **react**. The server replicates the client's Q12.4 motion table and
+advances the adversary identically each tick (speed × frames-per-tick steps), so the
+position it sends already equals what the client dead-reckoned to — the client's snap
+matches its own DR and is invisible. Keep `--speed-scale` equal to the demo's
+`EDGE_TANK_SPEED_SCALE` (default 3) for that to hold.
+
+### Usage
+
+```sh
+# Chase the player, 10 Hz, adversary starting lower-left; learn the Atari's address.
+python3 tools/net/edge_tank_adversary.py --mode chase --hz 10 --start 8,376 --decode
+```
+
+| Option | Default | Meaning |
+|--------|---------|---------|
+| `--mode chase\|avoid\|patrol` | `chase` | steer toward / away from the player, or roam |
+| `--hz` | `10` | snapshot rate |
+| `--speed` | `1` | adversary dead-reckon speed (steps/frame); `0` parks it |
+| `--speed-scale` | `3` | must match the demo's `EDGE_TANK_SPEED_SCALE` |
+| `--start x,y` | `160,96` | adversary start position (nominal px) |
+| `--target-host/--target-port` | learn from inbound | explicit Atari address |
+| `--tv ntsc\|pal` | `ntsc` | client frame rate, for frames-per-tick |
+| `--decode` | off | log inbound player packets |
+
+### End-to-end Mode B test
+
+Identical topology to the meter recipe above — just run this server in the Docker
+peer instead of the echo peer, and build `atari_tank_net_demo`:
+
+```sh
+docker network create --subnet 172.30.0.0/24 nspeer 2>/dev/null || true
+docker run -d --name nspeer-adv --network nspeer --ip 172.30.0.2 \
+    -v "$PWD/tools/net:/peer:ro" python:3-slim \
+    python -u /peer/edge_tank_adversary.py --mode chase --hz 10 --start 8,376
+
+cmake -S . -B build-atari -DCMAKE_TOOLCHAIN_FILE=cmake/atari-toolchain.cmake \
+      -DEDGE_BUILD_DEMO=ON -DEDGE_ATARI_FUJINET_REALTIME_NETSTREAM=ON \
+      -DEDGE_NET_PEER_HOST=172.30.0.2 -DEDGE_NET_PEER_PORT=9000
+cmake --build build-atari --target atari_tank_net_demo
+scripts/altirra_screenshot.sh build-atari/atari_tank_net_demo.xex /tmp/tanknet.png 14   # or run interactively
+
+docker rm -f nspeer-adv          # teardown (leave the network for re-use)
+```
+
+Validated this way 2026-06-25: two distinct-colour tanks on hardware players 0/1,
+bidirectional `rx/tx 10/s` with `bad=0`, the adversary chasing from the lower-left to
+the player's upper-right corner. **Not** validated on physical FujiNet hardware.

@@ -131,11 +131,27 @@ struct ZoneInfo {
 };
 static_assert(sizeof(ZoneInfo) == 21, "ZoneInfo must be 13 + 8 reserved bytes");
 
+// ── Sprite-to-hardware binding ────────────────────────────────────────
+//
+// How logical sprites map onto the hardware players each frame.
+//   Multiplexed — the default: sort by Y and (re)assign players every frame so
+//                 more sprites than hardware players can share them across zones.
+//   Direct      — fixed 1:1 binding: logical slot i always drives hardware player
+//                 i for the whole frame. No Y-sort, no per-frame reassignment, no
+//                 zone-boundary hooks (one zone). Use when slots <= hardware
+//                 players and a stable slot->player mapping matters (e.g. so two
+//                 sprites that cross in Y never swap players/colours). Requires
+//                 MaxSprites <= kPlayers.
+enum class SpriteBinding : u8 { Multiplexed, Direct };
+
 // ── SpriteManager ─────────────────────────────────────────────────────
 //
 // MaxSprites logical sprites multiplexed across up to MaxZones zones of 4
-// players each (so at most MaxZones*4 sprites can be shown at once).
-template <typename Platform, u8 MaxSprites, u8 MaxZones = 4>
+// players each (so at most MaxZones*4 sprites can be shown at once). With
+// Binding == Direct the multiplexer is bypassed for a fixed slot->player mapping
+// (see SpriteBinding).
+template <typename Platform, u8 MaxSprites, u8 MaxZones = 4,
+          SpriteBinding Binding = SpriteBinding::Multiplexed>
 class SpriteManager {
     static_assert(MaxSprites >= 1, "need at least one sprite slot");
     static_assert(MaxZones >= 1, "need at least one zone");
@@ -143,6 +159,9 @@ class SpriteManager {
 public:
     static constexpr u8 kPlayers  = 4;
     static constexpr u8 kMissiles = 4;
+
+    static_assert(Binding != SpriteBinding::Direct || MaxSprites <= kPlayers,
+        "Direct sprite binding needs one hardware player per slot (max_sprites <= 4)");
 
     // Zone-boundary raster hooks fire at the end of an 8-scanline mode line; bias the
     // boundary up by ~one mode line so the player-position switch lands in the gap
@@ -209,6 +228,27 @@ public:
     // active from the top; each later zone's boundary is the midpoint between
     // the last sprite of the previous zone and its own first sprite.
     void update_zones() {
+        // Direct binding (baseline only): fixed slot->player mapping, no Y-sort and
+        // no per-frame reassignment. Build a single zone where player p shows logical
+        // slot p (if shown), so commit_pm draws slot p into player p's strip and sets
+        // player p's position/colour with p fixed for the whole frame. zone_count_ == 1
+        // means build_raster_hooks installs no boundary hooks. (On a blitter backend
+        // there are no hardware-player limits, so Direct is a no-op — fall through.)
+        if constexpr (Binding == SpriteBinding::Direct && !caps::has_blitter) {
+            active_count_ = 0;
+            ZoneInfo& zi = zones_[0];
+            for (u8 p = 0; p < kPlayers; ++p) {
+                const bool shown = (p < MaxSprites) && is_shown(sprites_[p]);
+                zi.player_assignment[p] = shown ? p : ZoneInfo::UNUSED;
+                zi.hpos[p]  = shown ? sprites_[p].x : 0;
+                zi.color[p] = shown ? sprites_[p].color : 0;
+                if (shown) ++active_count_;
+            }
+            zi.boundary_scanline = 0;
+            zone_count_ = 1;
+            return;
+        }
+
         // Gather active+visible sprite indices.
         active_count_ = 0;
         for (u8 i = 0; i < MaxSprites; ++i) {

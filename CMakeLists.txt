@@ -503,6 +503,70 @@ if(EDGE_BUILD_DEMO)
     target_link_options(edge_net_realtime_meter PRIVATE
         "LINKER:--Map=$<TARGET_FILE_DIR:edge_net_realtime_meter>/edge_net_realtime_meter.map")
 
+    # Networked two-tank demo (atari_tank_net_demo.xex). Reuses demo/tank's
+    # motion/camera/shapes/assets (added to the include path) and adds a
+    # network-driven adversary over the realtime lane. Always EMBEDDED assets, so it
+    # generates its own copy of the tank tileset + chunks (independent of
+    # EDGE_TANK_ASSET_SOURCE) into a private gen dir.
+    set(TANK_NET_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated/tank_net)
+    set(TANK_NET_GEN_HEADERS "")
+    set(_tn_tileset ${TANK_NET_GEN_DIR}/tank_tileset.gen.h)
+    add_custom_command(
+        OUTPUT ${_tn_tileset}
+        COMMAND ${CMAKE_COMMAND}
+                -DINPUT=${TANK_ASSET_SRC_DIR}/tank_tileset.fnt
+                -DOUTPUT=${_tn_tileset}
+                -DSYMBOL=tileset_bytes -DNAMESPACE=demo::tank::assets
+                -P ${GENERATE_CHARSET_HEADER_SCRIPT}
+        DEPENDS ${TANK_ASSET_SRC_DIR}/tank_tileset.fnt ${GENERATE_CHARSET_HEADER_SCRIPT}
+        COMMENT "Generating tank_net tank_tileset.gen.h" VERBATIM)
+    list(APPEND TANK_NET_GEN_HEADERS ${_tn_tileset})
+    foreach(C 0_0 1_0 0_1 1_1)
+        set(_h ${TANK_NET_GEN_DIR}/chunk_${C}.gen.h)
+        add_custom_command(
+            OUTPUT ${_h}
+            COMMAND ${CMAKE_COMMAND}
+                    -DINPUT=${TANK_ASSET_SRC_DIR}/chunk_${C}.scr
+                    -DOUTPUT=${_h}
+                    -DSYMBOL=chunk_${C} -DNAMESPACE=demo::tank::assets -DEXPECT_BYTES=960
+                    -P ${GENERATE_BYTES_HEADER_SCRIPT}
+            DEPENDS ${TANK_ASSET_SRC_DIR}/chunk_${C}.scr ${GENERATE_BYTES_HEADER_SCRIPT}
+            COMMENT "Generating tank_net chunk_${C}.gen.h" VERBATIM)
+        list(APPEND TANK_NET_GEN_HEADERS ${_h})
+    endforeach()
+
+    # When EDGE_ATARI_FUJINET_REALTIME_NETSTREAM is ON, link the real EDGE-owned
+    # netstream adapter (.S handlers) so Mode B uses real SIO; otherwise the realtime
+    # HAL is the stub and the adversary never appears (the demo shows a red "NO NET").
+    set(TANK_NET_SRC demo/tank_net/atari_tank_net_demo.cpp ${TANK_NET_GEN_HEADERS})
+    if(EDGE_ATARI_FUJINET_REALTIME_NETSTREAM)
+        list(APPEND TANK_NET_SRC
+            engine/platform/atari/fujinet_netstream_realtime_abi.s
+            engine/platform/atari/fujinet_netstream_handler.S)
+        message(STATUS "atari_tank_net_demo — realtime lane: real Netstream adapter (Mode B)")
+    else()
+        message(STATUS "atari_tank_net_demo — realtime lane: STUB HAL "
+            "(adversary disabled; set -DEDGE_ATARI_FUJINET_REALTIME_NETSTREAM=ON for real transport)")
+    endif()
+    add_executable(atari_tank_net_demo ${TANK_NET_SRC})
+    target_compile_options(atari_tank_net_demo PRIVATE
+        -std=c++20 -fno-exceptions -fno-rtti -O2 -Wall -Wextra)
+    target_include_directories(atari_tank_net_demo PRIVATE
+        ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/demo/tank
+        ${CMAKE_SOURCE_DIR}/engine/platform/atari ${TANK_NET_GEN_DIR})
+    set_target_properties(atari_tank_net_demo PROPERTIES OUTPUT_NAME "atari_tank_net_demo.xex")
+    target_link_options(atari_tank_net_demo PRIVATE
+        "LINKER:--Map=$<TARGET_FILE_DIR:atari_tank_net_demo>/atari_tank_net_demo.map")
+    if(DEFINED EDGE_TANK_HEADING)
+        target_compile_definitions(atari_tank_net_demo PRIVATE EDGE_TANK_HEADING=${EDGE_TANK_HEADING})
+    endif()
+    if(DEFINED EDGE_NET_PEER_HOST)
+        target_compile_definitions(atari_tank_net_demo PRIVATE EDGE_NET_PEER_HOST="${EDGE_NET_PEER_HOST}")
+    endif()
+    if(DEFINED EDGE_NET_PEER_PORT)
+        target_compile_definitions(atari_tank_net_demo PRIVATE EDGE_NET_PEER_PORT=${EDGE_NET_PEER_PORT})
+    endif()
+
     # Aggregate convenience target: build every always-available demo .xex with
     # one `cmake --build <dir> --target demos`. This is the stable name the
     # scripts/build_demos.sh wrapper and the README point at. The network-only
@@ -523,7 +587,8 @@ if(EDGE_BUILD_DEMO)
         arena_native
         arena_vbxe
         net_dual_lane_demo
-        edge_net_realtime_meter)
+        edge_net_realtime_meter
+        atari_tank_net_demo)
     return()
 endif()
 
