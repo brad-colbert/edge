@@ -95,6 +95,16 @@ struct uses_missiles<C, void_t<decltype(C::uses_missiles)>> {
     static constexpr bool value = C::uses_missiles;
 };
 
+// sprite_binding: GameConfig::sprite_binding if present, else Multiplexed (the
+// per-frame Y-sort multiplexer). Direct pins logical slot i to hardware player i
+// for the whole frame (requires max_sprites <= 4); see SpriteBinding in sprites.h.
+template <typename C, typename = void>
+struct sprite_binding { static constexpr SpriteBinding value = SpriteBinding::Multiplexed; };
+template <typename C>
+struct sprite_binding<C, void_t<decltype(C::sprite_binding)>> {
+    static constexpr SpriteBinding value = C::sprite_binding;
+};
+
 // Joystick port count: Platform::capabilities::joystick_ports if present, else 2.
 template <typename P, typename = void>
 struct ports { static constexpr u8 value = 2; };
@@ -156,7 +166,8 @@ public:
 
     // Subsystem types.
     using Screen    = ScreenManager<Platform, GameConfig>;
-    using Sprites   = SpriteManager<Platform, GameConfig::max_sprites>;
+    using Sprites   = SpriteManager<Platform, GameConfig::max_sprites, 4,
+                                    cdetail::sprite_binding<GameConfig>::value>;
     using Sound     = SoundManager<Platform, GameConfig::sound_channels>;
     using Scroll    = ScrollManager<Platform>;
     using Tiles     = TileDisplay<Platform>;

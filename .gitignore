@@ -7,3 +7,6 @@ working_documents/
 .github/
 bin/
 ATARI_MCP.md
+# Python bytecode cache
+__pycache__/
+*.pyc
