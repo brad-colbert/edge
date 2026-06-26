@@ -91,16 +91,32 @@ static constexpr u8 kTxPeriod = (kFps >= 60) ? 6 : 5;
 #ifndef EDGE_TANK_HEADING
 #define EDGE_TANK_HEADING 0
 #endif
-// Local player starts in the UPPER-RIGHT corner of the world (centre clamp box is
-// [8,632] x [8,376] nominal px); the adversary starts LOWER-LEFT (server --start).
+// Local player starts in the UPPER-RIGHT corner of the world — at (624,16), the
+// upper-right area, with a few cells of margin from the top/right border walls so
+// the 16x16 sprite does not spawn already touching them (which would wall-collide on
+// frame 1). The adversary starts LOWER-LEFT (server --start).
 static tank::TankState g_tank = {
-    static_cast<i16>(632 << 4), static_cast<i16>(8 << 4),
+    static_cast<i16>(600 << 4), static_cast<i16>(32 << 4),
     static_cast<u8>(EDGE_TANK_HEADING), 0,
 };
-static tanknet::Adversary g_adv = {};
-static u8  g_player_speed = 0;       // 1 while the player is moving (for the TX packet)
-static u16 g_tx_seq       = 0;
-static u8  g_tx_frame     = 0;
+
+// GTIA player→playfield collision: P0PF bit 0 = COLPF0, the white wall colour
+// (tank_palette colpf0). A set bit means player 0's hull overlapped a wall.
+static constexpr u8 kWallColpfMask = 0x01;
+
+// Mutable game state bundled into ONE struct so it lands in main RAM (.bss), not
+// the near-full zero page — small separate statics get zp-promoted and overflow it
+// (volatile alone does not prevent promotion; see the tank demo's SimFeed/LiveState
+// bundling). The padding keeps the struct comfortably above the zp-promotion size.
+struct GameState {
+    tanknet::Adversary adv;          // network-driven adversary
+    tank::TankState    tank_safe;    // last position player 0 was NOT touching a wall
+    u8  player_speed;                // 1 while the player is moving (for the TX packet)
+    u16 tx_seq;
+    u8  tx_frame;
+    u8  bss_anchor[24];              // force .bss placement (main RAM is plentiful)
+};
+static GameState g_st = {};
 
 // Playfield background. Darker than the shared tank palette's 0x04 dark-grey
 // (same hue 0, lower luminance) but not black — local to this demo so the original
@@ -157,7 +173,7 @@ static void submit_two_sprites() {
     Game::scroll.set(cam_cc, cam_sl);
 
     submit_tank(0, g_tank, cam_cc, cam_sl);     // local player (always on-screen)
-    if (g_adv.have_state) submit_tank(1, g_adv.s, cam_cc, cam_sl);
+    if (g_st.adv.have_state) submit_tank(1, g_st.adv.s, cam_cc, cam_sl);
     else                  Game::sprite_hide(1);
 }
 
@@ -169,10 +185,21 @@ static void frame_step(const engine::Input& in) {
         Game::net.realtime.poll();
         // 1. Drain authoritative adversary snapshots (last accepted wins; snaps state).
         tanknet::TankPacket16 pkt{};
-        while (Game::net.realtime.recv(pkt)) tanknet::adv_apply_packet(g_adv, pkt);
+        while (Game::net.realtime.recv(pkt)) tanknet::adv_apply_packet(g_st.adv, pkt);
         (void)Game::net.realtime.consume_rx_overflowed();
         // 2. Dead-reckon the adversary forward between snapshots.
-        tanknet::adv_dead_reckon(g_adv);
+        tanknet::adv_dead_reckon(g_st.adv);
+    }
+
+    // 2b. GTIA wall collision for player 0. The engine latched P0PF from last
+    // frame's render; direct-bind means logical slot 0 IS hardware player 0, so the
+    // mask is reliable (no multiplexer reassignment). If the hull drove into a white
+    // wall (COLPF0), snap back to the last wall-free position; otherwise remember
+    // this position as wall-free.
+    if (Game::sprite_collisions().sprite_to_background(0) & kWallColpfMask) {
+        g_tank = g_st.tank_safe;
+    } else {
+        g_st.tank_safe = g_tank;
     }
 
     // 3. Local tank input + movement (unchanged from the original tank demo).
@@ -185,13 +212,13 @@ static void frame_step(const engine::Input& in) {
         } else { --g_tank.turn_counter; }
     } else { g_tank.turn_counter = 0; }
     tank::move_tank(g_tank, intent.move);
-    g_player_speed = (intent.move != 0) ? 1 : 0;
+    g_st.player_speed = (intent.move != 0) ? 1 : 0;
 
     // 4. Stream our own state back to the server (bidirectional; all-or-nothing TX).
-    if (Game::net.realtime.active() && ++g_tx_frame >= kTxPeriod) {
-        g_tx_frame = 0;
+    if (Game::net.realtime.active() && ++g_st.tx_frame >= kTxPeriod) {
+        g_st.tx_frame = 0;
         Game::net.realtime.send(
-            tanknet::make_player_packet(g_tank, g_player_speed, g_tx_seq++));
+            tanknet::make_player_packet(g_tank, g_st.player_speed, g_st.tx_seq++));
     }
 
     // 5. Draw both tanks.
@@ -200,6 +227,7 @@ static void frame_step(const engine::Input& in) {
 
 // ── Entry point ────────────────────────────────────────────────────────────
 int main() {
+    g_st.tank_safe = g_tank;    // seed the wall-free fallback to the spawn position
     Platform::hal::set_player_size(0, M::sizep::NORMAL);
     Platform::hal::set_player_size(1, M::sizep::NORMAL);
     Game::sprite_color(0, kPlayerColor);

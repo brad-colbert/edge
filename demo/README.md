@@ -242,8 +242,13 @@ crosses the player in Y constantly; the multiplexer's per-frame Y-sort would swa
 their players/colours for a frame, so direct binding (fixed slot→player) is required
 here, not the multiplexer.
 
-The local player starts in the **upper-right** corner of the world; the adversary
-starts **lower-left** (the server's `--start`).
+The local player starts in the **upper-right** of the world; the adversary starts
+**lower-left** (the server's `--start`). The player has **wall collision**: GTIA
+player→playfield collision (P0PF) is read each frame, and a hit on the white wall
+colour (COLPF0) snaps the player back to its last wall-free position. This is
+reliable specifically because of direct binding — logical slot 0 is always hardware
+player 0, so the P0PF mask is never reassigned by a multiplexer. (The adversary is
+not wall-collided; its motion is the server's authority.)
 
 > The realtime lane is **emulator-validated only** (Altirra + NetSIO + Docker peer),
 > not yet physical-FujiNet validated — this demo is a prototype for that environment.
@@ -284,6 +289,7 @@ network at `172.30.0.2:9000`).
 | Its silhouette matches its heading as it turns | heading→silhouette on the received state |
 | Driving the player makes the adversary chase/avoid | bidirectional link (server consumes the Atari's TX) |
 | The adversary crosses the player in Y with **no colour flip** | direct binding, not the Y-sort multiplexer |
+| Driving the player into a wall stops it; it never passes through | GTIA P0PF wall collision (white/COLPF0) + revert |
 | Adversary leaves the viewport → hidden; re-enters at the right spot | drawn in the player's camera frame |
 | Red border when built without the netstream flag / with no peer | stub-HAL / no-transport indication |
 
