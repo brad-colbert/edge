@@ -218,3 +218,22 @@ one-time startup sync), i.e. the deframer never desynced even while dropping fra
 
 **Status: resolved.** `netstream_rx_depth=2` is a safe tightest-latency default; `4` is
 equally fine for the demo (10 Hz is ~100 ms either way).
+
+## Baud headroom check — ~49.7k (2026-06-27)
+
+Cranked the lane to the closest-to-50k BaudTable row via build flag
+`EDGE_NETSTREAM_NOMINAL_BAUD=49700` (AUDF3=11 → ~49716 bps; firmware confirmed
+`NETSTREAM baud: 49716 (AUDF3=11 NTSC)`), `rx_depth=2`:
+
+| `--hz` | 31250 (~31960 bps) | 49700 (~49716 bps) |
+|---|---|---|
+| 10 | ~1 | ~1 |
+| 20 | ~9 (max 11) | ~7-8 (max 10) |
+| 30 | ~13 (max 15) | ~11 (max 15) |
+| 60 | ~26 (max 30) | ~22 (max 30) |
+
++55 % bandwidth bought only ~1-4 packets, clean throughout (`ovf/bad/stale=0`, `resync`
+flat). This **confirms bandwidth was never the limiter** — the floor is the echo
+round-trip + frame-depth buffer, not wire speed; higher baud (57600+) would show the
+same diminishing pattern. **Default stays 31250** (proven/validated); 49700 is available
+via the build flag (`EDGE_NETSTREAM_NOMINAL_BAUD`, must be an exact BaudTable nominal).
