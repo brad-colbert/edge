@@ -1287,8 +1287,8 @@ receive state. The API is dual-lane (see ADR-032, ADR-033): the
 fujinet-lib at configure time, and the **realtime lane** (fixed
 16-byte packets, no wire framing) is wired to an EDGE-owned FujiNet
 Netstream path. The realtime data path is validated against the
-fujinet-pc emulator stack (NetSIO + Altirra + Docker UDP peer);
-it is **not yet validated on physical FujiNet hardware**. The
+fujinet-pc emulator stack (NetSIO + Altirra + Docker UDP peer)
+**and on physical FujiNet hardware** (2026-06-27, tank_net demo). The
 `edge_net_realtime_meter` demo (public `Game::net.realtime` only) and the
 `tools/net/edge_realtime_peer.py` host peer exercise and measure the lane; the
 stream is unframed, so the consumer reassembles the fixed 16-byte units.

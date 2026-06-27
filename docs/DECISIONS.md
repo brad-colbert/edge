@@ -1666,13 +1666,16 @@ with the external clock matches the proven upstream reference
   STREAM-IN `50..5F`; adapter open/active/send/recv/close all passed; the TX IRQ
   diagnostic showed the handler count advancing and the ring draining; production
   `.bss` remained 359.
-- **NOT physical FujiNet hardware validated.** All Mode-B evidence is from the
-  emulator/FujiNet-PC stack.
+- **Physical FujiNet hardware validated (2026-06-27).** The `tank_net` demo ran the
+  realtime lane (open_udp_seq + bidirectional UDP-seq streaming) on a real Atari +
+  FujiNet, in addition to the emulator/FujiNet-PC stack. Downstream pacing was tuned in
+  the fujinet-firmware (frame-aligned drop-oldest + `netstream_rx_depth`); see
+  `docs/HANDOFF_netstream_downstream_pacing.md`.
 
 **Risks / future work:**
-- Physical FujiNet hardware validation is pending.
-- The fixed 16-byte boundaries are *implicit*: if bytes are lost on the stream,
-  the receiver desynchronizes and cannot recover on its own (no resync marker).
+- The fixed packet boundaries are *implicit*: if bytes are lost on the stream, the
+  receiver desynchronizes and cannot recover on its own (no resync marker). Drops must
+  therefore be whole-frame aligned (validated end-to-end with the firmware change).
 - Wire framing / resync / checksum / sequence is separate future work.
 - A real gameplay demo over the realtime lane is still needed; `net_dual_lane_demo`
   only illustrates the API shape.

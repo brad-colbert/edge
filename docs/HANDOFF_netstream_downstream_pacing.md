@@ -1,7 +1,10 @@
 # Handoff: Netstream downstream pacing / growing delay
 
-**Date:** 2026-06-27 · **Status:** EDGE-side mitigation landed (packet packing); the
-**root fix is expected in fujinet-firmware** and is the subject of this handoff.
+**Date:** 2026-06-27 · **Status: RESOLVED + physical-hardware validated.** EDGE packing
+mitigation landed; the firmware root fix (frame-aligned drop-oldest + `netstream_rx_depth`)
+landed and was verified (see "Bufferbloat fix VERIFIED" below); the tank_net demo then ran
+the realtime lane on a **real Atari + FujiNet** (2026-06-27). This doc is retained as the
+record of the investigation. (Original framing below: a handoff to the firmware effort.)
 
 **Repro pinned at:** EDGE repo `/home/brad/Dropbox/Projects/Atari/edge`, branch
 `uber_tank_net_demo` @ `b0805a0` (the packing + seq-echo instrument) — rebuild the demo

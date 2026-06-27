@@ -61,7 +61,7 @@ Subsystems with partial backend wiring today:
   platform the **session lane** is optionally wired to fujinet-lib (OFF by
   default) and the **realtime lane** is wired to an EDGE-owned FujiNet Netstream
   path, validated against the fujinet-pc emulator stack (NetSIO + Altirra +
-  Docker UDP peer) but **not yet on physical FujiNet hardware**, and exercised by
-  the `edge_net_realtime_meter` demo + `tools/net/edge_realtime_peer.py` peer. The
+  Docker UDP peer) **and on physical FujiNet hardware** (2026-06-27, tank_net demo),
+  and exercised by the `edge_net_realtime_meter` demo + `tools/net/edge_realtime_peer.py` peer. The
   `Network` / Fujinet *capability axis* is real; non-Atari net backends remain
   unimplemented.

@@ -17,9 +17,10 @@
 // NOT the multiplexer: chasing adversaries cross the player in Y constantly, which
 // would make the multiplexer's per-frame Y-sort swap players/colours for a frame.
 //
-// REALTIME LANE: this lane is EMULATOR-validated only (Altirra + NetSIO + Docker
-// peer), not yet physical-FujiNet validated. This demo is a prototype for that
-// environment. Build the real adapter with -DEDGE_ATARI_FUJINET_REALTIME_NETSTREAM=ON;
+// REALTIME LANE: validated on PHYSICAL FujiNet hardware (2026-06-27) via this demo
+// (open_udp_seq + bidirectional UDP-seq streaming on a real Atari + FujiNet), in
+// addition to the Altirra + NetSIO + Docker-peer emulator stack. Build the real
+// adapter with -DEDGE_ATARI_FUJINET_REALTIME_NETSTREAM=ON;
 // otherwise the realtime HAL is a stub (open_udp_seq -> Unsupported) and the
 // adversary never appears — the border turns red ("NO NET") to make that obvious.
 

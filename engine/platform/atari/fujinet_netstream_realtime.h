@@ -8,7 +8,7 @@
 // 9Q.2 ABI). The full path is wired: LIFECYCLE (open->init->begin, close->end, active,
 // poll(status), last_error) AND the byte<->packet DATA PATH (send_nb/recv_nb — fixed 16-byte
 // all-or-nothing; see below). Validated against fujinet-pc + NetSIO + Altirra + a Docker UDP
-// peer (Mode B). NOT yet validated on physical FujiNet hardware.
+// peer (Mode B), AND on physical FujiNet hardware (2026-06-27, via the tank_net demo).
 //
 // Why a template: the netstream-ON unit tests build under mos-sim where SIOV / the OS
 // vector-page + POKEY + IRQEN writes in begin cannot execute, and add_engine_test targets
@@ -45,8 +45,8 @@ using engine::net::NetStatus;
 //
 // Values match the proven-working upstream reference
 // (fujinet-atari-netstream/examples/udp-sequence/atari_udp_sequence.c: flags 0x26, baud 31250),
-// validated against fujinet-pc + NetSIO in 9R.3 (Mode B); NOT yet validated on physical FujiNet
-// hardware. The earlier 0x20 / 19200 (internal TX clock) never transmitted: FujiNet/NetSIO drives
+// validated against fujinet-pc + NetSIO in 9R.3 (Mode B) and on physical FujiNet hardware
+// (2026-06-27, tank_net demo). The earlier 0x20 / 19200 (internal TX clock) never transmitted: FujiNet/NetSIO drives
 // an EXTERNAL transmit clock, so TX_EXT (0x04) is required or POKEY never clocks the serial output
 // and the output-ready IRQ never fires.
 //
