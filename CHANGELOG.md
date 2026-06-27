@@ -25,6 +25,8 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
   [`docs/HANDOFF_netstream_downstream_pacing.md`](docs/HANDOFF_netstream_downstream_pacing.md).
 - **Realtime Netstream lane validated on physical FujiNet hardware** (2026-06-27, via
   the `tank_net` demo) — previously emulator-only. ADR-033 and the platform docs updated.
+  The networked demo **requires fujinet-firmware v1.6.2 or greater** (whole-frame-aligned
+  drop-oldest; older firmware desyncs the unframed stream under load).
 
 ## [0.7.0] - 2026-06-24
 

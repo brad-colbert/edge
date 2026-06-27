@@ -9,6 +9,9 @@
 // poll(status), last_error) AND the byte<->packet DATA PATH (send_nb/recv_nb — fixed 16-byte
 // all-or-nothing; see below). Validated against fujinet-pc + NetSIO + Altirra + a Docker UDP
 // peer (Mode B), AND on physical FujiNet hardware (2026-06-27, via the tank_net demo).
+// Requires fujinet-firmware >= v1.6.2: the downstream path needs the firmware's
+// whole-frame-aligned drop-oldest (older firmware byte-drops the unframed stream and
+// desyncs this marker-less deframer under load).
 //
 // Why a template: the netstream-ON unit tests build under mos-sim where SIOV / the OS
 // vector-page + POKEY + IRQEN writes in begin cannot execute, and add_engine_test targets

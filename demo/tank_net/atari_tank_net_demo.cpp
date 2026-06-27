@@ -19,8 +19,14 @@
 //
 // REALTIME LANE: validated on PHYSICAL FujiNet hardware (2026-06-27) via this demo
 // (open_udp_seq + bidirectional UDP-seq streaming on a real Atari + FujiNet), in
-// addition to the Altirra + NetSIO + Docker-peer emulator stack. Build the real
-// adapter with -DEDGE_ATARI_FUJINET_REALTIME_NETSTREAM=ON;
+// addition to the Altirra + NetSIO + Docker-peer emulator stack.
+//
+// REQUIRES fujinet-firmware v1.6.2 or greater. The downstream netstream path relies on
+// the firmware's whole-frame-aligned drop-oldest + configurable depth (added in 1.6.2);
+// older firmware drops individual bytes from the unframed stream, which permanently
+// desyncs the fixed-size deframer (no resync marker) and corrupts the adversaries.
+//
+// Build the real adapter with -DEDGE_ATARI_FUJINET_REALTIME_NETSTREAM=ON;
 // otherwise the realtime HAL is a stub (open_udp_seq -> Unsupported) and the
 // adversary never appears — the border turns red ("NO NET") to make that obvious.
 

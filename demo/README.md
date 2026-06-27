@@ -259,6 +259,11 @@ not wall-collided; their motion is the server's authority.)
 
 > The realtime lane is validated on the emulator stack (Altirra + NetSIO + Docker peer)
 > **and on physical FujiNet hardware** (2026-06-27, this demo).
+>
+> **Requires fujinet-firmware v1.6.2 or greater** — the downstream path depends on the
+> firmware's whole-frame-aligned drop-oldest (added in 1.6.2). Older firmware drops
+> individual bytes from the unframed stream and permanently desyncs the fixed-size
+> deframer under load.
 
 ## Build
 
