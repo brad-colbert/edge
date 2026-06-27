@@ -129,3 +129,31 @@ the per-demo `GameConfig::realtime_packet_bytes`, and the relaxed Atari HAL size
 (`engine/platform/atari/fujinet_netstream_realtime.h`). This reduces downstream packet
 count and total bytes but does **not** raise the firmware's per-byte pacing ceiling —
 which is what this handoff is about.
+
+## Throughput results AFTER the firmware fix (2026-06-27)
+
+Re-ran the seq-echo sweep against the updated firmware (combined 32-byte packet, so
+downstream pkt/s = `--hz`). All runs held `tx` at the full rate, `ovf=0`, no
+`bad`/`stale`:
+
+| `--hz` | downstream | steady-state lag | behavior |
+|---|---|---|---|
+| 10 | 10 pkt/s, ~320 B/s | **~1 pkt (~100 ms)**, flat | buffer stays shallow ✅ |
+| 30 | 30 pkt/s, ~960 B/s | ~75 pkt (~2.5 s), **bounded** | inbound buffers full |
+| 60 | 60 pkt/s, ~1920 B/s | ~90 pkt (~1.5 s), **bounded** | inbound buffers full |
+
+**Win — runaway eliminated.** The 30 pkt/s case that previously grew *unbounded to
+953* now **plateaus and stays bounded**, even pushed to 60 pkt/s / ~1920 B/s. The lane
+no longer falls behind without limit.
+
+**Remaining issue — bufferbloat at high rates.** The plateau is a roughly *fixed packet
+depth* (~75–90 packets ≈ the firmware `rx_ring` + engine/NS buffers running FULL), not
+a rate-dependent latency: note the time-latency is *lower* at hz=60 (1.5 s) than hz=30
+(2.5 s) for the same ~80-packet depth. So at high rates the inbound buffers sit full,
+adding constant latency. The demo's real operating rate (10 Hz) is unaffected — flat
+~100 ms.
+
+**Next firmware lead (optional, gated on whether low-latency-at-high-rate matters):**
+keep the inbound buffer **shallow** instead of letting it fill — drain `rx_ring` to the
+freshest bytes each service pass, shrink `NETSTREAM_RX_RING_SIZE`, or drop-oldest
+sooner. The goal is to turn the hz=30/60 "bounded but ~2 s" into "bounded and small."
