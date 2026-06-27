@@ -189,3 +189,32 @@ margin, so no risk today. **But if a firmware fix makes downstream much faster o
 burstier, ensure a burst cannot exceed ~128 bytes between the Atari's 60 Hz drains** —
 otherwise pace the burst, enlarge the Atari NS ring, or poll more than once per frame on
 the EDGE side.
+
+## Bufferbloat fix VERIFIED (frame-aligned drop-oldest + `netstream_rx_depth`, 2026-06-27)
+
+The firmware was changed to drop **whole 32-byte frames** (not bytes) when the inbound
+ring is full, with a configurable depth `netstream_rx_depth` (`[Network]` in
+`fnconfig.ini`; `0`/absent = firmware default `NETSTREAM_RX_MAX_FRAMES=4`, min 2). The
+seq-echo sweep confirms it — every cell `ovf=0 bad=0 stale=0`, `resync` flat at 8 B (the
+one-time startup sync), i.e. the deframer never desynced even while dropping frames:
+
+| `--hz` | pre-fix (bufferbloat) | depth=4 | depth=2 |
+|---|---|---|---|
+| 10 | ~1 / ~100 ms | ~1 / ~100 ms | ~1 / ~100 ms |
+| 20 | — | ~10 / ~500 ms | ~9 / ~450 ms |
+| 30 | ~75 / **~2.5 s** | ~15 / ~500 ms | ~13 / ~430 ms |
+| 60 | ~90 / **~1.5 s** | ~26 / ~430 ms | ~26 / ~430 ms |
+
+- **Runaway → bounded → shallow.** The deep ~2.5 s buffer at 30 Hz collapsed to ~0.5 s;
+  60 Hz from ~1.5 s to ~0.43 s. The demo's real 10 Hz operating point is ~100 ms.
+- **Frame-aligned drops verified at the shallowest depth (2).** No corruption signal at
+  any rate — confirms the whole-datagram drop policy (the EDGE Atari receiver has no
+  resync marker, so byte-level drops would have been fatal; see "Drop alignment").
+- **`depth=2` is marginally tighter than 4** (peak lag −2-3 pkt at hz=20/30, ~flat at
+  60). Diminishing returns below ~4 because the residual high-rate lag is dominated by
+  the **measurement round-trip** (echo returns on the Atari's 10 Hz player TX + wire
+  RTT, ≈ ~17-26 "packets" at 60 pkt/s), not `rx_ring` depth. The round-trip is the
+  floor; buffer depth can't go below it.
+
+**Status: resolved.** `netstream_rx_depth=2` is a safe tightest-latency default; `4` is
+equally fine for the demo (10 Hz is ~100 ms either way).
