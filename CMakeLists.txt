@@ -566,6 +566,11 @@ if(EDGE_BUILD_DEMO)
     if(DEFINED EDGE_NET_PEER_PORT)
         target_compile_definitions(atari_tank_net_demo PRIVATE EDGE_NET_PEER_PORT=${EDGE_NET_PEER_PORT})
     endif()
+    # Realtime-lane nominal baud override (must be an exact BaudTable nominal); default
+    # 31250. e.g. -DEDGE_NETSTREAM_NOMINAL_BAUD=49700 selects the ~49.7k row (AUDF3=11).
+    if(DEFINED EDGE_NETSTREAM_NOMINAL_BAUD)
+        target_compile_definitions(atari_tank_net_demo PRIVATE EDGE_NETSTREAM_NOMINAL_BAUD=${EDGE_NETSTREAM_NOMINAL_BAUD})
+    endif()
 
     # Aggregate convenience target: build every always-available demo .xex with
     # one `cmake --build <dir> --target demos`. This is the stable name the

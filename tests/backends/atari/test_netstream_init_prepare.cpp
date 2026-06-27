@@ -106,6 +106,15 @@ int main() {
     CHECK(nsFinalAudf3 == 21);
     CHECK(nsFinalAudf4 == 0);
 
+    // 49700 is the closest BaudTable row to 50k (AUDF3=11 -> ~49716 bps), the
+    // EDGE_NETSTREAM_NOMINAL_BAUD=49700 build override. Guards that overriding the lane
+    // baud to this row still hits select_baud (not a miss -> init fail).
+    nsVideoStd = VIDEO_NTSC;
+    stage_nominal(49700);
+    CHECK(ns_test_select_baud_staged() == 0);
+    CHECK(nsFinalAudf3 == 11);
+    CHECK(nsFinalAudf4 == 0);
+
     // ----- baud lookup miss: failure + nsFinal* untouched -----
     nsVideoStd = VIDEO_NTSC;
     stage_nominal(0x1234);           // not present in BaudTable

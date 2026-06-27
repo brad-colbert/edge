@@ -50,12 +50,19 @@ using engine::net::NetStatus;
 // an EXTERNAL transmit clock, so TX_EXT (0x04) is required or POKEY never clocks the serial output
 // and the output-ready IRQ never fires.
 //
-// kNetstreamNominalBaud: a BaudTable entry (31250 = row 0x7A12, AUDF3=21).
+// kNetstreamNominalBaud: a BaudTable entry. Default 31250 (row 0x7A12, AUDF3=21 ->
+//   ~31960 bps). Overridable at build time to a different table row, e.g.
+//   -DEDGE_NETSTREAM_NOMINAL_BAUD=49700 (row 0xC224, AUDF3=11 -> ~49716 bps, the closest
+//   entry to 50k). Must be an exact BaudTable nominal or ns_select_baud misses and init
+//   fails (see tests/backends/atari/test_netstream_init_prepare.cpp).
 // kNetstreamFlags: UDP (bit0=0) + UDP-seq (0x20, the lane is open_udp_seq) + TX external clock
 //   (0x04) + register (0x02). RX stays internal (0x08 clear). The PAL bit 0x10 is left 0 in the
 //   seed — ns_init_prepare derives it from DetectPAL; do NOT pre-set it. The handler maps
 //   flags & 0x0c == 0x04 -> SKCTL 0x10 (RX int, TX ext).
-inline constexpr u16 kNetstreamNominalBaud = 31250;
+#ifndef EDGE_NETSTREAM_NOMINAL_BAUD
+#define EDGE_NETSTREAM_NOMINAL_BAUD 31250
+#endif
+inline constexpr u16 kNetstreamNominalBaud = EDGE_NETSTREAM_NOMINAL_BAUD;
 // Default 0x26 (external TX clock) is the proven-working value. Overridable at build
 // time to experiment with clock modes, e.g. -DEDGE_NETSTREAM_FLAGS=0x22 selects an
 // INTERNAL TX clock (bit 0x04 clear): POKEY self-clocks the serial output instead of
