@@ -191,9 +191,35 @@ def choose_heading(mode, adv, player, t, patrol_period):
         return int(t / patrol_period) & 15
     dx = player[0] - adv.x_nom
     dy = player[1] - adv.y_nom
-    if mode == "avoid":
-        dx, dy = -dx, -dy
-    return heading_to(dx, dy)
+    if mode == "chase":
+        return heading_to(dx, dy)
+
+    # avoid: flee away from the player, but WALL-AWARE so it never pins in a corner.
+    # Fleeing straight away from an upper-right player drives it into the lower-left
+    # wall, where the hard world clamp would jam it. Instead: if the flee vector pushes
+    # into a wall, zero that component to slide ALONG the wall; if cornered (pushing into
+    # both), circle the perimeter clockwise so it keeps moving and looks deliberate.
+    fx, fy = -dx, -dy
+    m = 24  # px proximity that counts as "at" a wall
+    blk_x = (adv.x_nom <= WORLD_X_MIN + m and fx < 0) or \
+            (adv.x_nom >= WORLD_X_MAX - m and fx > 0)
+    blk_y = (adv.y_nom <= WORLD_Y_MIN + m and fy < 0) or \
+            (adv.y_nom >= WORLD_Y_MAX - m and fy > 0)
+    if blk_x and blk_y:
+        # Cornered: slide along a wall, clockwise around the field, by corner.
+        if adv.x_nom <= WORLD_X_MIN + m and adv.y_nom >= WORLD_Y_MAX - m:
+            fx, fy = 0, -1          # lower-left  -> north (up the left wall)
+        elif adv.x_nom <= WORLD_X_MIN + m:
+            fx, fy = 1, 0           # upper-left  -> east  (along the top wall)
+        elif adv.y_nom <= WORLD_Y_MIN + m:
+            fx, fy = 0, 1           # upper-right -> south (down the right wall)
+        else:
+            fx, fy = -1, 0          # lower-right -> west  (along the bottom wall)
+    elif blk_x:
+        fx = 0                       # slide vertically along the side wall
+    elif blk_y:
+        fy = 0                       # slide horizontally along the top/bottom wall
+    return heading_to(fx, fy)
 
 
 def main():
@@ -216,9 +242,11 @@ def main():
                     help="must match the demo's EDGE_TANK_SPEED_SCALE (default 3)")
     ap.add_argument("--start", default="160,96",
                     help="fallback start x,y nominal for adversaries not in --starts (default 160,96)")
-    ap.add_argument("--starts", default="8,376;624,376;624,16",
+    ap.add_argument("--starts", default="40,344;624,376;624,16",
                     help="per-adversary start x,y, semicolon list "
-                         "(default '8,376;624,376;624,16' — three corners); "
+                         "(default '40,344;624,376;624,16' — three corner areas; the "
+                         "lower-left is inset ~32px off the walls so a chase tank does "
+                         "not spawn pinned in the world-clamp corner); "
                          "entries beyond the list fall back to --start")
     ap.add_argument("--patrol-period", type=float, default=0.6,
                     help="seconds per heading step in patrol/no-player mode (default 0.6)")
