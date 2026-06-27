@@ -194,25 +194,27 @@ struct NetstreamRealtimeAdapterT {
         return NetStatus::Ok;
     }
 
-    // Fixed realtime packet size (engine::net::default_realtime_packet_bytes). The lane only
-    // ever calls send_nb/recv_nb with exactly this many bytes; any other nonzero size is a
-    // defensive InvalidArgument.
-    static constexpr u16 kPacketBytes = 16;
+    // Max realtime packet the adapter accepts in one all-or-nothing send/recv. The LANE
+    // drives the actual size (its compile-time PacketBytes, e.g. 16 or a demo's 32); this
+    // adapter just honours that size, bounded by the 128-byte NS hardware rings
+    // (NS_OUTPUT_BUFSIZE / NS_INPUT_BUFSIZE). Any size beyond the ring is a defensive
+    // InvalidArgument.
+    static constexpr u16 kMaxPacketBytes = 128;
 
-    // Stage 9R.2: ALL-OR-NOTHING TX. Send a whole 16-byte packet or nothing -- the engine
-    // RealtimeLane drops the packet only on Ok, retries on WouldBlock, so a partial write
-    // would corrupt the implicit fixed-length packet boundary. Pre-check tx_space() so the
-    // 16 byte sends cannot hit a full ring (the output IRQ only DRAINS the ring, so free
+    // Stage 9R.2: ALL-OR-NOTHING TX. Send a whole `size`-byte packet or nothing -- the
+    // engine RealtimeLane drops the packet only on Ok, retries on WouldBlock, so a partial
+    // write would corrupt the implicit fixed-length packet boundary. Pre-check tx_space()
+    // so the byte sends cannot hit a full ring (the output IRQ only DRAINS the ring, so free
     // space can only grow during the loop). send_nb/recv_nb do NOT touch state.last_error
     // (it stays owned by open/poll, keeping init/serial errors distinct from backpressure).
     static NetStatus realtime_send_nb(const void* bytes, u16 size) {
         if (!state().active) return NetStatus::Closed;
         if (bytes == nullptr && size > 0) return NetStatus::InvalidArgument;
         if (size == 0) return NetStatus::Ok;
-        if (size != kPacketBytes) return NetStatus::InvalidArgument;
-        if (Ops::tx_space() < kPacketBytes) return NetStatus::WouldBlock;  // write nothing
+        if (size > kMaxPacketBytes) return NetStatus::InvalidArgument;
+        if (Ops::tx_space() < size) return NetStatus::WouldBlock;  // write nothing
         const u8* p = static_cast<const u8*>(bytes);
-        for (u16 i = 0; i < kPacketBytes; ++i) {
+        for (u16 i = 0; i < size; ++i) {
             if (Ops::send_byte(p[i]) != 0) {
                 // Impossible under the concurrency model (free space only grows after the
                 // pre-check); a bug/race. Bytes may already have been accepted, so this is
@@ -220,20 +222,20 @@ struct NetstreamRealtimeAdapterT {
                 return NetStatus::TransportError;
             }
         }
-        return NetStatus::Ok;  // exactly 16 bytes committed, in order
+        return NetStatus::Ok;  // exactly `size` bytes committed, in order
     }
 
-    // Stage 9R.2: FULL-PACKET RX. Deliver a whole 16-byte packet or nothing. Pre-check
-    // bytes_avail() so the 16 reads cannot underrun (the input IRQ only ADDS bytes; this is
-    // the only consumer). Bytes beyond 16 stay in the RX ring for the next drain iteration.
+    // Stage 9R.2: FULL-PACKET RX. Deliver a whole `size`-byte packet or nothing. Pre-check
+    // bytes_avail() so the reads cannot underrun (the input IRQ only ADDS bytes; this is the
+    // only consumer). Bytes beyond `size` stay in the RX ring for the next drain iteration.
     static NetStatus realtime_recv_nb(void* bytes, u16 size) {
         if (!state().active) return NetStatus::Closed;
         if (bytes == nullptr && size > 0) return NetStatus::InvalidArgument;
         if (size == 0) return NetStatus::Ok;
-        if (size != kPacketBytes) return NetStatus::InvalidArgument;
-        if (Ops::bytes_avail() < kPacketBytes) return NetStatus::WouldBlock;  // consume nothing
+        if (size > kMaxPacketBytes) return NetStatus::InvalidArgument;
+        if (Ops::bytes_avail() < size) return NetStatus::WouldBlock;  // consume nothing
         u8* p = static_cast<u8*>(bytes);
-        for (u16 i = 0; i < kPacketBytes; ++i) {
+        for (u16 i = 0; i < size; ++i) {
             const u16 packed = Ops::recv_packed();   // low = data, high = status (0 ok/1 empty)
             if ((packed >> 8) != 0) {
                 // Impossible after the pre-check (only this consumer drains RX); a bug/race.
@@ -241,7 +243,7 @@ struct NetstreamRealtimeAdapterT {
             }
             p[i] = static_cast<u8>(packed & 0xff);
         }
-        return NetStatus::Ok;  // exactly 16 bytes copied
+        return NetStatus::Ok;  // exactly `size` bytes copied
     }
 
     static NetError realtime_last_error() { return state().last_error; }

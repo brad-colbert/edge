@@ -24,32 +24,45 @@ using engine::u8;
 using engine::u16;
 using engine::i16;
 
-// ── Wire packet — fixed 16 bytes, the realtime lane's opaque unit ──────────────
+// ── Wire packet — fixed 32 bytes, the realtime lane's opaque unit ──────────────
 //
-// The demo's private interpretation of the lane's fixed 16-byte packet (NOT the
-// EDGE Netstream wire format). Explicit u8 fields => no padding, no alignment or
-// endianness assumptions; multi-byte fields are little-endian byte pairs. ONE
-// layout, two directions distinguished by `type`:
-//   type 0  server -> client : adversary state snapshot
-//   type 1  client -> server : local-player state (so the server's adversary AI
-//                              can react — chase/avoid — and learn our address)
-struct TankPacket16 {
-    u8 magic;            //  0  0xAD — reject foreign UDP
-    u8 version;          //  1  0x01
-    u8 type;             //  2  0 = adversary (S->C), 1 = player (C->S)
-    u8 status;           //  3  bit0 have_state / alive
-    u8 seq_lo, seq_hi;   //  4..5  u16 LE sequence (loss / reorder / stale detect)
-    u8 x_lo, x_hi;       //  6..7  world_x nominal px, u16 LE (0..639)
-    u8 y_lo, y_hi;       //  8..9  world_y nominal px, u16 LE (0..383)
-    u8 heading;          // 10     0..15 (drives silhouette + motion vector)
-    u8 speed;            // 11     dead-reckon move steps per frame (0 = stopped)
-    u8 reserved[3];      // 12..14
-    u8 pattern;          // 15     0x5A sanity
+// The demo's private interpretation of the lane's fixed 32-byte packet (NOT the
+// EDGE Netstream wire format; the demo widens the lane via
+// GameConfig::realtime_packet_bytes). Explicit u8 fields => no padding, no alignment
+// or endianness assumptions; multi-byte fields are little-endian byte pairs.
+//
+// ONE combined packet per tick carries ALL adversaries — this packs 3 adversaries
+// into a single S->C packet (10 pkt/s) instead of one packet each (30 pkt/s), the
+// downstream-overload mitigation. ONE layout, two directions by `type`:
+//   type 0  server -> client : up to kMaxAdv adversary records; `status` bit i = rec[i] live.
+//   type 1  client -> server : local-player state in rec[0] (status bit0 = have_state),
+//                              plus the timing-echo fields (see make_player_packet).
+struct AdvRecord {       // 6 bytes — one tank's authoritative state
+    u8 x_lo, x_hi;       //  world_x nominal px, u16 LE (0..639)
+    u8 y_lo, y_hi;       //  world_y nominal px, u16 LE (0..383)
+    u8 heading;          //  0..15 (drives silhouette + motion vector)
+    u8 speed;            //  dead-reckon move steps per frame (0 = stopped)
 };
-static_assert(sizeof(TankPacket16) == 16, "TankPacket16 must be exactly 16 bytes");
+static_assert(sizeof(AdvRecord) == 6, "AdvRecord must be exactly 6 bytes");
+
+inline constexpr u8 kMaxAdv = 3;          // adversary records per combined packet
+
+struct TankPacket32 {
+    u8 magic;                  //  0      0xAD — reject foreign UDP
+    u8 version;                //  1      0x02 (combined-packet format)
+    u8 type;                   //  2      0 = adversary (S->C), 1 = player (C->S)
+    u8 status;                 //  3      S->C: bit i = rec[i] live; C->S: bit0 have_state
+    u8 seq_lo, seq_hi;         //  4..5   u16 LE sequence (loss / reorder / stale detect)
+    AdvRecord rec[kMaxAdv];    //  6..23  adversary records (C->S: rec[0] = player)
+    u8 echo_seq_lo, echo_seq_hi;  // 24..25  C->S: adv[0] last-applied seq (timing echo)
+    u8 echo_flags;             // 26     C->S: client health byte (RX-overflow events)
+    u8 reserved[4];            // 27..30
+    u8 pattern;                // 31     0x5A sanity
+};
+static_assert(sizeof(TankPacket32) == 32, "TankPacket32 must be exactly 32 bytes");
 
 inline constexpr u8 kMagic   = 0xAD;
-inline constexpr u8 kVersion = 0x01;
+inline constexpr u8 kVersion = 0x02;
 inline constexpr u8 kPattern = 0x5A;
 inline constexpr u8 kTypeAdversary = 0;   // server -> client
 inline constexpr u8 kTypePlayer    = 1;   // client -> server
@@ -72,37 +85,49 @@ inline i16 seq_delta(u16 a, u16 b) {
 struct Adversary {
     tank::TankState s;      // reuse hull-centre Q12.4 world pos + heading
     u8  speed;              // last-known dead-reckon speed (steps/frame)
-    u16 last_seq;           // last accepted snapshot sequence
     u8  have_state;         // 0 until the first valid snapshot
 };
 
-// Apply an authoritative snapshot: validate, drop stale/foreign, else SNAP the
-// adversary onto the server's position and adopt its heading + speed.
+// Shared packet-level sequence gate. ONE combined packet now carries all adversaries,
+// so stale/dup detection is per-PACKET (not per-adversary): the whole snapshot is
+// accepted or dropped together.
+struct AdvRxState {
+    u16 last_seq;           // last accepted combined-packet sequence
+    u8  have_state;         // 0 until the first valid packet
+};
+
+// Apply a combined authoritative snapshot: validate, drop stale/foreign, else SNAP
+// each LIVE adversary (status bit i) onto the server's position and adopt heading +
+// speed. Returns true if the packet was applied (seq strictly newer).
 //
 // SNAP rationale (prototype): cheap and deterministic (no 6502 divide); if the
 // server's speed/heading match this client's motion_vector magnitudes, the snap
 // only corrects accumulated rounding, not a visible teleport.
-// TODO(interp): to hide snap jumps under packet loss, instead of writing world_*_q4
-// directly here, store a correction TARGET and ease world_*_q4 toward it over the
-// next ~6 frames in adv_dead_reckon (needs a per-frame fractional delta = a divide).
-inline bool adv_apply_packet(Adversary& adv, const TankPacket16& p) {
+inline bool adv_apply_packet(Adversary* adv, u8 count, AdvRxState& rx,
+                             const TankPacket32& p) {
     if (p.magic != kMagic || p.type != kTypeAdversary) return false;
     const u16 seq = rd16(p.seq_lo, p.seq_hi);
-    if (adv.have_state && seq_delta(seq, adv.last_seq) <= 0) return false;  // stale/dup
+    if (rx.have_state && seq_delta(seq, rx.last_seq) <= 0) return false;  // stale/dup
 
-    const u16 x = rd16(p.x_lo, p.x_hi);
-    const u16 y = rd16(p.y_lo, p.y_hi);
-    adv.s.world_x_q4 = static_cast<i16>(static_cast<i16>(x) << 4);   // SNAP (interp seam)
-    adv.s.world_y_q4 = static_cast<i16>(static_cast<i16>(y) << 4);
-    adv.s.heading    = static_cast<u8>(p.heading & 15);
-    adv.speed        = p.speed;
-    tank::clamp_world(adv.s);
-    adv.last_seq   = seq;
-    adv.have_state = 1;
+    const u8 n = (count < kMaxAdv) ? count : kMaxAdv;
+    for (u8 i = 0; i < n; ++i) {
+        if (!(p.status & (1u << i))) continue;             // adversary not live this packet
+        const AdvRecord& r = p.rec[i];
+        const u16 x = rd16(r.x_lo, r.x_hi);
+        const u16 y = rd16(r.y_lo, r.y_hi);
+        adv[i].s.world_x_q4 = static_cast<i16>(static_cast<i16>(x) << 4);   // SNAP
+        adv[i].s.world_y_q4 = static_cast<i16>(static_cast<i16>(y) << 4);
+        adv[i].s.heading    = static_cast<u8>(r.heading & 15);
+        adv[i].speed        = r.speed;
+        tank::clamp_world(adv[i].s);
+        adv[i].have_state = 1;
+    }
+    rx.last_seq   = seq;
+    rx.have_state = 1;
     return true;
 }
 
-// Advance the adversary one frame between snapshots: step `speed` times along the
+// Advance one adversary one frame between snapshots: step `speed` times along the
 // last-known heading via the shared ROM motion table + world clamp (same cadence
 // as the local tank, so DR closely tracks the authoritative path).
 inline void adv_dead_reckon(Adversary& adv) {
@@ -110,18 +135,29 @@ inline void adv_dead_reckon(Adversary& adv) {
     for (u8 i = 0; i < adv.speed; ++i) tank::move_tank(adv.s, static_cast<engine::i8>(1));
 }
 
-// Build the local-player snapshot the client streams back to the server (type 1).
-inline TankPacket16 make_player_packet(const tank::TankState& s, u8 speed, u16 seq) {
-    TankPacket16 p{};
+// Build the local-player snapshot the client streams back to the server (type 1):
+// player state in rec[0], status bit0 = have_state.
+//
+// TIMING ECHO (diagnostic): the C->S packet piggybacks what the client has actually
+// applied — `echo_adv_seq` is adv[0]'s last accepted snapshot sequence and
+// `echo_flags` is a small client-side health byte (a saturating RX-overflow-event
+// count). The server compares echo_adv_seq against the seq it most recently SENT to
+// measure end-to-end lag in packets (≈ ms via the known send rate) and whether it
+// grows over time.
+inline TankPacket32 make_player_packet(const tank::TankState& s, u8 speed, u16 seq,
+                                       u16 echo_adv_seq, u8 echo_flags) {
+    TankPacket32 p{};
     p.magic   = kMagic;
     p.version = kVersion;
     p.type    = kTypePlayer;
     p.status  = kStatusHaveState;
     wr16(p.seq_lo, p.seq_hi, seq);
-    wr16(p.x_lo, p.x_hi, static_cast<u16>(tank::world_x_nominal(s)));
-    wr16(p.y_lo, p.y_hi, static_cast<u16>(tank::world_y_nominal(s)));
-    p.heading = static_cast<u8>(s.heading & 15);
-    p.speed   = speed;
+    wr16(p.rec[0].x_lo, p.rec[0].x_hi, static_cast<u16>(tank::world_x_nominal(s)));
+    wr16(p.rec[0].y_lo, p.rec[0].y_hi, static_cast<u16>(tank::world_y_nominal(s)));
+    p.rec[0].heading = static_cast<u8>(s.heading & 15);
+    p.rec[0].speed   = speed;
+    wr16(p.echo_seq_lo, p.echo_seq_hi, echo_adv_seq);  // adv[0] last-applied seq
+    p.echo_flags = echo_flags;                         // client health byte
     p.pattern = kPattern;
     return p;
 }

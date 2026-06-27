@@ -1,20 +1,21 @@
-// demo/tank_net/atari_tank_net_demo.cpp — EDGE networked two-tank demo.
+// demo/tank_net/atari_tank_net_demo.cpp — EDGE networked multi-tank demo.
 //
-// A "bigger tank demo": the Stage-4 joystick tank (local player) PLUS a second
-// "adversary" tank whose authoritative state (world position, heading, speed) is
+// A "bigger tank demo": the Stage-4 joystick tank (local player) PLUS three
+// "adversary" tanks whose authoritative state (world position, heading, speed) is
 // streamed from a Python UDP server at ~10 Hz over the EDGE realtime lane. The
 // link is bidirectional — the Atari streams its own tank state back so the
-// server's adversary AI can react (chase/avoid). Between the 10 Hz snapshots the
-// client dead-reckons the adversary forward and snaps on each new packet.
+// server's adversary AI can react (chase/avoid/patrol). Between the 10 Hz snapshots
+// the client dead-reckons each adversary forward and snaps on its new packets.
 //
 // Reuses demo/tank's motion/camera/shapes/assets verbatim (added to the include
-// path by CMake); only the network glue + the second sprite are new.
+// path by CMake); only the network glue + the extra sprites are new.
 //
-// SPRITES: two tanks on DEDICATED hardware players via the engine direct-bind mode
-// (GameConfig::sprite_binding = Direct) — slot 0 -> player 0 (local), slot 1 ->
-// player 1 (adversary), fixed for the whole frame. NOT the multiplexer: a chasing
-// adversary crosses the player in Y constantly, which would make the multiplexer's
-// per-frame Y-sort swap players/colours for a frame.
+// SPRITES: four tanks on DEDICATED hardware players via the engine direct-bind mode
+// (GameConfig::sprite_binding = Direct) — slot 0 -> player 0 (local), slots 1..3 ->
+// players 1..3 (adversaries 0..2), fixed for the whole frame. 1 player + 3
+// adversaries == the 4 hardware players, so the direct-bind path stays a single zone.
+// NOT the multiplexer: chasing adversaries cross the player in Y constantly, which
+// would make the multiplexer's per-frame Y-sort swap players/colours for a frame.
 //
 // REALTIME LANE: this lane is EMULATOR-validated only (Altirra + NetSIO + Docker
 // peer), not yet physical-FujiNet validated. This demo is a prototype for that
@@ -65,14 +66,23 @@ struct PlayScreen {
         engine::ScrollRegion<engine::TextRegion<M::Mode::MODE_4, 24>,
                              G::physical_width, G::physical_height>>;
 };
+// Number of network-driven adversaries. 1 local player + kAdvCount adversaries must
+// stay <= the 4 hardware players for direct-bind (kPlayers); 3 fills it exactly.
+static constexpr u8 kAdvCount = 3;
+
 struct GameConfig {
     using screens = engine::ScreenSet<PlayScreen>;
-    static constexpr u8 max_sprites    = 2;     // local player + adversary
+    static constexpr u8 max_sprites    = 1 + kAdvCount;   // local player + adversaries
     static constexpr u8 sound_channels = 1;
-    // No multiplexer: pin slot 0 -> player 0, slot 1 -> player 1 for the whole
-    // frame so the two tanks never swap players/colours when they cross in Y.
+    // No multiplexer: pin slot i -> player i for the whole frame so the tanks never
+    // swap players/colours when they cross in Y.
     static constexpr engine::SpriteBinding sprite_binding = engine::SpriteBinding::Direct;
+    // Widen the realtime frame so ONE packet carries all kAdvCount adversaries per tick
+    // (10 pkt/s) instead of one packet each (30 pkt/s) — the downstream-overload
+    // mitigation. 32 bytes holds the header + kMaxAdv 6-byte records + the timing echo.
+    static constexpr u16 realtime_packet_bytes = sizeof(tanknet::TankPacket32);
 };
+static_assert(tanknet::kMaxAdv >= kAdvCount, "combined packet must hold every adversary");
 using Game = engine::Core<Platform, GameConfig>;
 
 static tank::PhysicalMap g_map;
@@ -82,7 +92,10 @@ static_assert(Platform::capabilities::screen_buffer_alignment == tank::kScanWrap
 static constexpr u8 kFps        = Platform::capabilities::frames_per_second;
 static constexpr u8 kTurnPeriod = (kFps >= 60) ? 7 : 6;
 static constexpr u8 kPlayerColor = 0x1E;   // brassy (matches the original tank)
-static constexpr u8 kAdvColor    = 0x46;   // red — visually distinct adversary
+// One vivid colour per adversary, each a hue NOT used by the playfield palette
+// (grey 0x0e, brick-red 0x32, green 0xc6, blue 0x84) or the gold player (0x1e), so
+// no adversary is camouflaged against a wall/tile: pink, purple, cyan.
+static constexpr u8 kAdvColors[kAdvCount] = { 0x48, 0x68, 0x98 };
 
 // Send the local player's snapshot at ~10 Hz (every ~6 frames at 60 fps / 5 at 50).
 static constexpr u8 kTxPeriod = (kFps >= 60) ? 6 : 5;
@@ -109,11 +122,13 @@ static constexpr u8 kWallColpfMask = 0x01;
 // (volatile alone does not prevent promotion; see the tank demo's SimFeed/LiveState
 // bundling). The padding keeps the struct comfortably above the zp-promotion size.
 struct GameState {
-    tanknet::Adversary adv;          // network-driven adversary
+    tanknet::Adversary adv[kAdvCount];   // network-driven adversaries
+    tanknet::AdvRxState adv_rx;      // shared packet-level seq gate (combined snapshot)
     tank::TankState    tank_safe;    // last position player 0 was NOT touching a wall
     u8  player_speed;                // 1 while the player is moving (for the TX packet)
     u16 tx_seq;
     u8  tx_frame;
+    u8  rx_overflow_count;           // saturating RX-overflow events since last TX (echoed)
     u8  bss_anchor[24];              // force .bss placement (main RAM is plentiful)
 };
 static GameState g_st = {};
@@ -161,11 +176,11 @@ static void submit_tank(u8 slot, const tank::TankState& s, u16 cam_cc, u16 cam_s
     }
 }
 
-// ── Sprite submission: local player (slot 0) + adversary (slot 1) ───────────
+// ── Sprite submission: local player (slot 0) + adversaries (slots 1..kAdvCount) ─
 //
-// The camera follows the LOCAL player; the adversary is drawn in that same camera
+// The camera follows the LOCAL player; each adversary is drawn in that same camera
 // frame (so it scrolls correctly and hides when it leaves the viewport).
-static void submit_two_sprites() {
+static void submit_sprites() {
     const i16 pwx = tank::world_x_nominal(g_tank);
     const i16 pwy = tank::world_y_nominal(g_tank);
     const u16 cam_cc = tank::camera_scroll_x_for_world_x(pwx);
@@ -173,8 +188,11 @@ static void submit_two_sprites() {
     Game::scroll.set(cam_cc, cam_sl);
 
     submit_tank(0, g_tank, cam_cc, cam_sl);     // local player (always on-screen)
-    if (g_st.adv.have_state) submit_tank(1, g_st.adv.s, cam_cc, cam_sl);
-    else                  Game::sprite_hide(1);
+    for (u8 i = 0; i < kAdvCount; ++i) {
+        const u8 slot = static_cast<u8>(i + 1);
+        if (g_st.adv[i].have_state) submit_tank(slot, g_st.adv[i].s, cam_cc, cam_sl);
+        else                        Game::sprite_hide(slot);
+    }
 }
 
 // ── Per-frame step ──────────────────────────────────────────────────────────
@@ -183,12 +201,18 @@ static void submit_two_sprites() {
 static void frame_step(const engine::Input& in) {
     if (Game::net.realtime.active()) {
         Game::net.realtime.poll();
-        // 1. Drain authoritative adversary snapshots (last accepted wins; snaps state).
-        tanknet::TankPacket16 pkt{};
-        while (Game::net.realtime.recv(pkt)) tanknet::adv_apply_packet(g_st.adv, pkt);
-        (void)Game::net.realtime.consume_rx_overflowed();
-        // 2. Dead-reckon the adversary forward between snapshots.
-        tanknet::adv_dead_reckon(g_st.adv);
+        // 1. Drain authoritative snapshots. ONE combined packet carries all adversaries;
+        //    the seq gate keeps the newest (older/dup packets are dropped wholesale).
+        tanknet::TankPacket32 pkt{};
+        while (Game::net.realtime.recv(pkt)) {
+            tanknet::adv_apply_packet(g_st.adv, kAdvCount, g_st.adv_rx, pkt);
+        }
+        // Track RX-ring overflow events (oldest-dropped) so the server can see the
+        // client falling behind; saturate the echo byte at 255.
+        if (Game::net.realtime.consume_rx_overflowed() && g_st.rx_overflow_count < 255)
+            ++g_st.rx_overflow_count;
+        // 2. Dead-reckon every adversary forward between snapshots.
+        for (u8 i = 0; i < kAdvCount; ++i) tanknet::adv_dead_reckon(g_st.adv[i]);
     }
 
     // 2b. GTIA wall collision for player 0. The engine latched P0PF from last
@@ -217,21 +241,28 @@ static void frame_step(const engine::Input& in) {
     // 4. Stream our own state back to the server (bidirectional; all-or-nothing TX).
     if (Game::net.realtime.active() && ++g_st.tx_frame >= kTxPeriod) {
         g_st.tx_frame = 0;
+        // Echo the last-applied combined-packet seq + the overflow accumulator so the
+        // server can measure end-to-end lag; reset the accumulator once it is reported.
         Game::net.realtime.send(
-            tanknet::make_player_packet(g_tank, g_st.player_speed, g_st.tx_seq++));
+            tanknet::make_player_packet(g_tank, g_st.player_speed, g_st.tx_seq++,
+                                        g_st.adv_rx.last_seq, g_st.rx_overflow_count));
+        g_st.rx_overflow_count = 0;
     }
 
-    // 5. Draw both tanks.
-    submit_two_sprites();
+    // 5. Draw all tanks.
+    submit_sprites();
 }
 
 // ── Entry point ────────────────────────────────────────────────────────────
 int main() {
     g_st.tank_safe = g_tank;    // seed the wall-free fallback to the spawn position
     Platform::hal::set_player_size(0, M::sizep::NORMAL);
-    Platform::hal::set_player_size(1, M::sizep::NORMAL);
     Game::sprite_color(0, kPlayerColor);
-    Game::sprite_color(1, kAdvColor);
+    for (u8 i = 0; i < kAdvCount; ++i) {
+        const u8 slot = static_cast<u8>(i + 1);
+        Platform::hal::set_player_size(slot, M::sizep::NORMAL);
+        Game::sprite_color(slot, kAdvColors[i]);
+    }
 
     Game::init(tank::tileset);
     set_palette();
@@ -249,6 +280,6 @@ int main() {
         Platform::hal::set_color_pf(4, 0x34);    // "NO NET" — red border/background
     }
 
-    submit_two_sprites();
+    submit_sprites();
     Game::run(frame_step);
 }

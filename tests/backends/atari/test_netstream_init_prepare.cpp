@@ -87,6 +87,25 @@ int main() {
     CHECK(nsFinalAudf3 == 219);
     CHECK(nsFinalAudf4 == 2);
 
+    // 31250 is the rate the REALTIME lane actually requests
+    // (kNetstreamNominalBaud, fujinet_netstream_realtime.h): verify it is a real
+    // BaudTable row and resolves to AUDF3=21,AUDF4=0 (single-byte divisor, same for
+    // NTSC/PAL) -> effective ~31960 bps via baud = 1789790/(2*(AUDF3+7)). A retune of
+    // the adapter constant to a value NOT in the table would MISS here (init fails),
+    // so this case guards the lane's configured datarate.
+    nsVideoStd = VIDEO_NTSC;
+    stage_nominal(31250);
+    nsFinalAudf3 = 0xAA; nsFinalAudf4 = 0xAA;
+    CHECK(ns_test_select_baud_staged() == 0);
+    CHECK(nsFinalAudf3 == 21);
+    CHECK(nsFinalAudf4 == 0);
+
+    nsVideoStd = VIDEO_PAL;
+    stage_nominal(31250);
+    CHECK(ns_test_select_baud_staged() == 0);
+    CHECK(nsFinalAudf3 == 21);
+    CHECK(nsFinalAudf4 == 0);
+
     // ----- baud lookup miss: failure + nsFinal* untouched -----
     nsVideoStd = VIDEO_NTSC;
     stage_nominal(0x1234);           // not present in BaudTable

@@ -203,13 +203,15 @@ int main() {
     CHECK(A::realtime_open_udp_seq(host, 0x1234, 0) == n::NetStatus::Ok);
     CHECK(A::realtime_active());
 
-    // ----- arg validation (active): null / zero / wrong length -----
+    // ----- arg validation (active): null / zero / oversize -----
+    // The lane drives the packet size (its compile-time PacketBytes); the adapter
+    // honours any size up to the 128-byte NS ring and rejects only oversize.
     CHECK(A::realtime_send_nb(nullptr, 16) == n::NetStatus::InvalidArgument);
     CHECK(A::realtime_send_nb(pkt, 0) == n::NetStatus::Ok);
-    CHECK(A::realtime_send_nb(pkt, 8) == n::NetStatus::InvalidArgument);   // n != 16
+    CHECK(A::realtime_send_nb(pkt, 129) == n::NetStatus::InvalidArgument);   // > kMaxPacketBytes
     CHECK(A::realtime_recv_nb(nullptr, 16) == n::NetStatus::InvalidArgument);
     CHECK(A::realtime_recv_nb(out, 0) == n::NetStatus::Ok);
-    CHECK(A::realtime_recv_nb(out, 8) == n::NetStatus::InvalidArgument);
+    CHECK(A::realtime_recv_nb(out, 129) == n::NetStatus::InvalidArgument);   // > kMaxPacketBytes
 
     // ----- TX: tx_space < 16 -> WouldBlock, NOTHING written -----
     FakeOps::tx_count = 0; FakeOps::send_fail_at = -1; FakeOps::tx_free = 15;
