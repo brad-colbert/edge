@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
-"""Server-driven adversary for the EDGE networked two-tank demo (demo/tank_net).
+"""Server-driven adversaries for the EDGE networked multi-tank demo (demo/tank_net).
 
-Pairs with demo/tank_net/atari_tank_net_demo.cpp. Streams an authoritative
-adversary-tank STATE snapshot (world position, heading, speed) to the Atari at
+Pairs with demo/tank_net/atari_tank_net_demo.cpp. Streams authoritative
+adversary-tank STATE snapshots (world position, heading, speed) to the Atari at
 ~10 Hz over the realtime lane (ADR-015: the host sends state, not input), and —
 the link is bidirectional — consumes the Atari's own player snapshots so the
-adversary AI can react (chase / avoid).
+adversary AI can react (chase / avoid / patrol).
+
+Drives N adversaries (default 3, the demo's kAdvCount), each an independent AI with
+its own start position and mode. ALL adversaries are packed into ONE combined packet
+per tick (status bit i marks record i live) — 1 pkt/tick instead of one-per-adversary,
+the downstream-overload mitigation that keeps the Atari's receive path from falling
+behind.
 
 The TRANSPORT is generic UDP and knows nothing about Atari/SIO/POKEY/FujiNet; the
-only demo-specific knowledge is the 16-byte TankPacket16 layout below, kept in one
-place. Netstream carries an UNFRAMED byte stream, so inbound 16-byte units are
+only demo-specific knowledge is the 32-byte TankPacket32 layout below, kept in one
+place. Netstream carries an UNFRAMED byte stream, so inbound 32-byte units are
 reassembled across datagram boundaries (resync on the magic+version marker) exactly
 like tools/net/edge_realtime_peer.py.
 
@@ -34,15 +40,20 @@ import time
 # Verified frame rates (Hz), derived from ANTIC geometry (see edge_realtime_peer.py).
 TV_FPS = {"ntsc": 59.9227, "pal": 49.8607}
 
-DEFAULT_SIZE = 16
+MAX_ADV = 3                  # adversary records per combined packet (tanknet::kMaxAdv)
+DEFAULT_SIZE = 32
 
-# ── TankPacket16 layout (must match demo/tank_net/adversary_net.h) ────────────
-#   0 magic(0xAD) 1 version(0x01) 2 type(0=adversary S->C, 1=player C->S) 3 status
-#   4..5 seq LE   6..7 x_nom LE   8..9 y_nom LE   10 heading(0..15) 11 speed
-#   12..14 reserved   15 pattern(0x5A)
-_LAYOUT = "<BBBBHHHBB3sB"   # magic,ver,type,status, seq,x,y, heading,speed, resv,pattern
+# ── TankPacket32 layout (must match demo/tank_net/adversary_net.h) ────────────
+# ONE combined packet per tick carries ALL adversaries (downstream-overload fix):
+#   0 magic(0xAD) 1 version(0x02) 2 type(0=adversary S->C, 1=player C->S)
+#   3 status (S->C: bit i = rec[i] live; C->S: bit0 have_state)   4..5 seq LE
+#   6..23  rec[0..2], each = x_nom LE(2) y_nom LE(2) heading(1) speed(1)
+#          (C->S: rec[0] = player state)
+#   24..25 echo_seq LE (C->S: adv[0] last-applied seq)   26 echo_flags (C->S health)
+#   27..30 reserved   31 pattern(0x5A)
+_LAYOUT = "<BBBBH" + "HHBB" * MAX_ADV + "HB4sB"
 MAGIC = 0xAD
-VERSION = 0x01
+VERSION = 0x02
 PATTERN = 0x5A
 TYPE_ADVERSARY = 0
 TYPE_PLAYER = 1
@@ -54,23 +65,42 @@ WORLD_Y_MIN, WORLD_Y_MAX = 8, 376
 
 
 def decode(data):
-    """Decode 16 bytes into a dict, or None if not a valid TankPacket16."""
-    if len(data) != 16:
+    """Decode 32 bytes into a dict, or None if not a valid TankPacket32."""
+    if len(data) != DEFAULT_SIZE:
         return None
-    magic, ver, ptype, status, seq, x, y, heading, speed, _resv, pattern = \
-        struct.unpack(_LAYOUT, data)
+    f = struct.unpack(_LAYOUT, data)
+    magic, ver, ptype, status, seq = f[0:5]
     if magic != MAGIC:
         return None
-    return {"magic": magic, "version": ver, "type": ptype, "status": status,
-            "seq": seq, "x": x, "y": y, "heading": heading, "speed": speed,
-            "pattern": pattern}
+    recs = []
+    for i in range(MAX_ADV):
+        x, y, heading, speed = f[5 + i * 4: 9 + i * 4]
+        recs.append({"x": x, "y": y, "heading": heading, "speed": speed})
+    echo_seq, echo_flags = f[5 + MAX_ADV * 4], f[6 + MAX_ADV * 4]
+    d = {"magic": magic, "version": ver, "type": ptype, "status": status,
+         "seq": seq, "recs": recs, "echo_seq": echo_seq, "echo_flags": echo_flags,
+         "pattern": f[-1]}
+    # Player (C->S) state lives in rec[0]; flatten for convenience.
+    d.update(x=recs[0]["x"], y=recs[0]["y"],
+             heading=recs[0]["heading"], speed=recs[0]["speed"])
+    return d
 
 
-def encode(f):
-    return struct.pack(_LAYOUT, MAGIC, VERSION, f["type"], f.get("status", 0),
-                       f["seq"] & 0xFFFF, f["x"] & 0xFFFF, f["y"] & 0xFFFF,
-                       f["heading"] & 0x0F, f["speed"] & 0xFF, b"\x00\x00\x00",
-                       PATTERN)
+def encode_adversaries(seq, recs):
+    """Build a combined S->C adversary packet: one record per adversary (max MAX_ADV),
+    status bit i set for each present record."""
+    status = 0
+    fields = []
+    for i in range(MAX_ADV):
+        if i < len(recs):
+            r = recs[i]
+            status |= (1 << i)
+            fields += [r["x"] & 0xFFFF, r["y"] & 0xFFFF,
+                       r["heading"] & 0x0F, r["speed"] & 0xFF]
+        else:
+            fields += [0, 0, 0, 0]
+    return struct.pack(_LAYOUT, MAGIC, VERSION, TYPE_ADVERSARY, status,
+                       seq & 0xFFFF, *fields, 0, 0, b"\x00\x00\x00\x00", PATTERN)
 
 
 def seq_delta(a, b):
@@ -161,17 +191,48 @@ def choose_heading(mode, adv, player, t, patrol_period):
         return int(t / patrol_period) & 15
     dx = player[0] - adv.x_nom
     dy = player[1] - adv.y_nom
-    if mode == "avoid":
-        dx, dy = -dx, -dy
-    return heading_to(dx, dy)
+    if mode == "chase":
+        return heading_to(dx, dy)
+
+    # avoid: flee away from the player, but WALL-AWARE so it never pins in a corner.
+    # Fleeing straight away from an upper-right player drives it into the lower-left
+    # wall, where the hard world clamp would jam it. Instead: if the flee vector pushes
+    # into a wall, zero that component to slide ALONG the wall; if cornered (pushing into
+    # both), circle the perimeter clockwise so it keeps moving and looks deliberate.
+    fx, fy = -dx, -dy
+    m = 24  # px proximity that counts as "at" a wall
+    blk_x = (adv.x_nom <= WORLD_X_MIN + m and fx < 0) or \
+            (adv.x_nom >= WORLD_X_MAX - m and fx > 0)
+    blk_y = (adv.y_nom <= WORLD_Y_MIN + m and fy < 0) or \
+            (adv.y_nom >= WORLD_Y_MAX - m and fy > 0)
+    if blk_x and blk_y:
+        # Cornered: slide along a wall, clockwise around the field, by corner.
+        if adv.x_nom <= WORLD_X_MIN + m and adv.y_nom >= WORLD_Y_MAX - m:
+            fx, fy = 0, -1          # lower-left  -> north (up the left wall)
+        elif adv.x_nom <= WORLD_X_MIN + m:
+            fx, fy = 1, 0           # upper-left  -> east  (along the top wall)
+        elif adv.y_nom <= WORLD_Y_MIN + m:
+            fx, fy = 0, 1           # upper-right -> south (down the right wall)
+        else:
+            fx, fy = -1, 0          # lower-right -> west  (along the bottom wall)
+    elif blk_x:
+        fx = 0                       # slide vertically along the side wall
+    elif blk_y:
+        fy = 0                       # slide horizontally along the top/bottom wall
+    return heading_to(fx, fy)
 
 
 def main():
     ap = argparse.ArgumentParser(description="EDGE networked-tank adversary server.")
     ap.add_argument("--host", default="0.0.0.0", help="bind address (default 0.0.0.0)")
     ap.add_argument("--port", type=int, default=9000, help="UDP port (default 9000)")
+    ap.add_argument("--count", type=int, default=3,
+                    help="number of adversaries (default 3, the demo's kAdvCount)")
     ap.add_argument("--mode", choices=["chase", "avoid", "patrol"], default="chase",
-                    help="adversary AI (default chase)")
+                    help="fallback AI for adversaries not named in --modes (default chase)")
+    ap.add_argument("--modes", default="chase,avoid,patrol",
+                    help="per-adversary AI, comma list (default 'chase,avoid,patrol'); "
+                         "entries beyond the list fall back to --mode")
     ap.add_argument("--hz", type=float, default=10.0, help="snapshot rate (default 10)")
     ap.add_argument("--tv", choices=["ntsc", "pal"], default="ntsc",
                     help="client TV standard, for frames-per-tick (default ntsc)")
@@ -179,7 +240,14 @@ def main():
                     help="adversary dead-reckon speed in steps/frame (default 1)")
     ap.add_argument("--speed-scale", type=int, default=3,
                     help="must match the demo's EDGE_TANK_SPEED_SCALE (default 3)")
-    ap.add_argument("--start", default="160,96", help="adversary start x,y nominal (default 160,96)")
+    ap.add_argument("--start", default="160,96",
+                    help="fallback start x,y nominal for adversaries not in --starts (default 160,96)")
+    ap.add_argument("--starts", default="40,344;624,376;624,16",
+                    help="per-adversary start x,y, semicolon list "
+                         "(default '40,344;624,376;624,16' — three corner areas; the "
+                         "lower-left is inset ~32px off the walls so a chase tank does "
+                         "not spawn pinned in the world-clamp corner); "
+                         "entries beyond the list fall back to --start")
     ap.add_argument("--patrol-period", type=float, default=0.6,
                     help="seconds per heading step in patrol/no-player mode (default 0.6)")
     ap.add_argument("--target-host", default=None,
@@ -192,16 +260,35 @@ def main():
 
     if (args.target_host is None) != (args.target_port is None):
         ap.error("--target-host and --target-port must be given together")
+    if args.count < 1:
+        ap.error("--count must be >= 1")
+
+    def parse_xy(s):
+        x, y = (int(v) for v in s.split(","))
+        return x, y
+
     try:
-        sx, sy = (int(v) for v in args.start.split(","))
+        fallback_start = parse_xy(args.start)
+        starts = [parse_xy(s) for s in args.starts.split(";") if s.strip()]
     except ValueError:
-        ap.error("--start must be 'x,y' nominal pixels")
+        ap.error("--start/--starts must be 'x,y' nominal pixels (semicolon-separated for --starts)")
+    modes = [m for m in args.modes.split(",") if m.strip()]
+    for m in modes:
+        if m not in ("chase", "avoid", "patrol"):
+            ap.error("--modes entries must be chase|avoid|patrol")
 
     fps = TV_FPS[args.tv]
     frames_per_tick = max(1, int(round(fps / args.hz)))
     steps_per_tick = args.speed * frames_per_tick
     table = motion_table(args.speed_scale)
-    adv = TankSim(sx, sy, 0, table)
+
+    # One independent adversary per index: own sim + AI mode. ALL advs now share ONE
+    # combined packet per tick (out_seq below), so there is no per-adversary sequence.
+    advs = []
+    for i in range(args.count):
+        sx, sy = starts[i] if i < len(starts) else fallback_start
+        mode = modes[i] if i < len(modes) else args.mode
+        advs.append({"sim": TankSim(sx, sy, 0, table), "mode": mode})
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -210,9 +297,12 @@ def main():
     reasm = Reassembler(DEFAULT_SIZE)
 
     target = (args.target_host, args.target_port) if args.target_host else None
-    print("edge_tank_adversary: bound %s:%d mode=%s hz=%g fpt=%d steps/tick=%d scale=%d"
-          % (args.host, args.port, args.mode, args.hz, frames_per_tick,
+    print("edge_tank_adversary: bound %s:%d advs=%d hz=%g fpt=%d steps/tick=%d scale=%d"
+          % (args.host, args.port, len(advs), args.hz, frames_per_tick,
              steps_per_tick, args.speed_scale))
+    for i, a in enumerate(advs):
+        print("  adv %d: mode=%s start=(%d,%d)"
+              % (i, a["mode"], a["sim"].x_nom, a["sim"].y_nom))
     if target:
         print("streaming to %s:%d" % target)
     else:
@@ -220,12 +310,19 @@ def main():
 
     player = None             # last-known player (x,y) nominal
     player_last_seq = None
-    out_seq = 0
     period = 1.0 / args.hz
     next_send = time.monotonic()
     t0 = time.monotonic()
     win_start = t0
     rx = tx = bad = stale = 0
+    # Timing-echo diagnostics: how many combined packets the client is behind (lag),
+    # tracked as the latest value plus the run-wide min/max so a growing trend is
+    # obvious. pkt_sent_seq is the most recent combined-packet seq we transmitted.
+    out_seq = 0                # combined-packet sequence (one per tick, all advs)
+    pkt_sent_seq = None
+    lag_pkts = None
+    lag_min = lag_max = None
+    cli_ovf = 0          # latest client-reported RX-overflow-event count (echo_flags)
 
     try:
         while True:
@@ -247,28 +344,44 @@ def main():
                         player_last_seq = f["seq"]
                         player = (f["x"], f["y"])
                         rx += 1
+                        cli_ovf = f["echo_flags"]
+                        # End-to-end lag: how far adv[0]'s last-applied snapshot trails
+                        # the seq we most recently sent (>=0; clamp tiny negatives from
+                        # in-flight reorder to 0). Resolution ~1 packet = one send tick.
+                        if pkt_sent_seq is not None:
+                            d = seq_delta(pkt_sent_seq, f["echo_seq"])
+                            lag_pkts = d if d > 0 else 0
+                            lag_min = lag_pkts if lag_min is None else min(lag_min, lag_pkts)
+                            lag_max = lag_pkts if lag_max is None else max(lag_max, lag_pkts)
                         if target is None:
                             target = addr
                             print("learned target %s:%d" % (target[0], target[1]))
                         if args.decode:
-                            print("rx player seq=%d pos=(%d,%d) hdg=%d spd=%d"
-                                  % (f["seq"], f["x"], f["y"], f["heading"], f["speed"]))
+                            lag_s = ("lag=%d (~%dms)" % (lag_pkts, round(lag_pkts * period * 1000))
+                                     if lag_pkts is not None else "lag=?")
+                            print("rx player seq=%d pos=(%d,%d) hdg=%d spd=%d  %s ovf=%d"
+                                  % (f["seq"], f["x"], f["y"], f["heading"], f["speed"],
+                                     lag_s, cli_ovf))
             except BlockingIOError:
                 pass
 
             now = time.monotonic()
             if now >= next_send:
-                # Advance the adversary EXACTLY as the client will dead-reckon it,
-                # then snapshot — so the client's snap matches its own DR (no jump).
-                adv.heading = choose_heading(args.mode, adv, player,
-                                             now - t0, args.patrol_period)
-                adv.advance(steps_per_tick)
+                # Advance each adversary EXACTLY as the client will dead-reckon it, then
+                # snapshot ALL of them into ONE combined packet (downstream-overload fix:
+                # 1 pkt/tick instead of one-per-adversary). Client snap matches its own DR.
+                recs = []
+                for a in advs:
+                    sim = a["sim"]
+                    sim.heading = choose_heading(a["mode"], sim, player,
+                                                 now - t0, args.patrol_period)
+                    sim.advance(steps_per_tick)
+                    recs.append({"x": sim.x_nom, "y": sim.y_nom,
+                                 "heading": sim.heading, "speed": args.speed})
                 if target is not None:
-                    sock.sendto(encode({"type": TYPE_ADVERSARY, "status": 0x01,
-                                        "seq": out_seq, "x": adv.x_nom, "y": adv.y_nom,
-                                        "heading": adv.heading, "speed": args.speed}),
-                                target)
+                    sock.sendto(encode_adversaries(out_seq, recs), target)
                     tx += 1
+                    pkt_sent_seq = out_seq            # combined-packet seq just sent
                     out_seq = (out_seq + 1) & 0xFFFF
                 next_send += period
                 if next_send < now:
@@ -276,9 +389,15 @@ def main():
 
             if now - win_start >= args.stats_interval:
                 el = now - win_start
-                print("%.1fs: rx %.1f/s tx %.1f/s  adv=(%d,%d) hdg=%d  bad=%d stale=%d resync=%dB"
-                      % (el, rx / el, tx / el, adv.x_nom, adv.y_nom, adv.heading,
-                         bad, stale, reasm.resync_bytes))
+                pos = " ".join("(%d,%d)" % (a["sim"].x_nom, a["sim"].y_nom) for a in advs)
+                if lag_pkts is None:
+                    lag_s = "lag=? "
+                else:
+                    lag_s = ("lag=%d (~%dms, min%d/max%d) ovf=%d "
+                             % (lag_pkts, round(lag_pkts * period * 1000),
+                                lag_min, lag_max, cli_ovf))
+                print("%.1fs: rx %.1f/s tx %.1f/s  advs=%s  %sbad=%d stale=%d resync=%dB"
+                      % (el, rx / el, tx / el, pos, lag_s, bad, stale, reasm.resync_bytes))
                 win_start = now
                 rx = tx = 0
 

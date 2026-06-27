@@ -518,8 +518,8 @@ Netstream assembly path (no fujinet-lib, no per-byte CIO) that moves
 adapter adds **no wire framing** (boundaries are implicit, every 16 bytes, so the
 consumer reassembles units from the byte stream).
 Implementation status: realtime lane wired and validated against the
-fujinet-pc emulator stack (NetSIO + Altirra + Docker UDP peer, Mode B); **not
-yet validated on physical FujiNet hardware**. The `edge_net_realtime_meter` demo
+fujinet-pc emulator stack (NetSIO + Altirra + Docker UDP peer, Mode B) **and on
+physical FujiNet hardware** (2026-06-27, tank_net demo). The `edge_net_realtime_meter` demo
 (public API only) plus the `tools/net/edge_realtime_peer.py` host peer exercise and
 measure the lane end to end.
 

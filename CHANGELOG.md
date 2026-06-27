@@ -11,6 +11,23 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
 
 ## [Unreleased]
 
+### Added
+- **Per-demo realtime packet size** (`GameConfig::realtime_packet_bytes`, default 16)
+  and a **build-overridable netstream nominal baud** (`EDGE_NETSTREAM_NOMINAL_BAUD`,
+  default 31250 → AUDF3=21; e.g. 49700 selects the ~49.7k row). The Atari netstream HAL
+  now honours any packet size up to the 128-byte NS ring (was a fixed 16).
+
+### Changed
+- **`tank_net` packs all adversaries into one 32-byte realtime packet per tick**
+  (downstream rate `--hz` instead of `3 × --hz`) — the mitigation for a downstream
+  pacing/backpressure issue, paired with a fujinet-firmware frame-aligned drop-oldest +
+  `netstream_rx_depth` fix. Diagnosed with a seq-echo timing instrument; see
+  [`docs/HANDOFF_netstream_downstream_pacing.md`](docs/HANDOFF_netstream_downstream_pacing.md).
+- **Realtime Netstream lane validated on physical FujiNet hardware** (2026-06-27, via
+  the `tank_net` demo) — previously emulator-only. ADR-033 and the platform docs updated.
+  The networked demo **requires fujinet-firmware v1.6.2 or greater** (whole-frame-aligned
+  drop-oldest; older firmware desyncs the unframed stream under load).
+
 ## [0.7.0] - 2026-06-24
 
 ### Added

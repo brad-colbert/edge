@@ -448,7 +448,7 @@ using Platform = atari::FullUpgrade;   // XL, U1MB, VBXE<>, PokeyMax, NTSC, Fuji
 | Lane | Backend | Status |
 |---|---|---|
 | `Game::net.session` | fujinet-lib / CIO `N:` TCP client | **Optional** — see below |
-| `Game::net.realtime` | EDGE-owned FujiNet Netstream / UDP-seq | **Wired** — emulator-validated; not physical-HW validated |
+| `Game::net.realtime` | EDGE-owned FujiNet Netstream / UDP-seq | **Wired** — emulator- AND physical-FujiNet validated (2026-06-27, tank_net demo) |
 
 #### Session lane — optional fujinet-lib wiring
 
@@ -546,11 +546,12 @@ the confirmed port byte order all remain. Example:
 `cmake --build build-ns --target edge_net_realtime_meter` after configuring with
 `-DEDGE_NETSTREAM_FLAGS=0x22` (or pass it directly to the demo compile).
 
-**Remaining risks / future work:** physical FujiNet hardware validation is
-pending; implicit 16-byte boundaries desync on lost bytes (no resync); wire
-framing / resync / checksum / sequence is separate future work; a real gameplay
-demo over the realtime lane is still needed; physical Atari/SIO timing may differ
-from the emulator/FujiNet-PC stack (settle and baud may need retuning on HW).
+**Remaining risks / future work:** implicit packet boundaries desync on lost bytes
+(no resync) — so firmware drops must be whole-frame aligned (validated with the
+tank_net demo + the fujinet-firmware frame-aligned drop-oldest change); wire
+framing / resync / checksum / sequence is separate future work. Physical FujiNet
+hardware validation is DONE (2026-06-27, tank_net demo): open/send/recv/close +
+bidirectional streaming on a real Atari + FujiNet, settle/baud (31250) held.
 
 #### Hardware / emulator validation checklist
 
@@ -563,8 +564,9 @@ from the emulator/FujiNet-PC stack (settle and baud may need retuning on HW).
       Netstream; flags `0x26`; AUDF3 `21`; baud `31250`; STREAM-OUT `A0..AF`;
       STREAM-IN `50..5F`; open/active/send/recv/close passed; TX IRQ diagnostic
       showed handler count advancing + ring draining; production `.bss` 359
-- [ ] **physical FujiNet hardware** (open/send/recv/close on a real device)
-- [ ] real gameplay demo over the realtime lane
+- [x] **physical FujiNet hardware** (2026-06-27): tank_net demo — open/send/recv/close
+      + bidirectional UDP-seq streaming on a real Atari + FujiNet
+- [x] real gameplay demo over the realtime lane (tank_net: networked multi-tank)
 
 **Session lane** — before relying on it in production, validate against real
 hardware or an emulator with a FujiNet device:
@@ -616,7 +618,7 @@ Validated end-to-end over fujinet-pc + NetSIO + Altirra + a Docker UDP peer
 (Mode B): after reassembly the forward path measures 0% loss / 0 corruption; the
 packet *rate* is capped by the emulated NetSIO external clock stalling the CPU (an
 emulation-stack characteristic, not loss or EDGE code, and not real-hardware
-behaviour). **Not** validated on physical FujiNet hardware.
+behaviour). Validated on physical FujiNet hardware (2026-06-27, tank_net demo).
 
 ### Usage pattern
 
@@ -703,9 +705,9 @@ The script paths assume Altirra 4.50 at the location in `$ALTIRRA_DIR`; adjust f
 
 The FujiNet **Netstream** realtime data path is validated end-to-end against a real FujiNet
 responder — the **fujinet-pc firmware** bridged to Altirra by the **NetSIO hub** — plus a UDP
-**echo peer**. This is *emulator / FujiNet-PC* validation, **not** physical FujiNet hardware
-(which remains future work; see Current Limits). Stage 9R.3 proved a byte-perfect bidirectional
-round trip this way.
+**echo peer**. This is the *emulator / FujiNet-PC* validation; physical FujiNet hardware was
+since validated separately (2026-06-27, tank_net demo). Stage 9R.3 proved a byte-perfect
+bidirectional round trip this way.
 
 The stack (Atari side → network):
 
@@ -745,6 +747,6 @@ with `EDGE_NETSTREAM_TEST_HOOKS`) dumps the serial-IRQ counters if the TX path r
 - display layouts still use the Atari mode enum (`atari::Mode`) as the concrete backend token, supplied
   through the `engine::display::traits` seam; a second backend would add its own mode type and traits
 - the first backend is Atari, so some examples necessarily use Atari terminology
-- the Atari FujiNet session lane is optionally wired to fujinet-lib (OFF by default); the realtime lane is wired to the EDGE-owned Netstream path, emulator-validated (fujinet-pc/NetSIO/Altirra/Docker peer) but not yet validated on physical FujiNet hardware
+- the Atari FujiNet session lane is optionally wired to fujinet-lib (OFF by default); the realtime lane is wired to the EDGE-owned Netstream path, validated on the emulator stack (fujinet-pc/NetSIO/Altirra/Docker peer) AND on physical FujiNet hardware (2026-06-27, tank_net demo)
 
 That is expected at this stage of the project. The docs in this folder are organized so the general engine shape stays clear even where the concrete implementation is currently Atari-first.

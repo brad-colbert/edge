@@ -111,7 +111,7 @@ parameter, not a linear tier progression.
   - Realtime lane (fixed 16-byte packets, no wire framing; unframed stream, so
     the consumer reassembles units): wired to an EDGE-owned FujiNet Netstream
     path; validated against the fujinet-pc emulator stack (NetSIO + Altirra +
-    Docker UDP peer); **not** validated on physical FujiNet hardware. Exercised by
+    Docker UDP peer) **and on physical FujiNet hardware** (2026-06-27, tank_net demo). Exercised by
     the `edge_net_realtime_meter` demo + `tools/net/edge_realtime_peer.py` peer; a
     build-time TX-clock override (`EDGE_NETSTREAM_FLAGS`) is available for hardware
     bring-up (internal-clock value experimental, default external clock unchanged)

@@ -65,8 +65,9 @@ Networking (`engine/net.h`):
 - **Realtime lane** (`Game::net.realtime`) wired to the FujiNet Netstream path
   (EDGE-owned assembly, fixed 16-byte packets, no wire framing — the consumer
   reassembles units from the byte stream). The data path is validated against the
-  fujinet-pc emulator stack (NetSIO + Altirra + Docker UDP peer, Mode B); it is
-  **not yet validated on physical FujiNet hardware** (see `docs/DECISIONS.md` ADR-033)
+  fujinet-pc emulator stack (NetSIO + Altirra + Docker UDP peer, Mode B) **and on
+  physical FujiNet hardware** (2026-06-27, via the `tank_net` demo; see
+  `docs/DECISIONS.md` ADR-033)
 - a build-time TX-clock override `EDGE_NETSTREAM_FLAGS` exists for hardware bring-up
   (default `0x26` external clock = emulator-validated; `0x22` = internal/local POKEY
   clock, **experimental, not yet validated**)
@@ -77,9 +78,9 @@ Networking (`engine/net.h`):
 Planned or intentionally deferred:
 
 - broader non-Atari backends
-- physical FujiNet hardware validation of the realtime lane
 - realtime-lane wire framing / resync / checksum / sequence (boundaries are
-  currently implicit and cannot recover from lost bytes)
+  currently implicit and cannot recover from lost bytes — so firmware drops must be
+  whole-frame aligned, as validated with the tank_net demo)
 - a real gameplay demo over the realtime lane
 
 ## Example program shape

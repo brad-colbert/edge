@@ -704,9 +704,10 @@ are available.
 > - **Realtime lane** — wired to an EDGE-owned FujiNet Netstream path (fixed
 >   16-byte packets, all-or-nothing TX/RX, **no wire framing**; no fujinet-lib).
 >   The data path is validated against the fujinet-pc emulator stack
->   (NetSIO + Altirra + Docker UDP peer, Mode B); it is **not yet validated on
->   physical FujiNet hardware**. Packet boundaries are implicit and cannot
->   recover from lost bytes. See `docs/DECISIONS.md` ADR-033.
+>   (NetSIO + Altirra + Docker UDP peer, Mode B) **and on physical FujiNet
+>   hardware** (2026-06-27, tank_net demo). Packet boundaries are implicit and cannot
+>   recover from lost bytes (so firmware drops must be whole-frame aligned).
+>   See `docs/DECISIONS.md` ADR-033.
 > - `net_dual_lane_demo` compiles and illustrates the intended flow; it does
 >   not perform real network I/O unless the session option is enabled, and no
 >   real-gameplay realtime demo exists yet.

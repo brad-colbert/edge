@@ -349,12 +349,26 @@ private:
 
 namespace ndetail {
 
-template <typename Platform, bool Enabled>
+template <typename...> using void_t = void;
+
+// Realtime packet size: GameConfig::realtime_packet_bytes if the demo defines it, else
+// the engine default. Lets a demo widen its realtime frame (e.g. to pack several
+// entities per packet) without touching the engine default or other lane users.
+template <typename C, typename = void>
+struct realtime_packet_bytes_or_default {
+    static constexpr u16 value = default_realtime_packet_bytes;
+};
+template <typename C>
+struct realtime_packet_bytes_or_default<C, void_t<decltype(C::realtime_packet_bytes)>> {
+    static constexpr u16 value = C::realtime_packet_bytes;
+};
+
+template <typename Platform, typename GameConfig, bool Enabled>
 struct realtime_facet { };
 
-template <typename Platform>
-struct realtime_facet<Platform, true> {
-    RealtimeLane<Platform> realtime{};
+template <typename Platform, typename GameConfig>
+struct realtime_facet<Platform, GameConfig, true> {
+    RealtimeLane<Platform, realtime_packet_bytes_or_default<GameConfig>::value> realtime{};
 };
 
 template <typename Platform, bool Enabled>
@@ -371,7 +385,7 @@ struct session_facet<Platform, true> {
 template <typename Platform, typename GameConfig,
           bool HasRealtime = engine::caps_of_t<Platform>::has_network_realtime,
           bool HasSession  = engine::caps_of_t<Platform>::has_network_session>
-struct NetManager : ndetail::realtime_facet<Platform, HasRealtime>,
+struct NetManager : ndetail::realtime_facet<Platform, GameConfig, HasRealtime>,
                     ndetail::session_facet<Platform, HasSession> {
     void close_all() {
         if constexpr (HasRealtime) this->realtime.close();

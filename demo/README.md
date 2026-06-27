@@ -217,41 +217,53 @@ complete), ~5.6 KB on the wire. `EDGE_TANK_NET_HOST`/`PORT` are baked into the R
 The live build still has no collision/terrain/bullets/realtime-lane/gameplay
 networking; the session is only used to load assets before gameplay.
 
-# Networked two-tank demo (`atari_tank_net_demo.xex`)
+# Networked multi-tank demo (`atari_tank_net_demo.xex`)
 
 A "bigger tank demo" ([`tank_net/`](tank_net/)): the same Stage-4 joystick tank
-(local player) **plus a second, network-driven adversary tank** whose authoritative
+(local player) **plus three network-driven adversary tanks** whose authoritative
 state (world position, heading, speed) is streamed from a Python UDP server at
-**~10 Hz over the realtime lane** (`Game::net.realtime`, fixed 16-byte packets). The
+**~10 Hz over the realtime lane** (`Game::net.realtime`). The
 link is **bidirectional** — the Atari streams its own tank state back so the
-server's adversary AI can **react (chase / avoid)**. It reuses the original tank's
-motion/camera/shapes/assets verbatim (no fork); only the network glue and the second
-sprite are new.
+server's adversary AI can **react (chase / avoid / patrol)**. It reuses the original
+tank's motion/camera/shapes/assets verbatim (no fork); only the network glue and the
+extra sprites are new.
 
-Between the 10 Hz snapshots the client **dead-reckons** the adversary forward with
+All three adversaries are packed into **one 32-byte packet per tick** (status bits
+mark which records are live), so the downstream packet rate is `--hz`, not `3 × --hz`
+— the mitigation for a firmware pacing/backpressure issue that surfaced at higher
+rates (the lane carries a per-demo 32-byte frame via `GameConfig::realtime_packet_bytes`;
+see [`docs/HANDOFF_netstream_downstream_pacing.md`](../docs/HANDOFF_netstream_downstream_pacing.md)).
+
+Between the 10 Hz snapshots the client **dead-reckons** every adversary forward with
 its last-known heading + speed (the same Q12.4 motion table the player uses) and
 **snaps** to each new authoritative position (ADR-015: the host sends state, not
 input). The server mirrors that motion model, so the snaps are visually invisible.
 The snap site is the marked seam for a future ease-in interpolation.
 
-**Two tanks, no multiplexer.** The player (slot 0) and adversary (slot 1) are pinned
-to dedicated hardware players via the engine **direct-bind** mode
+**Four tanks, no multiplexer.** The player (slot 0) and the three adversaries (slots
+1–3) are pinned to dedicated hardware players via the engine **direct-bind** mode
 (`GameConfig::sprite_binding = engine::SpriteBinding::Direct`; see
-[`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) "Sprites"). A chasing adversary
-crosses the player in Y constantly; the multiplexer's per-frame Y-sort would swap
-their players/colours for a frame, so direct binding (fixed slot→player) is required
-here, not the multiplexer.
+[`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) "Sprites"). 1 player + 3 adversaries
+== the 4 hardware players, so direct-bind stays a single zone. Chasing adversaries
+cross the player in Y constantly; the multiplexer's per-frame Y-sort would swap their
+players/colours for a frame, so direct binding (fixed slot→player) is required here,
+not the multiplexer.
 
-The local player starts in the **upper-right** of the world; the adversary starts
-**lower-left** (the server's `--start`). The player has **wall collision**: GTIA
+The local player starts in the **upper-right** of the world; the adversaries start in
+the other corners (the server's `--starts`). The player has **wall collision**: GTIA
 player→playfield collision (P0PF) is read each frame, and a hit on the white wall
 colour (COLPF0) snaps the player back to its last wall-free position. This is
 reliable specifically because of direct binding — logical slot 0 is always hardware
-player 0, so the P0PF mask is never reassigned by a multiplexer. (The adversary is
-not wall-collided; its motion is the server's authority.)
+player 0, so the P0PF mask is never reassigned by a multiplexer. (The adversaries are
+not wall-collided; their motion is the server's authority.)
 
-> The realtime lane is **emulator-validated only** (Altirra + NetSIO + Docker peer),
-> not yet physical-FujiNet validated — this demo is a prototype for that environment.
+> The realtime lane is validated on the emulator stack (Altirra + NetSIO + Docker peer)
+> **and on physical FujiNet hardware** (2026-06-27, this demo).
+>
+> **Requires fujinet-firmware v1.6.2 or greater** — the downstream path depends on the
+> firmware's whole-frame-aligned drop-oldest (added in 1.6.2). Older firmware drops
+> individual bytes from the unframed stream and permanently desyncs the fixed-size
+> deframer under load.
 
 ## Build
 
@@ -269,11 +281,15 @@ Without `EDGE_ATARI_FUJINET_REALTIME_NETSTREAM=ON` the realtime HAL is the **stu
 ## Server (Python stdlib only)
 
 ```sh
-python3 tools/net/edge_tank_adversary.py --mode chase --hz 10 --start 8,376 --decode
-#   --mode chase|avoid|patrol   --speed <steps/frame>   --speed-scale <EDGE_TANK_SPEED_SCALE>
+python3 tools/net/edge_tank_adversary.py --hz 10 --decode
+#   --count <N>                 number of adversaries (default 3 = the demo's kAdvCount)
+#   --modes chase,avoid,patrol  per-adversary AI (falls back to --mode for extras)
+#   --starts 8,376;624,376;624,16   per-adversary start x,y (falls back to --start)
+#   --speed <steps/frame>   --speed-scale <EDGE_TANK_SPEED_SCALE>
 ```
 
-The server learns the Atari's address from its first inbound packet (or pass
+By default the three adversaries run **mixed AI** (chase / avoid / patrol) from three
+corners. The server learns the Atari's address from its first inbound packet (or pass
 `--target-host/--target-port`). Keep `--speed-scale` equal to the demo's
 `EDGE_TANK_SPEED_SCALE` (default 3) so the server's motion matches the client's
 dead reckoning. See [`tools/net/README.md`](../tools/net/README.md) and the Mode B
@@ -284,13 +300,13 @@ network at `172.30.0.2:9000`).
 
 | Observation | Proves |
 |---|---|
-| Two distinctly-coloured tanks (brassy player, red adversary) | direct-bind: slot 0→player 0, slot 1→player 1 |
-| The adversary moves under server control, smooth between the 10 Hz updates | dead-reckon fills the ~6 inter-packet frames |
-| Its silhouette matches its heading as it turns | heading→silhouette on the received state |
-| Driving the player makes the adversary chase/avoid | bidirectional link (server consumes the Atari's TX) |
-| The adversary crosses the player in Y with **no colour flip** | direct binding, not the Y-sort multiplexer |
+| Four distinctly-coloured tanks (brassy player; pink/purple/cyan adversaries) | direct-bind: slot i→player i for slots 0–3 |
+| Each adversary moves under server control, smooth between the 10 Hz updates | per-adversary dead-reckon fills the ~6 inter-packet frames |
+| Their silhouettes match their headings as they turn | heading→silhouette on each received state |
+| Driving the player makes the adversaries chase/avoid/patrol | bidirectional link + per-adversary AI (server consumes the Atari's TX) |
+| Adversaries cross the player (and each other) in Y with **no colour flip** | direct binding, not the Y-sort multiplexer |
 | Driving the player into a wall stops it; it never passes through | GTIA P0PF wall collision (white/COLPF0) + revert |
-| Adversary leaves the viewport → hidden; re-enters at the right spot | drawn in the player's camera frame |
+| An adversary leaves the viewport → hidden; re-enters at the right spot | each drawn in the player's camera frame |
 | Red border when built without the netstream flag / with no peer | stub-HAL / no-transport indication |
 
 # Native bitmap primitive-drawing demo (`native_gfx.xex`)

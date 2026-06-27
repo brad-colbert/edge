@@ -8,7 +8,10 @@
 // 9Q.2 ABI). The full path is wired: LIFECYCLE (open->init->begin, close->end, active,
 // poll(status), last_error) AND the byte<->packet DATA PATH (send_nb/recv_nb — fixed 16-byte
 // all-or-nothing; see below). Validated against fujinet-pc + NetSIO + Altirra + a Docker UDP
-// peer (Mode B). NOT yet validated on physical FujiNet hardware.
+// peer (Mode B), AND on physical FujiNet hardware (2026-06-27, via the tank_net demo).
+// Requires fujinet-firmware >= v1.6.2: the downstream path needs the firmware's
+// whole-frame-aligned drop-oldest (older firmware byte-drops the unframed stream and
+// desyncs this marker-less deframer under load).
 //
 // Why a template: the netstream-ON unit tests build under mos-sim where SIOV / the OS
 // vector-page + POKEY + IRQEN writes in begin cannot execute, and add_engine_test targets
@@ -45,17 +48,24 @@ using engine::net::NetStatus;
 //
 // Values match the proven-working upstream reference
 // (fujinet-atari-netstream/examples/udp-sequence/atari_udp_sequence.c: flags 0x26, baud 31250),
-// validated against fujinet-pc + NetSIO in 9R.3 (Mode B); NOT yet validated on physical FujiNet
-// hardware. The earlier 0x20 / 19200 (internal TX clock) never transmitted: FujiNet/NetSIO drives
+// validated against fujinet-pc + NetSIO in 9R.3 (Mode B) and on physical FujiNet hardware
+// (2026-06-27, tank_net demo). The earlier 0x20 / 19200 (internal TX clock) never transmitted: FujiNet/NetSIO drives
 // an EXTERNAL transmit clock, so TX_EXT (0x04) is required or POKEY never clocks the serial output
 // and the output-ready IRQ never fires.
 //
-// kNetstreamNominalBaud: a BaudTable entry (31250 = row 0x7A12, AUDF3=21).
+// kNetstreamNominalBaud: a BaudTable entry. Default 31250 (row 0x7A12, AUDF3=21 ->
+//   ~31960 bps). Overridable at build time to a different table row, e.g.
+//   -DEDGE_NETSTREAM_NOMINAL_BAUD=49700 (row 0xC224, AUDF3=11 -> ~49716 bps, the closest
+//   entry to 50k). Must be an exact BaudTable nominal or ns_select_baud misses and init
+//   fails (see tests/backends/atari/test_netstream_init_prepare.cpp).
 // kNetstreamFlags: UDP (bit0=0) + UDP-seq (0x20, the lane is open_udp_seq) + TX external clock
 //   (0x04) + register (0x02). RX stays internal (0x08 clear). The PAL bit 0x10 is left 0 in the
 //   seed — ns_init_prepare derives it from DetectPAL; do NOT pre-set it. The handler maps
 //   flags & 0x0c == 0x04 -> SKCTL 0x10 (RX int, TX ext).
-inline constexpr u16 kNetstreamNominalBaud = 31250;
+#ifndef EDGE_NETSTREAM_NOMINAL_BAUD
+#define EDGE_NETSTREAM_NOMINAL_BAUD 31250
+#endif
+inline constexpr u16 kNetstreamNominalBaud = EDGE_NETSTREAM_NOMINAL_BAUD;
 // Default 0x26 (external TX clock) is the proven-working value. Overridable at build
 // time to experiment with clock modes, e.g. -DEDGE_NETSTREAM_FLAGS=0x22 selects an
 // INTERNAL TX clock (bit 0x04 clear): POKEY self-clocks the serial output instead of
@@ -194,25 +204,27 @@ struct NetstreamRealtimeAdapterT {
         return NetStatus::Ok;
     }
 
-    // Fixed realtime packet size (engine::net::default_realtime_packet_bytes). The lane only
-    // ever calls send_nb/recv_nb with exactly this many bytes; any other nonzero size is a
-    // defensive InvalidArgument.
-    static constexpr u16 kPacketBytes = 16;
+    // Max realtime packet the adapter accepts in one all-or-nothing send/recv. The LANE
+    // drives the actual size (its compile-time PacketBytes, e.g. 16 or a demo's 32); this
+    // adapter just honours that size, bounded by the 128-byte NS hardware rings
+    // (NS_OUTPUT_BUFSIZE / NS_INPUT_BUFSIZE). Any size beyond the ring is a defensive
+    // InvalidArgument.
+    static constexpr u16 kMaxPacketBytes = 128;
 
-    // Stage 9R.2: ALL-OR-NOTHING TX. Send a whole 16-byte packet or nothing -- the engine
-    // RealtimeLane drops the packet only on Ok, retries on WouldBlock, so a partial write
-    // would corrupt the implicit fixed-length packet boundary. Pre-check tx_space() so the
-    // 16 byte sends cannot hit a full ring (the output IRQ only DRAINS the ring, so free
+    // Stage 9R.2: ALL-OR-NOTHING TX. Send a whole `size`-byte packet or nothing -- the
+    // engine RealtimeLane drops the packet only on Ok, retries on WouldBlock, so a partial
+    // write would corrupt the implicit fixed-length packet boundary. Pre-check tx_space()
+    // so the byte sends cannot hit a full ring (the output IRQ only DRAINS the ring, so free
     // space can only grow during the loop). send_nb/recv_nb do NOT touch state.last_error
     // (it stays owned by open/poll, keeping init/serial errors distinct from backpressure).
     static NetStatus realtime_send_nb(const void* bytes, u16 size) {
         if (!state().active) return NetStatus::Closed;
         if (bytes == nullptr && size > 0) return NetStatus::InvalidArgument;
         if (size == 0) return NetStatus::Ok;
-        if (size != kPacketBytes) return NetStatus::InvalidArgument;
-        if (Ops::tx_space() < kPacketBytes) return NetStatus::WouldBlock;  // write nothing
+        if (size > kMaxPacketBytes) return NetStatus::InvalidArgument;
+        if (Ops::tx_space() < size) return NetStatus::WouldBlock;  // write nothing
         const u8* p = static_cast<const u8*>(bytes);
-        for (u16 i = 0; i < kPacketBytes; ++i) {
+        for (u16 i = 0; i < size; ++i) {
             if (Ops::send_byte(p[i]) != 0) {
                 // Impossible under the concurrency model (free space only grows after the
                 // pre-check); a bug/race. Bytes may already have been accepted, so this is
@@ -220,20 +232,20 @@ struct NetstreamRealtimeAdapterT {
                 return NetStatus::TransportError;
             }
         }
-        return NetStatus::Ok;  // exactly 16 bytes committed, in order
+        return NetStatus::Ok;  // exactly `size` bytes committed, in order
     }
 
-    // Stage 9R.2: FULL-PACKET RX. Deliver a whole 16-byte packet or nothing. Pre-check
-    // bytes_avail() so the 16 reads cannot underrun (the input IRQ only ADDS bytes; this is
-    // the only consumer). Bytes beyond 16 stay in the RX ring for the next drain iteration.
+    // Stage 9R.2: FULL-PACKET RX. Deliver a whole `size`-byte packet or nothing. Pre-check
+    // bytes_avail() so the reads cannot underrun (the input IRQ only ADDS bytes; this is the
+    // only consumer). Bytes beyond `size` stay in the RX ring for the next drain iteration.
     static NetStatus realtime_recv_nb(void* bytes, u16 size) {
         if (!state().active) return NetStatus::Closed;
         if (bytes == nullptr && size > 0) return NetStatus::InvalidArgument;
         if (size == 0) return NetStatus::Ok;
-        if (size != kPacketBytes) return NetStatus::InvalidArgument;
-        if (Ops::bytes_avail() < kPacketBytes) return NetStatus::WouldBlock;  // consume nothing
+        if (size > kMaxPacketBytes) return NetStatus::InvalidArgument;
+        if (Ops::bytes_avail() < size) return NetStatus::WouldBlock;  // consume nothing
         u8* p = static_cast<u8*>(bytes);
-        for (u16 i = 0; i < kPacketBytes; ++i) {
+        for (u16 i = 0; i < size; ++i) {
             const u16 packed = Ops::recv_packed();   // low = data, high = status (0 ok/1 empty)
             if ((packed >> 8) != 0) {
                 // Impossible after the pre-check (only this consumer drains RX); a bug/race.
@@ -241,7 +253,7 @@ struct NetstreamRealtimeAdapterT {
             }
             p[i] = static_cast<u8>(packed & 0xff);
         }
-        return NetStatus::Ok;  // exactly 16 bytes copied
+        return NetStatus::Ok;  // exactly `size` bytes copied
     }
 
     static NetError realtime_last_error() { return state().last_error; }
