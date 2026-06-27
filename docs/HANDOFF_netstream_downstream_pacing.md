@@ -157,3 +157,35 @@ adding constant latency. The demo's real operating rate (10 Hz) is unaffected �
 keep the inbound buffer **shallow** instead of letting it fill — drain `rx_ring` to the
 freshest bytes each service pass, shrink `NETSTREAM_RX_RING_SIZE`, or drop-oldest
 sooner. The goal is to turn the hz=30/60 "bounded but ~2 s" into "bounded and small."
+
+## Receive path / backpressure (the Atari is NOT the limiter)
+
+A natural question is whether the Atari reads too slowly and causes the backpressure.
+It does not. The EDGE receive path has two stages, neither gated at the 10 Hz
+send rate:
+
+1. **Wire → NS input ring: IRQ-driven, per byte.** `SerialInputIrqHandler` (VSERIN
+   `$020A`, in `fujinet_netstream_handler.S`) pulls every byte off POKEY SERIN the
+   instant it arrives, asynchronously — already as-fast-as-possible, independent of the
+   main loop.
+2. **NS ring → app: once per frame (~60 Hz NTSC), full drain.** `frame_step` calls
+   `poll()` then `while (recv(pkt))`; both drain to `WouldBlock`, so every frame empties
+   the 128-byte NS input ring into the engine ring and then the engine ring into the app.
+
+So the Atari accepts bytes at **full wire speed and applies no backpressure on the
+wire** — it pulls everything the firmware sends, when it sends it. The firmware
+`rx_ring` fills purely because UDP-in > `pace_to_atari`-out, and that pace is a *fixed
+timer* (520 µs/byte) **upstream of the SIO wire**. The Atari is downstream of the pace,
+emits no credit upstream, and so cannot drain that buffer faster. "Read faster to
+relieve backpressure" is a credit/flow-control idea; this link is timer-paced, not
+demand-paced — hence the fix is firmware-side.
+
+**The one read-side risk — only under a future fast firmware.** The main-loop drain
+just has to keep the **128-byte NS input ring** (4 × 32-byte frames) from overflowing
+between 60 Hz polls; if it overflows, the RX IRQ drops bytes → **byte misalignment** →
+the fixed-32-byte deframer desyncs (see "Drop alignment" — the EDGE Atari receiver has
+no resync marker). At the current pace (~32 B ≈ 1 frame per 16.6 ms) there is ~4×
+margin, so no risk today. **But if a firmware fix makes downstream much faster or
+burstier, ensure a burst cannot exceed ~128 bytes between the Atari's 60 Hz drains** —
+otherwise pace the burst, enlarge the Atari NS ring, or poll more than once per frame on
+the EDGE side.
