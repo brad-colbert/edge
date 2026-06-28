@@ -475,10 +475,21 @@ if(EDGE_BUILD_DEMO)
     endif()
 
     # Dual-lane EDGE net API usage demo (stubbed seam; no real transport wiring).
-    add_executable(net_dual_lane_demo demo/net_dual_lane/net_dual_lane.cpp)
+    # When EDGE_ATARI_FUJINET_REALTIME_NETSTREAM is ON, the engine's RealtimeLane
+    # is compiled against the real _ns_* adapter (the define is global via
+    # add_compile_definitions above), so link the .S handlers to resolve those
+    # symbols — same pattern as edge_net_realtime_meter / atari_tank_net_demo.
+    set(NET_DUAL_LANE_SRC demo/net_dual_lane/net_dual_lane.cpp)
+    if(EDGE_ATARI_FUJINET_REALTIME_NETSTREAM)
+        list(APPEND NET_DUAL_LANE_SRC
+            engine/platform/atari/fujinet_netstream_realtime_abi.s
+            engine/platform/atari/fujinet_netstream_handler.S)
+    endif()
+    add_executable(net_dual_lane_demo ${NET_DUAL_LANE_SRC})
     target_compile_options(net_dual_lane_demo PRIVATE
         -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra)
-    target_include_directories(net_dual_lane_demo PRIVATE ${CMAKE_SOURCE_DIR})
+    target_include_directories(net_dual_lane_demo PRIVATE
+        ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/engine/platform/atari)
     set_target_properties(net_dual_lane_demo PROPERTIES OUTPUT_NAME "net_dual_lane_demo.xex")
     target_link_options(net_dual_lane_demo PRIVATE
         "LINKER:--Map=$<TARGET_FILE_DIR:net_dual_lane_demo>/net_dual_lane_demo.map")
@@ -572,6 +583,127 @@ if(EDGE_BUILD_DEMO)
         target_compile_definitions(atari_tank_net_demo PRIVATE EDGE_NETSTREAM_NOMINAL_BAUD=${EDGE_NETSTREAM_NOMINAL_BAUD})
     endif()
 
+    # Dual-lane tank demo (atari_tank_dual_net_demo.xex). Uses BOTH networking lanes
+    # SEQUENTIALLY: Phase 1 downloads the playfield over the TCP/session lane (like
+    # the tank LiveSession mode), then CLOSES it and streams 3 adversaries over the
+    # UDP/realtime lane (like tank_net). Reuses demo/tank + demo/tank_net headers via
+    # the include path.
+    #
+    # Phase-1 asset source, target-private (mirrors EDGE_TANK_ASSET_SOURCE), default
+    # SimulatedNetwork so the whole download->handoff->stream sequence builds and runs
+    # with NO fujinet-lib and NO server:
+    #   EDGE_TANK_DUAL_ASSET_SOURCE = Embedded | SimulatedNetwork | LiveSession
+    set(EDGE_TANK_DUAL_ASSET_SOURCE "SimulatedNetwork" CACHE STRING
+        "Dual-net demo Phase-1 asset source: Embedded | SimulatedNetwork | LiveSession")
+    set_property(CACHE EDGE_TANK_DUAL_ASSET_SOURCE PROPERTY STRINGS
+        Embedded SimulatedNetwork LiveSession)
+    if(EDGE_TANK_DUAL_ASSET_SOURCE STREQUAL "Embedded")
+        set(_TDN_SRC 0)
+    elseif(EDGE_TANK_DUAL_ASSET_SOURCE STREQUAL "SimulatedNetwork")
+        set(_TDN_SRC 1)
+    elseif(EDGE_TANK_DUAL_ASSET_SOURCE STREQUAL "LiveSession")
+        set(_TDN_SRC 2)
+    else()
+        message(FATAL_ERROR "EDGE_TANK_DUAL_ASSET_SOURCE must be Embedded, SimulatedNetwork, or LiveSession")
+    endif()
+
+    # Private embedded-asset gen headers (Embedded + SimulatedNetwork Phase 1 only;
+    # LiveSession receives them over the wire). Reuses the tank asset sources.
+    set(TANK_DUAL_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated/tank_dual_net)
+    set(TANK_DUAL_GEN_HEADERS "")
+    if(NOT _TDN_SRC EQUAL 2)
+        set(_td_tileset ${TANK_DUAL_GEN_DIR}/tank_tileset.gen.h)
+        add_custom_command(
+            OUTPUT ${_td_tileset}
+            COMMAND ${CMAKE_COMMAND}
+                    -DINPUT=${TANK_ASSET_SRC_DIR}/tank_tileset.fnt
+                    -DOUTPUT=${_td_tileset}
+                    -DSYMBOL=tileset_bytes -DNAMESPACE=demo::tank::assets
+                    -P ${GENERATE_CHARSET_HEADER_SCRIPT}
+            DEPENDS ${TANK_ASSET_SRC_DIR}/tank_tileset.fnt ${GENERATE_CHARSET_HEADER_SCRIPT}
+            COMMENT "Generating tank_dual_net tank_tileset.gen.h" VERBATIM)
+        list(APPEND TANK_DUAL_GEN_HEADERS ${_td_tileset})
+        foreach(C 0_0 1_0 0_1 1_1)
+            set(_h ${TANK_DUAL_GEN_DIR}/chunk_${C}.gen.h)
+            add_custom_command(
+                OUTPUT ${_h}
+                COMMAND ${CMAKE_COMMAND}
+                        -DINPUT=${TANK_ASSET_SRC_DIR}/chunk_${C}.scr
+                        -DOUTPUT=${_h}
+                        -DSYMBOL=chunk_${C} -DNAMESPACE=demo::tank::assets -DEXPECT_BYTES=960
+                        -P ${GENERATE_BYTES_HEADER_SCRIPT}
+                DEPENDS ${TANK_ASSET_SRC_DIR}/chunk_${C}.scr ${GENERATE_BYTES_HEADER_SCRIPT}
+                COMMENT "Generating tank_dual_net chunk_${C}.gen.h" VERBATIM)
+            list(APPEND TANK_DUAL_GEN_HEADERS ${_h})
+        endforeach()
+    endif()
+
+    # Phase 2 realtime lane: link the EDGE-owned netstream .S handlers when the real
+    # adapter is enabled (the define is global via add_compile_definitions); otherwise
+    # the realtime HAL is a stub and Phase 2 shows a red "NO NET".
+    set(TANK_DUAL_SRC
+        demo/tank_dual_net/atari_tank_dual_net_demo.cpp ${TANK_DUAL_GEN_HEADERS})
+    if(EDGE_ATARI_FUJINET_REALTIME_NETSTREAM)
+        list(APPEND TANK_DUAL_SRC
+            engine/platform/atari/fujinet_netstream_realtime_abi.s
+            engine/platform/atari/fujinet_netstream_handler.S)
+        message(STATUS "atari_tank_dual_net_demo — realtime lane: real Netstream adapter")
+    else()
+        message(STATUS "atari_tank_dual_net_demo — realtime lane: STUB HAL "
+            "(Phase 2 adversaries disabled; set -DEDGE_ATARI_FUJINET_REALTIME_NETSTREAM=ON)")
+    endif()
+    add_executable(atari_tank_dual_net_demo ${TANK_DUAL_SRC})
+    target_compile_options(atari_tank_dual_net_demo PRIVATE
+        -std=c++20 -fno-exceptions -fno-rtti -O2 -Wall -Wextra)
+    target_include_directories(atari_tank_dual_net_demo PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/demo/tank
+        ${CMAKE_SOURCE_DIR}/demo/tank_net
+        ${CMAKE_SOURCE_DIR}/engine/platform/atari
+        ${TANK_DUAL_GEN_DIR})
+    target_compile_definitions(atari_tank_dual_net_demo PRIVATE
+        EDGE_TANK_DUAL_ASSET_SOURCE=${_TDN_SRC})
+    set_target_properties(atari_tank_dual_net_demo PROPERTIES
+        OUTPUT_NAME "atari_tank_dual_net_demo.xex")
+    target_link_options(atari_tank_dual_net_demo PRIVATE
+        "LINKER:--Map=$<TARGET_FILE_DIR:atari_tank_dual_net_demo>/atari_tank_dual_net_demo.map")
+
+    # Phase-1 LiveSession backend: link the real fujinet-lib (session lane) when
+    # enabled; otherwise the session HAL is a stub that reports Ok without connecting.
+    if(_TDN_SRC EQUAL 2)
+        if(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB)
+            target_include_directories(atari_tank_dual_net_demo PRIVATE ${EDGE_FUJINETLIB_INCLUDE_DIR})
+            target_link_libraries(atari_tank_dual_net_demo PRIVATE ${EDGE_FUJINETLIB_LIBRARY})
+            target_compile_definitions(atari_tank_dual_net_demo PRIVATE EDGE_TANK_LIVE_BACKEND_REAL=1)
+            message(STATUS "atari_tank_dual_net_demo LiveSession — session backend: RealFujinetLib")
+        else()
+            target_compile_definitions(atari_tank_dual_net_demo PRIVATE EDGE_TANK_LIVE_BACKEND_REAL=0)
+            message(WARNING
+                "atari_tank_dual_net_demo LiveSession selected WITHOUT the real fujinet-lib backend "
+                "(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB=OFF): Phase-1 session lane is a stub "
+                "that returns Ok without connecting. For real validation: "
+                "-DEDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON -DEDGE_FUJINETLIB_ROOT=<fujinetlib-llvm checkout>")
+        endif()
+        if(DEFINED EDGE_TANK_NET_HOST)
+            target_compile_definitions(atari_tank_dual_net_demo PRIVATE EDGE_TANK_NET_HOST="${EDGE_TANK_NET_HOST}")
+        endif()
+        if(DEFINED EDGE_TANK_NET_PORT)
+            target_compile_definitions(atari_tank_dual_net_demo PRIVATE EDGE_TANK_NET_PORT=${EDGE_TANK_NET_PORT})
+        endif()
+    endif()
+    if(DEFINED EDGE_TANK_HEADING)
+        target_compile_definitions(atari_tank_dual_net_demo PRIVATE EDGE_TANK_HEADING=${EDGE_TANK_HEADING})
+    endif()
+    if(DEFINED EDGE_NET_PEER_HOST)
+        target_compile_definitions(atari_tank_dual_net_demo PRIVATE EDGE_NET_PEER_HOST="${EDGE_NET_PEER_HOST}")
+    endif()
+    if(DEFINED EDGE_NET_PEER_PORT)
+        target_compile_definitions(atari_tank_dual_net_demo PRIVATE EDGE_NET_PEER_PORT=${EDGE_NET_PEER_PORT})
+    endif()
+    if(DEFINED EDGE_NETSTREAM_NOMINAL_BAUD)
+        target_compile_definitions(atari_tank_dual_net_demo PRIVATE EDGE_NETSTREAM_NOMINAL_BAUD=${EDGE_NETSTREAM_NOMINAL_BAUD})
+    endif()
+
     # Aggregate convenience target: build every always-available demo .xex with
     # one `cmake --build <dir> --target demos`. This is the stable name the
     # scripts/build_demos.sh wrapper and the README point at. The network-only
@@ -593,7 +725,8 @@ if(EDGE_BUILD_DEMO)
         arena_vbxe
         net_dual_lane_demo
         edge_net_realtime_meter
-        atari_tank_net_demo)
+        atari_tank_net_demo
+        atari_tank_dual_net_demo)
     return()
 endif()
 

@@ -391,6 +391,20 @@ public:
     static void run_until(Cb cb) { engine::run_until<Core>(cb); }
     static bool frame_overrun() { return engine::frame_overrun<Core>(); }
 
+    // Quiesce every subsystem so a program can hand control back to its host
+    // environment instead of running forever. Closes any open network lanes, then
+    // asks the platform to tear down whatever it brought up (interrupt handlers,
+    // display/graphics output, audio) so nothing keeps running — or references the
+    // program's memory — after control leaves it. The rationale for each step lives
+    // in the platform layer (Platform::hal::shutdown). Both pieces compile away on
+    // backends that lack them (e.g. the test build has no hal::shutdown).
+    static void shutdown() {
+        // Qualify the member (Core::net) so it is not parsed as the engine::net
+        // namespace, which is also in scope here.
+        if constexpr (requires { Core::net.close_all(); }) Core::net.close_all();
+        if constexpr (requires { Platform::hal::shutdown(); }) Platform::hal::shutdown();
+    }
+
     // Called by the loop once it has consumed a frame (after clearing frame_ready_),
     // so the backend can release any per-frame interrupt guard held across the VBI
     // exit. The Atari HAL clears its VBI re-entry guard here (closing the XITVBV

@@ -1,6 +1,6 @@
 # Hardware validation demo (`atari_hw_test.xex`)
 
-> **Applies to EDGE v0.7.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
+> **Applies to EDGE v0.8.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
 
 A minimal Atari 8-bit program that drives every engine subsystem at once, so
 the engine's live ANTIC path can be confirmed on real hardware / emulators
@@ -308,6 +308,27 @@ network at `172.30.0.2:9000`).
 | Driving the player into a wall stops it; it never passes through | GTIA P0PF wall collision (white/COLPF0) + revert |
 | An adversary leaves the viewport → hidden; re-enters at the right spot | each drawn in the player's camera frame |
 | Red border when built without the netstream flag / with no peer | stub-HAL / no-transport indication |
+
+# Dual-lane tank demo (`atari_tank_dual_net_demo.xex`)
+
+Uses **both** networking lanes **sequentially** in one program
+([`tank_dual_net/`](tank_dual_net/)): Phase 1 downloads the playfield map + tileset
+over the **reliable TCP/session lane** (like the `tank` LiveSession mode), then closes
+it and Phase 2 streams the three adversaries over the **UDP/realtime lane** (like
+`tank_net`). The two lanes are never used at once — the realtime lane reprograms POKEY
+serial for continuous streaming and can't coexist with fujinet-lib SIO traffic.
+
+Phase-1 source is a target-private `EDGE_TANK_DUAL_ASSET_SOURCE` switch
+(`SimulatedNetwork` default — builds with no fujinet-lib and no server; `Embedded`;
+`LiveSession` — real TCP, needs the llvm-mos fujinet-lib). One combined server
+(`tools/net/edge_tank_dual_server.py`) serves the assets over TCP then streams
+adversaries over UDP, and **loops** back to waiting on the client's "bye".
+
+**Any keypress quits cleanly** — the new engine teardown `Game::shutdown()`
+(`Core::shutdown` → `Platform::hal::shutdown`) closes both net lanes, restores the OS
+VBI vectors, disables the DLI, fully blanks P/M graphics (DMA **and** the GRAFP/GRAFM
+registers), silences POKEY, and restores the charset/scroll, then exits to DOS via
+`DOSVEC`. Full build/server/verify details in [`tank_dual_net/README.md`](tank_dual_net/README.md).
 
 # Native bitmap primitive-drawing demo (`native_gfx.xex`)
 

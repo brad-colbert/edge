@@ -57,6 +57,7 @@ VERSION = 0x02
 PATTERN = 0x5A
 TYPE_ADVERSARY = 0
 TYPE_PLAYER = 1
+TYPE_BYE = 2
 _MARKER = bytes((MAGIC, VERSION))
 
 # World clamp (nominal px) — the centre box from tank_motion.h clamp_world.
@@ -263,6 +264,23 @@ def main():
     if args.count < 1:
         ap.error("--count must be >= 1")
 
+    # Loop so a client BYE returns us to waiting for the next client (re-binds its own
+    # socket each round); Ctrl-C (interrupt) exits. Old clients that never send BYE
+    # simply stream until Ctrl-C, as before.
+    while run_adversary_server(args) == "bye":
+        print("client left — waiting for the next one...")
+
+
+def run_adversary_server(args, sock=None):
+    """Bind (or adopt) a UDP socket and stream adversary snapshots until interrupted.
+
+    Shared by main() and the combined dual-lane server (edge_tank_dual_server.py).
+    When `sock` is given it is used as-is (already bound, non-blocking) — the dual
+    server binds UDP BEFORE the TCP asset transfer so no early adversary packet is
+    lost during the TCP linger. Otherwise a fresh socket is bound to args.host:port.
+    Validation that main() performs with ap.error is repeated here via sys.exit so
+    the function is self-contained for either caller.
+    """
     def parse_xy(s):
         x, y = (int(v) for v in s.split(","))
         return x, y
@@ -271,11 +289,11 @@ def main():
         fallback_start = parse_xy(args.start)
         starts = [parse_xy(s) for s in args.starts.split(";") if s.strip()]
     except ValueError:
-        ap.error("--start/--starts must be 'x,y' nominal pixels (semicolon-separated for --starts)")
+        sys.exit("--start/--starts must be 'x,y' nominal pixels (semicolon-separated for --starts)")
     modes = [m for m in args.modes.split(",") if m.strip()]
     for m in modes:
         if m not in ("chase", "avoid", "patrol"):
-            ap.error("--modes entries must be chase|avoid|patrol")
+            sys.exit("--modes entries must be chase|avoid|patrol")
 
     fps = TV_FPS[args.tv]
     frames_per_tick = max(1, int(round(fps / args.hz)))
@@ -290,11 +308,24 @@ def main():
         mode = modes[i] if i < len(modes) else args.mode
         advs.append({"sim": TankSim(sx, sy, 0, table), "mode": mode})
 
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind((args.host, args.port))
-    sock.setblocking(False)
+    owns_sock = sock is None
+    if owns_sock:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((args.host, args.port))
+        sock.setblocking(False)
     reasm = Reassembler(DEFAULT_SIZE)
+
+    # Discard any datagrams buffered from a PREVIOUS client before streaming. A client
+    # quits by sending BYE several times (UDP is lossy); on a reused socket the extra
+    # BYEs — and stale player packets — would otherwise be read here and instantly end
+    # (or mislead) this fresh session. The new client streams continuously, so dropping
+    # whatever is already buffered at start is harmless.
+    try:
+        while True:
+            sock.recvfrom(2048)
+    except BlockingIOError:
+        pass
 
     target = (args.target_host, args.target_port) if args.target_host else None
     print("edge_tank_adversary: bound %s:%d advs=%d hz=%g fpt=%d steps/tick=%d scale=%d"
@@ -323,9 +354,10 @@ def main():
     lag_pkts = None
     lag_min = lag_max = None
     cli_ovf = 0          # latest client-reported RX-overflow-event count (echo_flags)
+    quitting = False     # set when the client sends a BYE (type 2): stop streaming
 
     try:
-        while True:
+        while not quitting:
             # Drain inbound player snapshots (learn target + track position).
             try:
                 while True:
@@ -335,6 +367,10 @@ def main():
                         if f is None:
                             bad += 1
                             continue
+                        if f["type"] == TYPE_BYE:
+                            print("client BYE (seq=%d) — ending stream" % f["seq"])
+                            quitting = True
+                            break
                         if f["type"] != TYPE_PLAYER:
                             continue
                         if player_last_seq is not None and \
@@ -362,8 +398,12 @@ def main():
                             print("rx player seq=%d pos=(%d,%d) hdg=%d spd=%d  %s ovf=%d"
                                   % (f["seq"], f["x"], f["y"], f["heading"], f["speed"],
                                      lag_s, cli_ovf))
+                    if quitting:
+                        break
             except BlockingIOError:
                 pass
+            if quitting:
+                break
 
             now = time.monotonic()
             if now >= next_send:
@@ -407,8 +447,14 @@ def main():
         print("\nsummary: %.1fs  bad=%d stale=%d resync=%dB" % (dur, bad, stale,
                                                                reasm.resync_bytes))
         print("shutting down.")
-    finally:
+        if owns_sock:
+            sock.close()
+        return "interrupt"
+    # Reached only when the client sent BYE. Leave a caller-owned socket open so the
+    # combined server can reuse it for the next round; close one we created ourselves.
+    if owns_sock:
         sock.close()
+    return "bye"
 
 
 if __name__ == "__main__":
