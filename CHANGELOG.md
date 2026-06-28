@@ -11,7 +11,28 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-06-27
+
 ### Added
+- **Dual-lane tank demo (`tank_dual_net`).** Uses **both** networking lanes
+  **sequentially** in one program: Phase 1 downloads the playfield map + tileset over
+  the reliable **TCP/session lane** (like the `tank` LiveSession mode), then closes it
+  and Phase 2 streams three adversaries over the **UDP/realtime lane** (like
+  `tank_net`). The lanes are never concurrent — the realtime lane reprograms POKEY
+  serial and can't coexist with fujinet-lib SIO traffic. Phase-1 source is a
+  target-private `EDGE_TANK_DUAL_ASSET_SOURCE` switch (`SimulatedNetwork` default —
+  builds with no fujinet-lib/server; `Embedded`; `LiveSession`). A combined server
+  (`tools/net/edge_tank_dual_server.py`) serves the assets over TCP then streams
+  adversaries over UDP and **loops back to Phase 1** on the client's "bye" packet.
+  Reuses the `tank` + `tank_net` headers verbatim. See [`demo/README.md`](demo/README.md).
+- **Engine subsystem teardown (`Game::shutdown()`).** `Core::shutdown` →
+  `Platform::hal::shutdown` lets a program hand control back to the OS/DOS cleanly
+  instead of running forever: closes any open net lanes, restores the OS VBI vectors
+  (`install_frame_isr` now saves them) and disables the DLI so a stale interrupt can't
+  fire into reclaimed RAM, blanks P/M graphics (P/M DMA **and** the GTIA `GRAFP`/`GRAFM`
+  registers — disabling DMA alone leaves a static vertical bar), silences POKEY, and
+  restores the charset/fine-scroll. Demos historically `run()` forever; `tank_dual_net`
+  is the first program that exits (keypress → `JMP (DOSVEC)`), which surfaced the gap.
 - **Per-demo realtime packet size** (`GameConfig::realtime_packet_bytes`, default 16)
   and a **build-overridable netstream nominal baud** (`EDGE_NETSTREAM_NOMINAL_BAUD`,
   default 31250 → AUDF3=21; e.g. 49700 selects the ~49.7k row). The Atari netstream HAL

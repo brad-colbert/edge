@@ -66,6 +66,7 @@ inline constexpr u8 kVersion = 0x02;
 inline constexpr u8 kPattern = 0x5A;
 inline constexpr u8 kTypeAdversary = 0;   // server -> client
 inline constexpr u8 kTypePlayer    = 1;   // client -> server
+inline constexpr u8 kTypeBye       = 2;   // client -> server: leaving; stop streaming
 inline constexpr u8 kStatusHaveState = 0x01;
 
 inline constexpr u16 rd16(u8 lo, u8 hi) { return static_cast<u16>(lo | (hi << 8)); }
@@ -158,6 +159,19 @@ inline TankPacket32 make_player_packet(const tank::TankState& s, u8 speed, u16 s
     p.rec[0].speed   = speed;
     wr16(p.echo_seq_lo, p.echo_seq_hi, echo_adv_seq);  // adv[0] last-applied seq
     p.echo_flags = echo_flags;                         // client health byte
+    p.pattern = kPattern;
+    return p;
+}
+
+// Build the "leaving" packet the client streams just before it closes the realtime
+// lane (type 2). The server stops streaming this client and returns to waiting for a
+// new asset-transfer request. Carries no state — just magic/version/type + seq.
+inline TankPacket32 make_bye_packet(u16 seq) {
+    TankPacket32 p{};
+    p.magic   = kMagic;
+    p.version = kVersion;
+    p.type    = kTypeBye;
+    wr16(p.seq_lo, p.seq_hi, seq);
     p.pattern = kPattern;
     return p;
 }

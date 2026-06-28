@@ -2,7 +2,7 @@
 
 # EDGE (Eight-bit Damned! Game Engine)
 
-> **Applies to EDGE v0.7.0** — see [CHANGELOG](./CHANGELOG.md) for version history.
+> **Applies to EDGE v0.8.0** — see [CHANGELOG](./CHANGELOG.md) for version history.
 
 EDGE is a C++20 game engine for constrained 6502-class systems, built around a small, deterministic, compile-time configured API instead of a heavy runtime.
 The project is Atari-first today, but its architecture is intended to support additional 6502-family platforms over time. Game code is written against portable engine subsystems while hardware details live behind a platform HAL and compile-time capability profiles.
@@ -74,6 +74,10 @@ Networking (`engine/net.h`):
 - the `net_dual_lane_demo` compiles and demonstrates the intended API shape; the
   `edge_net_realtime_meter` demo + host peer (`tools/net/edge_realtime_peer.py`)
   exercise and measure the realtime lane end to end
+- the **`tank_dual_net` demo uses both lanes sequentially in one program** — a TCP
+  session-lane playfield download, then a clean handoff to the realtime lane streaming
+  three adversaries — and exits cleanly to DOS on a keypress via `Game::shutdown()`
+  (see `demo/README.md`)
 
 Planned or intentionally deferred:
 
@@ -81,7 +85,6 @@ Planned or intentionally deferred:
 - realtime-lane wire framing / resync / checksum / sequence (boundaries are
   currently implicit and cannot recover from lost bytes — so firmware drops must be
   whole-frame aligned, as validated with the tank_net demo)
-- a real gameplay demo over the realtime lane
 
 ## Example program shape
 

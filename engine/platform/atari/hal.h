@@ -464,6 +464,15 @@ struct Hal {
         const uint16_t i =
             static_cast<uint16_t>(reinterpret_cast<uintptr_t>(&edge_imm_vbi_trampoline));
 
+        // Save the OS VBI vectors once, before the first swap, so shutdown() can
+        // restore them revision-independently (instead of hardcoding OS ROM
+        // addresses that differ across XL / AltirraOS / 400-800).
+        if (!s_vbi_installed_) {
+            s_saved_vvblki_[0] = os::VVBLKI[0]; s_saved_vvblki_[1] = os::VVBLKI[1];
+            s_saved_vvblkd_[0] = os::VVBLKD[0]; s_saved_vvblkd_[1] = os::VVBLKD[1];
+            s_vbi_installed_ = true;
+        }
+
         // NMIEN is write-only (reads return NMIST), so it can't be RMW'd: blank
         // all NMIs while the two-byte os::VVBLKI/VVBLKD vectors are swapped to avoid
         // a VBI firing on a half-written vector, then re-enable the VBI NMI. The DLI
@@ -482,6 +491,58 @@ struct Hal {
     // still running — sees the guard and skips instead of piling up and corrupting
     // the stack. See the edge_vbi_busy comment above.
     static void frame_consumed() { edge_vbi_busy = 0; }
+
+    // ── Teardown (reverse of init) ───────────────────────────────────────
+    //
+    // The engine normally runs forever; a program that instead returns to the OS/DOS
+    // must first quiesce everything init brought up, or it leaves the machine in a
+    // broken state — a stale VBI/DLI vector fires into the program's now-reclaimed
+    // RAM (crash), and live P/M DMA keeps painting leftover sprites over the OS
+    // screen (the visible band on the self-test screen). uninstall_frame_isr undoes
+    // install_frame_isr; shutdown() composes the full teardown.
+
+    // Restore the saved OS VBI vectors and re-enable the VBI NMI only, so the OS VBI
+    // keeps running (RTCLOK, shadow copies) but the engine's service no longer fires.
+    // Blank NMIEN during the two-byte vector swaps (same reason as install). No-op if
+    // the VBI was never installed (e.g. a program that exits before Core::init).
+    static void uninstall_frame_isr() {
+        if (!s_vbi_installed_) return;
+        *reg::NMIEN = 0x00;                          // blank NMIs during the swap
+        os::VVBLKI[0] = s_saved_vvblki_[0]; os::VVBLKI[1] = s_saved_vvblki_[1];
+        os::VVBLKD[0] = s_saved_vvblkd_[0]; os::VVBLKD[1] = s_saved_vvblkd_[1];
+        nmien_set(nmien::VBI);                       // OS VBI only; DLI bit cleared
+        edge_vbi_busy = 0;                           // drop the re-entry guard
+        s_vbi_installed_ = false;
+    }
+
+    // Quiesce every subsystem this HAL brought up so the caller can hand control back
+    // to the OS/DOS (e.g. JMP (DOSVEC)). Order: stop interrupts that vector into our
+    // code FIRST (DLI, then the VBI service), then the things those interrupts drove
+    // (P/M DMA, sound, charset, fine scroll). Network lanes are closed separately by
+    // the engine net facade before this. Never executed under mos-sim (no NMI/ANTIC).
+    static void shutdown() {
+        disable_raster();                            // DLI off (NMIEN = VBI only)
+        set_raster_vector(0xE4EE);                   // VDSLST -> OS no-op RTI (belt & braces)
+        uninstall_frame_isr();                       // stop engine VBI; restore OS VBI
+        sprite_dma_disable();                        // P/M DMA + GRACTL off
+        // Disabling P/M DMA stops ANTIC reloading the GTIA player/missile graphics
+        // registers, but GTIA keeps displaying their LAST latched byte on every
+        // scanline — a full-height vertical bar (GRACTL only gates the DMA reload,
+        // not the display). Zero them so no sprite remnant survives on the OS screen.
+        *reg::GRAFP0 = 0; *reg::GRAFP1 = 0; *reg::GRAFP2 = 0; *reg::GRAFP3 = 0;
+        *reg::GRAFM = 0;
+        for (uint8_t ch = 0; ch < 4; ++ch) silence_voice(ch);
+        *reg::AUDCTL = 0x00;                          // POKEY quiet
+        set_charset_base(0xE0);                      // ROM font
+        *reg::HSCROL = 0x00; *reg::VSCROL = 0x00;    // immediate VBI no longer flushes these
+        edge_fine_hscrol = 0; edge_fine_vscrol = 0;
+    }
+
+   private:
+    // Saved OS VBI vectors (VVBLKI/VVBLKD), captured by install_frame_isr.
+    inline static uint8_t s_saved_vvblki_[2] = {0, 0};
+    inline static uint8_t s_saved_vvblkd_[2] = {0, 0};
+    inline static bool    s_vbi_installed_   = false;
 };
 
 // Enable or disable playfield DMA. Call this on an opaque overlay screen to
