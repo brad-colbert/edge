@@ -363,6 +363,66 @@ public:
     void commit_pm(u8* sprite_base) {
         const u8 res = static_cast<u8>(res_);
 
+        // ── Direct-bind fast path ──
+        //
+        // With a fixed 1:1 binding (slot p drives player p for the whole frame, single
+        // zone) each player's strip holds ONLY its own sprite, so we can DRAW the new
+        // shape first and then clear just the residual bytes of last frame's footprint
+        // the new shape did not overwrite (draw-then-trim). Unlike the clear-all-then-
+        // draw-all path below, the strip is never momentarily blank while the commit is
+        // in progress — which matters when a backend may read a strip before the commit
+        // returns (the rationale is platform-specific; see ADR-022). We also skip a
+        // player's strip entirely when its shape and Y are unchanged (the strip keeps
+        // last frame's bytes). (The multiplex path below cannot draw-then-trim: a player
+        // there multiplexes several sprites that swap strips between frames, so all
+        // erases must precede all draws.)
+        if constexpr (Binding == SpriteBinding::Direct) {
+            for (u8 p = 0; p < MaxSprites; ++p) {
+                const bool shown = is_shown(sprites_[p]);
+                if (shown) {
+                    const LogicalSprite& s = sprites_[p];
+                    const u8 yb = (res_ == SpriteVerticalResolution::SingleLine)
+                                      ? s.y : static_cast<u8>(s.y >> 1);
+                    const u16 base = Platform::hal::sprite_strip_offset(res, p);
+                    const bool unchanged = prev_player_[p] == p && prev_y_[p] == yb &&
+                                           prev_height_[p] == s.height &&
+                                           prev_shape_[p] == s.shape;
+                    if (!unchanged) {
+                        // Draw new shape FIRST (no blank window)…
+                        for (u8 r = 0; r < s.height; ++r)
+                            sprite_base[base + yb + r] = s.shape[r];
+                        // …then clear only last frame's rows this shape did not cover.
+                        if (prev_player_[p] == p) {
+                            const u16 oend = static_cast<u16>(prev_y_[p]) + prev_height_[p];
+                            const u16 nend = static_cast<u16>(yb) + s.height;
+                            for (u16 r = prev_y_[p]; r < oend; ++r)
+                                if (r < yb || r >= nend) sprite_base[base + r] = 0;
+                        }
+                        prev_player_[p] = p;
+                        prev_y_[p]      = yb;
+                        prev_height_[p] = s.height;
+                        prev_shape_[p]  = s.shape;
+                    }
+                } else if (prev_player_[p] == p) {
+                    // Hidden this frame: erase last frame's footprint.
+                    const u16 base = Platform::hal::sprite_strip_offset(res, p);
+                    for (u8 r = 0; r < prev_height_[p]; ++r)
+                        sprite_base[base + prev_y_[p] + r] = 0;
+                    prev_player_[p] = kNotDrawn;
+                    prev_shape_[p]  = nullptr;
+                }
+            }
+            // Single-zone positions + colours. Direct keeps slot p on player p, so
+            // (unlike the multiplex path) there is no per-frame reassignment; the writes
+            // are cheap and idempotent.
+            for (u8 p = 0; p < kPlayers; ++p) {
+                Platform::hal::set_sprite_x(p, zones_[0].hpos[p]);
+                Platform::hal::set_color_pm(p, zones_[0].color[p]);
+            }
+            commit_missiles(sprite_base);
+            return;
+        }
+
         // 1. Erase each sprite's exact strip footprint from last frame — only the
         //    bytes it actually wrote, not the whole inter-sprite span. A player
         //    multiplexes several sprites at different Y, so the old per-player
@@ -560,6 +620,10 @@ private:
     u8 prev_player_[MaxSprites] = {};
     u8 prev_y_[MaxSprites]      = {};
     u8 prev_height_[MaxSprites] = {};
+
+    // Direct-bind skip-unchanged state: the shape last drawn into each slot's strip,
+    // so an unchanged shape+Y skips the redraw (the strip keeps last frame's bytes).
+    const u8* prev_shape_[MaxSprites] = {};
 
     // Buffered missile positions (no multiplexing, ADR-025).
     u8 missile_x_[kMissiles]      = {};
