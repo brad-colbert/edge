@@ -1005,6 +1005,23 @@ the sprites are distributed. Bookkeeping grew from 8 bytes to
 decision (incremental clear over full clear) stands; only the
 granularity changed.
 
+**Revision (2026-06-27): direct-bind draws before it clears.**
+For the direct-bind path (fixed 1:1 slot→player, single zone — ADR
+on SpriteBinding) each player's strip holds only its own sprite, so
+the commit now writes the new shape *first* and then trims only the
+residual bytes of last frame's footprint the new shape did not
+overwrite (draw-then-trim), instead of the original clear-all-then-
+draw-all. The strip is therefore never momentarily blank, so a commit
+that lands late — after the display beam has already reached the top
+of the screen, e.g. when the per-frame scroll patch consumes the
+vertical-blank budget first — can no longer drop an upper-screen
+sprite for a frame (the "blink" seen in the networked tank demo). The
+same path also skips redrawing a sprite whose shape and Y are unchanged
+(the strip keeps last frame's bytes; adds one prev-shape pointer per
+slot of bookkeeping). The multiplex path keeps clear-all-then-draw-all: a
+player there multiplexes several sprites that swap strips between
+frames, so all erases must precede all draws.
+
 ---
 
 ## ADR-023: P/M Resolution as Per-Screen Configuration

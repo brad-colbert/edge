@@ -17,6 +17,18 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
   default 31250 → AUDF3=21; e.g. 49700 selects the ~49.7k row). The Atari netstream HAL
   now honours any packet size up to the 128-byte NS ring (was a fixed 16).
 
+### Fixed
+- **Upper-screen sprite blink with direct-bind sprites.** On the baseline (hardware
+  P/M) backend, a direct-bound sprite high on the screen could vanish for a frame when
+  the per-frame sprite commit landed late in vertical blank (e.g. behind the scroll
+  patch on a scrolling screen) — the commit's clear-all-then-draw-all left the strip
+  momentarily blank as the display beam passed it. The direct-bind commit now
+  draws-before-clears (writes the new shape, then trims only the uncovered residual of
+  last frame's footprint), so the strip is never blank and a late commit can't drop the
+  sprite. It also skips redrawing a sprite whose shape and Y are unchanged. See
+  ADR-022 (2026-06-27 revision). Surfaced by the `tank_net` adversaries crossing above
+  the player.
+
 ### Changed
 - **`tank_net` packs all adversaries into one 32-byte realtime packet per tick**
   (downstream rate `--hz` instead of `3 × --hz`) — the mitigation for a downstream
