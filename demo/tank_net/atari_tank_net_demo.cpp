@@ -121,8 +121,13 @@ static tank::TankState g_tank = {
 };
 
 // GTIA player→playfield collision: P0PF bit 0 = COLPF0, the white wall colour
-// (tank_palette colpf0). A set bit means player 0's hull overlapped a wall.
-static constexpr u8 kWallColpfMask = 0x01;
+// (tank_palette colpf0). A set bit means player 0's hull overlapped white.
+// Depot icons (fuel/ammo) draw their white letters inside a coloured box
+// (COLPF1/COLPF2), so overlapping a depot also sets a colour bit; a plain wall is
+// pure white. Block only on pure-white contact so the tank drives over depots while
+// walls still stop it — derived from the live register, no depot tile codes hardcoded.
+static constexpr u8 kWallColpfMask     = 0x01;          // COLPF0 = walls (white)
+static constexpr u8 kDepotSurroundMask = 0x02 | 0x04;   // COLPF1|COLPF2 = depot box
 
 // Mutable game state bundled into ONE struct so it lands in main RAM (.bss), not
 // the near-full zero page — small separate statics get zp-promoted and overflow it
@@ -224,10 +229,12 @@ static void frame_step(const engine::Input& in) {
 
     // 2b. GTIA wall collision for player 0. The engine latched P0PF from last
     // frame's render; direct-bind means logical slot 0 IS hardware player 0, so the
-    // mask is reliable (no multiplexer reassignment). If the hull drove into a white
-    // wall (COLPF0), snap back to the last wall-free position; otherwise remember
-    // this position as wall-free.
-    if (Game::sprite_collisions().sprite_to_background(0) & kWallColpfMask) {
+    // mask is reliable (no multiplexer reassignment). Pure-white contact (COLPF0 with
+    // no depot-box colour) is a wall: snap back to the last wall-free position.
+    // White-plus-colour is a depot letter, so let the tank drive over it and remember
+    // the position as wall-free.
+    const u8 hit = Game::sprite_collisions().sprite_to_background(0);
+    if ((hit & kWallColpfMask) && !(hit & kDepotSurroundMask)) {
         g_tank = g_st.tank_safe;
     } else {
         g_st.tank_safe = g_tank;

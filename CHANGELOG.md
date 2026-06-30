@@ -11,6 +11,14 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
 
 ## [Unreleased]
 
+### Changed
+- **Tank demos let the player drive over fuel/ammo depots.** The `tank_net` and
+  `tank_dual_net` player wall collision now blocks only on *pure-white* (COLPF0)
+  contact. Depot icons draw white letters inside a coloured COLPF1/COLPF2 box, so their
+  colour bit is masked out of the wall test (`hit & kWallColpfMask && !(hit &
+  kDepotSurroundMask)`) and the tank drives over them while plain walls still stop it.
+  Derived from the live `P0PF` register — no depot tile codes hardcoded.
+
 ## [0.8.0] - 2026-06-27
 
 ### Added

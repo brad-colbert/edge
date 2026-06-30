@@ -150,7 +150,12 @@ static tank::TankState g_tank = {
 };
 
 // GTIA player->playfield collision: P0PF bit 0 = COLPF0, the white wall colour.
-static constexpr u8 kWallColpfMask = 0x01;
+// Depot icons (fuel/ammo) draw their white letters inside a coloured box
+// (COLPF1/COLPF2), so overlapping a depot also sets a colour bit; a plain wall is
+// pure white. Block only on pure-white contact so the tank drives over depots while
+// walls still stop it — derived from the live register, no depot tile codes hardcoded.
+static constexpr u8 kWallColpfMask     = 0x01;          // COLPF0 = walls (white)
+static constexpr u8 kDepotSurroundMask = 0x02 | 0x04;   // COLPF1|COLPF2 = depot box
 
 // Mutable game state bundled into ONE struct so it lands in main RAM (.bss), not the
 // near-full zero page — small separate statics get zp-promoted and overflow it.
@@ -250,7 +255,10 @@ static void streaming_frame_step(const engine::Input& in) {
     }
 
     // 2b. GTIA wall collision for player 0 (direct-bind: slot 0 IS hardware player 0).
-    if (Game::sprite_collisions().sprite_to_background(0) & kWallColpfMask) {
+    // Pure-white contact (COLPF0, no depot-box colour) is a wall → snap back; a depot
+    // letter sets a colour bit too, so the tank drives over it.
+    const u8 hit = Game::sprite_collisions().sprite_to_background(0);
+    if ((hit & kWallColpfMask) && !(hit & kDepotSurroundMask)) {
         g_tank = g_st.tank_safe;
     } else {
         g_st.tank_safe = g_tank;

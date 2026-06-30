@@ -29,6 +29,11 @@ Reuses `demo/tank` + `demo/tank_net` headers verbatim (added to the include path
 CMake); only the two-phase sequencing and the TCP→close→UDP handoff are new
 ([atari_tank_dual_net_demo.cpp](atari_tank_dual_net_demo.cpp)).
 
+Gameplay matches `tank_net`: the player has GTIA wall collision, but only *pure-white*
+(COLPF0) contact stops it. Fuel/ammo depots draw white letters inside a coloured
+COLPF1/COLPF2 box, so their colour bit is masked out of the wall test and the tank
+**drives over** depots while walls still block it.
+
 > **Firmware:** the realtime lane requires **fujinet-firmware v1.6.2+** (whole-frame-
 > aligned drop-oldest). Older firmware byte-drops the unframed stream and desyncs the
 > adversaries. Same constraint as `demo/tank_net`.
