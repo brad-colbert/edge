@@ -21,6 +21,7 @@
 // messages, so in-flight bytes are bounded.
 
 #include <engine/net_types.h>
+#include <engine/attributes.h>
 
 #include "asset_loader.h"
 #include "asset_protocol.h"
@@ -83,7 +84,7 @@ public:
 
     // Drive one loading frame. Connect -> request -> receive chain so a frame
     // makes forward progress; the Receiving drain is still bounded per frame.
-    void update() {
+    EDGE_COLD void update() {
         if (state_ == NetState::Starting || state_ == NetState::Connecting) step_connect();
         if (state_ == NetState::Requesting) step_request();
         if (state_ == NetState::Receiving) step_receive();
@@ -104,13 +105,13 @@ public:
     bool overflow_seen()    const { return overflow_seen_; }
 
 private:
-    NetState fail(NetTransportError e) {
+    EDGE_COLD NetState fail(NetTransportError e) {
         terr_ = e;
         if (session_) session_->close();
         return state_ = NetState::Failed;
     }
 
-    void step_connect() {
+    EDGE_COLD void step_connect() {
         const NetStatus st = session_->connect_tcp(host_, port_);
         if (st == NetStatus::Ok && session_->connected()) {
             state_ = NetState::Requesting; timer_ = 0; return;
@@ -123,7 +124,7 @@ private:
         fail(NetTransportError::ConnectFailed);
     }
 
-    void step_request() {
+    EDGE_COLD void step_request() {
         u8 buf[8];
         const u16 n = build_request(buf, transfer_id_, kCreditWindow);
         if (session_->send_bytes(buf, n, sess::kRequest) != NetStatus::Ok) {
@@ -133,7 +134,7 @@ private:
         state_ = NetState::Receiving; timer_ = 0;
     }
 
-    void step_receive() {
+    EDGE_COLD void step_receive() {
         const NetStatus pst = session_->poll();
         if (pst == NetStatus::Overflow) { overflow_seen_ = true; fail(NetTransportError::RxOverflow); return; }
 

@@ -76,7 +76,7 @@ struct GameConfig {
 };
 using Game = engine::Core<Platform, GameConfig>;
 
-static tank::PhysicalMap g_map;
+EDGE_SCROLL_TILE_MAP(tank::PhysicalMap, g_map);
 // The scroll-map placement guard (ScrollTileMap head-pad/alignment) is sized for the
 // platform's scan-wrap boundary; keep the demo-local constant honest against caps.
 static_assert(Platform::capabilities::screen_buffer_alignment == tank::kScanWrapBoundary,

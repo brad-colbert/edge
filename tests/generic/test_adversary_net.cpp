@@ -79,6 +79,16 @@ static void test_packet_roundtrip() {
     // Timing echo round-trips in the dedicated fields.
     CHECK(tanknet::rd16(p.echo_seq_lo, p.echo_seq_hi) == 1234);
     CHECK(p.echo_flags == 7);
+    // No hit_count argument (default nullptr) => all counters zero.
+    for (engine::u8 i = 0; i < tanknet::kMaxAdv; ++i) CHECK(p.hit_count[i] == 0);
+
+    // With per-adversary hit counters supplied, they round-trip into hit_count[].
+    const engine::u8 hits[tanknet::kMaxAdv] = {5, 0, 200};
+    const tanknet::TankPacket32 ph =
+        tanknet::make_player_packet(s, 1, 43, 1234, 7, hits);
+    CHECK(ph.hit_count[0] == 5);
+    CHECK(ph.hit_count[1] == 0);
+    CHECK(ph.hit_count[2] == 200);
 }
 
 // ── apply: validate, snap, reject foreign/stale ────────────────────────────

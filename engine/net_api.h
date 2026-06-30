@@ -12,6 +12,7 @@
 
 #include "net_ring.h"
 #include "net_types.h"
+#include "attributes.h"
 #include "config/capabilities.h"
 
 namespace engine {
@@ -149,7 +150,7 @@ class SessionLane {
 public:
     static constexpr u16 max_message_bytes() { return MaxMessageBytes; }
 
-    NetStatus connect_tcp(const char* host, u16 port) {
+    EDGE_COLD NetStatus connect_tcp(const char* host, u16 port) {
         const NetStatus st = Platform::hal::session_connect_tcp(host, port);
         connected_ = (st == NetStatus::Ok);
         rx_.clear();
@@ -170,7 +171,7 @@ public:
     bool connected() const { return connected_; }
 
     // Nonblocking seam poll + TX flush + RX drain.
-    NetStatus poll() {
+    EDGE_COLD NetStatus poll() {
         if (!connected()) return set_status(NetStatus::Closed);
         invalidate_view();
         const NetStatus st = Platform::hal::session_poll();
@@ -187,7 +188,7 @@ public:
         return send_bytes(&message, static_cast<u16>(sizeof(Message)), 0);
     }
 
-    NetStatus send_bytes(const void* data, u16 size, u8 kind = 0) {
+    EDGE_COLD NetStatus send_bytes(const void* data, u16 size, u8 kind = 0) {
         if (!connected()) return set_status(NetStatus::Closed);
         if ((data == nullptr && size > 0) || size > MaxMessageBytes)
             return set_status(NetStatus::InvalidArgument);
@@ -207,7 +208,7 @@ public:
         return set_status(NetStatus::Ok);
     }
 
-    bool recv(SessionMessageView& view) {
+    EDGE_COLD bool recv(SessionMessageView& view) {
         invalidate_view();
         view.kind = 0;
         view.data = nullptr;
@@ -288,7 +289,7 @@ private:
     SessionMessageView current_view_{};
     NetError last_error_{};
 
-    void flush_tx_() {
+    EDGE_COLD void flush_tx_() {
         // Session framing: [kind(1)] [size_lo(1)] [size_hi(1)] [payload(size)]
         // Read the frame header first to determine total frame size, then send
         // the entire frame as one unit to session_send_nb().

@@ -23,7 +23,7 @@ static unsigned g_failures = 0;
 using GG = tank::PlayfieldGeometry;
 
 // One real physical map + four synthetic chunk payloads (each a distinct marker).
-static tank::PhysicalMap g_map;
+EDGE_SCROLL_TILE_MAP(tank::PhysicalMap, g_map);
 static u8 g_chunk[2][2][960];   // [chunk_x][chunk_y]
 static constexpr u8 marker(u8 cx, u8 cy) { return static_cast<u8>(1 + cy * 2 + cx); } // 1..4
 

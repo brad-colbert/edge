@@ -105,7 +105,7 @@ struct FakeSession {
 };
 
 static FakeSession g_fs;
-static tank::PhysicalMap g_map;
+EDGE_SCROLL_TILE_MAP(tank::PhysicalMap, g_map);
 static u8 g_tsdest[1024];
 static tank::NetAssetClient<FakeSession> g_client;
 

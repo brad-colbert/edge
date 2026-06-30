@@ -17,6 +17,7 @@
 // test. Coverage is tracked with fixed masks (no dynamic bitsets).
 
 #include <engine/types.h>
+#include <engine/attributes.h>
 
 #include "asset_protocol.h"
 #include "playfield_geometry.h"
@@ -122,7 +123,7 @@ private:
 };
 
 // ── consume(): validate the common prefix, then dispatch by kind ────────────
-inline LoadState AssetLoader::consume(const u8* p, u16 size) {
+EDGE_COLD inline LoadState AssetLoader::consume(const u8* p, u16 size) {
     if (state_ == LoadState::Failed || state_ == LoadState::Complete)
         return fail(LoadError::BadState);                 // require reset() to retry
     if (size < proto::kPrefixBytes) return fail(LoadError::BadLength);
@@ -142,7 +143,7 @@ inline LoadState AssetLoader::consume(const u8* p, u16 size) {
     }
 }
 
-inline LoadState AssetLoader::handle_manifest(const u8* p, u16 size, u8 xfer) {
+EDGE_COLD inline LoadState AssetLoader::handle_manifest(const u8* p, u16 size, u8 xfer) {
     if (state_ != LoadState::AwaitManifest) return fail(LoadError::BadState);
     if (size != proto::kManifestBytes)      return fail(LoadError::BadLength);
     if (proto::rd_u16(p + 3) != proto::kTilesetBytes ||
@@ -155,7 +156,7 @@ inline LoadState AssetLoader::handle_manifest(const u8* p, u16 size, u8 xfer) {
     return state_;
 }
 
-inline LoadState AssetLoader::handle_tileset_block(const u8* p, u16 size, u8 xfer) {
+EDGE_COLD inline LoadState AssetLoader::handle_tileset_block(const u8* p, u16 size, u8 xfer) {
     if (state_ != LoadState::Receiving) return fail(LoadError::BadState);
     if (xfer != transfer_id_)           return fail(LoadError::WrongTransfer);
     if (size < proto::kTilesetBlockHdr) return fail(LoadError::BadLength);
@@ -171,7 +172,7 @@ inline LoadState AssetLoader::handle_tileset_block(const u8* p, u16 size, u8 xfe
     return state_;
 }
 
-inline LoadState AssetLoader::handle_chunk_rows(const u8* p, u16 size, u8 xfer) {
+EDGE_COLD inline LoadState AssetLoader::handle_chunk_rows(const u8* p, u16 size, u8 xfer) {
     if (state_ != LoadState::Receiving) return fail(LoadError::BadState);
     if (xfer != transfer_id_)           return fail(LoadError::WrongTransfer);
     if (size < proto::kChunkRowsHdr)    return fail(LoadError::BadLength);
@@ -202,7 +203,7 @@ inline LoadState AssetLoader::handle_chunk_rows(const u8* p, u16 size, u8 xfer) 
     return state_;
 }
 
-inline LoadState AssetLoader::handle_complete(u16 size, u8 xfer) {
+EDGE_COLD inline LoadState AssetLoader::handle_complete(u16 size, u8 xfer) {
     if (state_ != LoadState::Receiving) return fail(LoadError::BadState);
     if (xfer != transfer_id_)           return fail(LoadError::WrongTransfer);
     if (size != proto::kCompleteBytes)  return fail(LoadError::BadLength);
