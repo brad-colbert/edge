@@ -251,11 +251,15 @@ not the multiplexer.
 
 The local player starts in the **upper-right** of the world; the adversaries start in
 the other corners (the server's `--starts`). The player has **wall collision**: GTIA
-player→playfield collision (P0PF) is read each frame, and a hit on the white wall
-colour (COLPF0) snaps the player back to its last wall-free position. This is
-reliable specifically because of direct binding — logical slot 0 is always hardware
-player 0, so the P0PF mask is never reassigned by a multiplexer. (The adversaries are
-not wall-collided; their motion is the server's authority.)
+player→playfield collision (P0PF) is read each frame, and a *pure-white* hit (COLPF0
+with no colour bit) snaps the player back to its last wall-free position. Depot icons
+(fuel/ammo) draw white letters inside a coloured COLPF1/COLPF2 box, so they set a
+colour bit too — those are masked out of the wall test and the tank **drives over**
+them; only plain white walls stop it. The whole test is derived from the live P0PF
+register, with no depot tile codes hardcoded. This is reliable specifically because of
+direct binding — logical slot 0 is always hardware player 0, so the P0PF mask is never
+reassigned by a multiplexer. (The adversaries are not wall-collided; their motion is
+the server's authority.)
 
 > The realtime lane is validated on the emulator stack (Altirra + NetSIO + Docker peer)
 > **and on physical FujiNet hardware** (2026-06-27, this demo).
@@ -305,7 +309,8 @@ network at `172.30.0.2:9000`).
 | Their silhouettes match their headings as they turn | heading→silhouette on each received state |
 | Driving the player makes the adversaries chase/avoid/patrol | bidirectional link + per-adversary AI (server consumes the Atari's TX) |
 | Adversaries cross the player (and each other) in Y with **no colour flip** | direct binding, not the Y-sort multiplexer |
-| Driving the player into a wall stops it; it never passes through | GTIA P0PF wall collision (white/COLPF0) + revert |
+| Driving the player into a wall stops it; it never passes through | GTIA P0PF wall collision (pure white/COLPF0) + revert |
+| Driving over a fuel/ammo depot does **not** stop the tank | depot letters set a COLPF1/COLPF2 colour bit, masked out of the wall test |
 | An adversary leaves the viewport → hidden; re-enters at the right spot | each drawn in the player's camera frame |
 | Red border when built without the netstream flag / with no peer | stub-HAL / no-transport indication |
 
