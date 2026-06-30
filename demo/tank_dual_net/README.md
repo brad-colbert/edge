@@ -34,6 +34,35 @@ Gameplay matches `tank_net`: the player has GTIA wall collision, but only *pure-
 COLPF1/COLPF2 box, so their colour bit is masked out of the wall test and the tank
 **drives over** depots while walls still block it.
 
+## Firing & adversary respawn
+
+Press the **joystick trigger** to fire a missile in the tank's current heading. Up to
+**4 missiles** can be airborne at once — each is a hardware GTIA missile (pool index ==
+missile slot), advanced in world space with the shared Q12.4 motion table. A missile
+expires when it leaves the world, after a short lifetime, or on a *pure-white* wall
+(same COLPF0 rule as the tank — missiles fly over depots too). Firing works even in the
+"NO NET" fallback (it is purely local).
+
+When a missile strikes an adversary, the **server respawns that adversary at its start
+corner**. The mechanism rides the existing 10 Hz client→server packet — no new packet
+type, no extra round-trip:
+
+- The client keeps a **monotonic per-adversary hit counter** (`TankPacket32.hit_count[i]`,
+  bytes 27..29) and bumps `hit_count[i]` each time one of its missiles hits adversary `i`
+  (collision is a software AABB in world space, so it never depends on GTIA logical↔
+  hardware player remapping). Hit detection releases the missile immediately, so one
+  missile == exactly one increment.
+- The server **edge-detects** each counter changing (a u8-ring delta, wrap-safe) and
+  respawns that adversary. Because the counter rides *every* C→S packet, a dropped
+  packet just delays the respawn one tick; because the server acts only on the change,
+  a duplicated/re-sent value respawns **once** (idempotent). The respawn logic lives in
+  [edge_tank_adversary.py](../../tools/net/edge_tank_adversary.py) (`hit_delta` +
+  `last_hit_count`), so both the standalone and combined servers get it.
+
+> Hardware missiles take the colour of their corresponding player, so the first shot
+> (missile 0) is player-coloured and rapid follow-ups borrow the adversary colours —
+> cosmetic only.
+
 > **Firmware:** the realtime lane requires **fujinet-firmware v1.6.2+** (whole-frame-
 > aligned drop-oldest). Older firmware byte-drops the unframed stream and desyncs the
 > adversaries. Same constraint as `demo/tank_net`.
@@ -79,7 +108,15 @@ cmake --build build-live --target atari_tank_dual_net_demo
 
 Endpoint overrides (all optional): `-DEDGE_TANK_NET_HOST=` / `-DEDGE_TANK_NET_PORT=`
 (Phase-1 TCP), `-DEDGE_NET_PEER_HOST=` / `-DEDGE_NET_PEER_PORT=` (Phase-2 UDP),
-`-DEDGE_NETSTREAM_NOMINAL_BAUD=`.
+`-DEDGE_NETSTREAM_NOMINAL_BAUD=`. For **real hardware**, set *both* `EDGE_TANK_NET_HOST`
+(Phase-1 TCP) and `EDGE_NET_PEER_HOST` (Phase-2 UDP) to the server's LAN IP — the
+Phase-1 default `127.0.0.1` is unreachable from the Atari.
+
+> **LiveSession is built `-Os`, the other variants `-O2`.** LiveSession links the real
+> fujinet-lib, which nearly fills the `0x2000`–`0x8000` code region; the firing code's
+> ~1.7 KB overflows it at `-O2`, so that variant compiles `-Os` (the per-frame
+> `frame_service` overrun that once required `-O2` was fixed engine-wide, so `-Os` still
+> holds 60 fps). SimulatedNetwork/Embedded don't link fujinet-lib and stay `-O2`.
 
 ## Server
 
@@ -115,7 +152,10 @@ tools/net/edge_tank_adversary.py --port 9000
    lane closes (heads-up: Altirra shares the X display).
 2. **Altirra + NetSIO + combined server** — LiveSession build, both gates ON: the
    loading screen completes, then 3 adversaries stream in; the server log shows the
-   TCP transfer (66 messages) followed by UDP `learned target` + adversary tx.
+   TCP transfer (66 messages) followed by UDP `learned target` + adversary tx. Fire at
+   an adversary and confirm the server logs `adv i HIT — respawning to (x,y)` and the
+   adversary jumps back to its start corner. (The respawn path also has a host-side
+   loopback test — see the firing section — that drives the real server over UDP.)
 3. **Real FujiNet hardware (decisive)** — same LiveSession build vs the combined
    server on the LAN. This is the only test that proves `session.close()` →
    `open_udp_seq()` releases/reprograms the SIO/POKEY cleanly for real. Build with

@@ -44,6 +44,7 @@
 
 #include <engine/platform/atari/platform.h>
 #include <engine/core.h>
+#include <engine/pool.h>
 
 #include "playfield_geometry.h"
 #include "tank_camera.h"
@@ -124,7 +125,7 @@ struct GameConfig {
 static_assert(tanknet::kMaxAdv >= kAdvCount, "combined packet must hold every adversary");
 using Game = engine::Core<Platform, GameConfig>;
 
-static tank::PhysicalMap g_map;
+EDGE_SCROLL_TILE_MAP(tank::PhysicalMap, g_map);
 static_assert(Platform::capabilities::screen_buffer_alignment == tank::kScanWrapBoundary,
               "kScanWrapBoundary must match the platform scan-wrap granularity");
 
@@ -157,12 +158,37 @@ static tank::TankState g_tank = {
 static constexpr u8 kWallColpfMask     = 0x01;          // COLPF0 = walls (white)
 static constexpr u8 kDepotSurroundMask = 0x02 | 0x04;   // COLPF1|COLPF2 = depot box
 
+// ── Phase 2: player firing (hardware missiles, ADR-025) ────────────────────────
+// The local player launches missiles with the joystick trigger. Each missile is a
+// hardware GTIA missile (pool index == hardware missile slot), flies along the tank's
+// heading in world space (reusing the shared Q12.4 motion table), and expires on a
+// pure-white wall, at the world edge, or after kBulletLife frames. A missile that
+// strikes an adversary bumps a per-adversary hit counter the client streams to the
+// server, which respawns that adversary at its start corner.
+static constexpr u8  kMaxBullets  = 4;     // the four hardware missiles
+static constexpr u8  kBulletSteps = 3;     // motion-vector applications/frame (faster than the tank)
+static constexpr u8  kBulletHeight= 3;     // missile-strip rows drawn
+static constexpr u8  kBulletLife  = 70;    // ~1.2 s max flight before self-expiry
+static constexpr i16 kHitRadius   = 10;    // |dx|,|dy| (nominal px) bullet-vs-adversary centre for a hit
+static constexpr i16 kWorldMaxX   = 639;   // world bounds for off-field bullet expiry
+static constexpr i16 kWorldMaxY   = 383;
+
+struct Bullet {
+    i16 world_x_q4;
+    i16 world_y_q4;
+    u8  heading;
+    u8  life;          // frames remaining before self-expiry
+};
+
 // Mutable game state bundled into ONE struct so it lands in main RAM (.bss), not the
 // near-full zero page — small separate statics get zp-promoted and overflow it.
 struct GameState {
     tanknet::Adversary  adv[kAdvCount];   // network-driven adversaries
     tanknet::AdvRxState adv_rx;           // shared packet-level seq gate (combined snapshot)
     tank::TankState     tank_safe;        // last position player 0 was NOT touching a wall
+    engine::SlotPool<Bullet, kMaxBullets> bullets;  // pool index == hardware missile slot
+    u8  hit_count[kAdvCount];             // per-adversary missile-hit counter, streamed to the server
+    u8  fire_prev;                        // trigger level last game step (dropped-frame-safe fire edge)
     u8  player_speed;                     // 1 while the player is moving (for the TX packet)
     u16 tx_seq;
     u8  tx_frame;
@@ -171,6 +197,64 @@ struct GameState {
     u8  bss_anchor[24];                   // force .bss placement (main RAM is plentiful)
 };
 static GameState g_st = {};
+
+static inline i16 iabs16(i16 v) { return v < 0 ? static_cast<i16>(-v) : v; }
+
+// Rising edge of the joystick trigger, tracked against the level WE last observed in a
+// game step — not Input::fire_pressed(), whose prev-state shifts every VBI and so eats
+// held-fire presses on a dropped frame (see demo/arena fire_edge). Launches a missile
+// from the player's hull centre along its current heading. noinline+minsize keeps this
+// cold path's locals out of the razor-full zero page (.zp ends exactly at 0x100).
+[[gnu::noinline, clang::minsize]] static void fire_if_triggered(const engine::Input& in) {
+    const bool now  = in.fire();
+    const bool edge = now && !g_st.fire_prev;
+    g_st.fire_prev = now;
+    if (!edge) return;
+    u8 idx;
+    if (Bullet* b = g_st.bullets.acquire(idx)) {
+        b->world_x_q4 = g_tank.world_x_q4;
+        b->world_y_q4 = g_tank.world_y_q4;
+        b->heading    = g_tank.heading;
+        b->life       = kBulletLife;
+    }
+}
+
+// Advance every in-flight missile (movement + expiry + adversary hit). Drawing happens
+// later in submit_sprites() with the same camera. Releasing a bullet the instant it
+// strikes an adversary guarantees one missile == exactly one hit-counter increment. A
+// plain indexed loop (no lambda) + minsize keeps the zero-page footprint at zero.
+[[gnu::noinline, clang::minsize]] static void advance_bullets() {
+    for (u8 idx = 0; idx < kMaxBullets; ++idx) {
+        if (!g_st.bullets.active(idx)) continue;
+        Bullet& b = g_st.bullets[idx];
+        const tank::MotionVector& v = tank::motion_vector(b.heading);
+        for (u8 s = 0; s < kBulletSteps; ++s) {
+            b.world_x_q4 = static_cast<i16>(b.world_x_q4 + v.dx_q4);
+            b.world_y_q4 = static_cast<i16>(b.world_y_q4 + v.dy_q4);
+        }
+        const i16 bx = static_cast<i16>(b.world_x_q4 >> 4);
+        const i16 by = static_cast<i16>(b.world_y_q4 >> 4);
+        bool expire = bx < 0 || bx > kWorldMaxX || by < 0 || by > kWorldMaxY || --b.life == 0;
+        if (!expire) {                                   // pure-white wall stops it; flies over depots
+            const u8 wall = Game::sprite_collisions().projectile_to_background(idx);
+            if ((wall & kWallColpfMask) && !(wall & kDepotSurroundMask)) expire = true;
+        }
+        if (!expire) {                                   // adversary hit: software AABB in world space
+            for (u8 i = 0; i < kAdvCount; ++i) {
+                if (!g_st.adv[i].have_state) continue;
+                const i16 ax = tank::world_x_nominal(g_st.adv[i].s);
+                const i16 ay = tank::world_y_nominal(g_st.adv[i].s);
+                if (iabs16(static_cast<i16>(bx - ax)) < kHitRadius &&
+                    iabs16(static_cast<i16>(by - ay)) < kHitRadius) {
+                    ++g_st.hit_count[i];
+                    expire = true;
+                    break;
+                }
+            }
+        }
+        if (expire) { Game::missile_hide(idx); g_st.bullets.release(idx); }
+    }
+}
 
 // Playfield background. Darker than the shared palette's 0x04 (same hue, lower
 // luminance) but not black — local to this demo.
@@ -235,6 +319,21 @@ static void submit_sprites() {
         if (g_st.adv[i].have_state) submit_tank(slot, g_st.adv[i].s, cam_cc, cam_sl);
         else                        Game::sprite_hide(slot);
     }
+
+    // Player missiles in the same camera (point sprites — no half-tank offset).
+    for (u8 idx = 0; idx < kMaxBullets; ++idx) {
+        if (!g_st.bullets.active(idx)) { Game::missile_hide(idx); continue; }
+        const Bullet& b = g_st.bullets[idx];
+        const i16 scc = screen_cc_in_cam(static_cast<i16>(b.world_x_q4 >> 4), cam_cc);
+        const i16 ssl = screen_sl_in_cam(static_cast<i16>(b.world_y_q4 >> 4), cam_sl);
+        if (tank::tank_visible(scc, ssl)) {
+            const i16 px = static_cast<i16>(tank::kPmgOriginX + scc);
+            const i16 py = static_cast<i16>(tank::kPmgOriginY + ssl);
+            Game::missile(idx, static_cast<u8>(px), static_cast<u8>(py), kBulletHeight);
+        } else {
+            Game::missile_hide(idx);
+        }
+    }
 }
 
 // ── Phase 2: per-frame step (copied from demo/tank_net) ────────────────────────
@@ -276,16 +375,24 @@ static void streaming_frame_step(const engine::Input& in) {
     tank::move_tank(g_tank, intent.move);
     g_st.player_speed = (intent.move != 0) ? 1 : 0;
 
+    // 3b. Fire on the trigger edge + advance every in-flight missile (a hit bumps the
+    //     per-adversary counter streamed below). Firing works even with NO NET.
+    fire_if_triggered(in);
+    advance_bullets();
+
     // 4. Stream our own state back to the server (bidirectional; all-or-nothing TX).
+    //    The per-adversary hit counters ride this packet; the server respawns an
+    //    adversary when its counter changes (loss-tolerant: the value is re-sent each tick).
     if (Game::net.realtime.active() && ++g_st.tx_frame >= kTxPeriod) {
         g_st.tx_frame = 0;
         Game::net.realtime.send(
             tanknet::make_player_packet(g_tank, g_st.player_speed, g_st.tx_seq++,
-                                        g_st.adv_rx.last_seq, g_st.rx_overflow_count));
+                                        g_st.adv_rx.last_seq, g_st.rx_overflow_count,
+                                        g_st.hit_count));
         g_st.rx_overflow_count = 0;
     }
 
-    // 5. Draw all tanks.
+    // 5. Draw all tanks + missiles.
     submit_sprites();
 }
 

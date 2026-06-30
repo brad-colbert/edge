@@ -92,7 +92,7 @@ struct GameConfig {
 static_assert(tanknet::kMaxAdv >= kAdvCount, "combined packet must hold every adversary");
 using Game = engine::Core<Platform, GameConfig>;
 
-static tank::PhysicalMap g_map;
+EDGE_SCROLL_TILE_MAP(tank::PhysicalMap, g_map);
 static_assert(Platform::capabilities::screen_buffer_alignment == tank::kScanWrapBoundary,
               "kScanWrapBoundary must match the platform scan-wrap granularity");
 

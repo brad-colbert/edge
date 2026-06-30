@@ -136,11 +136,18 @@ template <u16 N> struct HeadPad { u8 bytes[N]; };
 template <>      struct HeadPad<0> {};   // empty base -> zero storage, cells at offset 0
 }  // namespace detail
 
+// NOTE on alignment: the buffer's START must be `Boundary`-aligned for the head pad to
+// land the single interior boundary on a row edge. That alignment is applied to each
+// INSTANCE (see EDGE_SCROLL_TILE_MAP below), NOT to this type. Over-aligning the type
+// would force sizeof up to a multiple of Boundary (e.g. a 4272-byte map aligned to 4096
+// would occupy 8192), wasting a whole page; aligning the instance keeps sizeof exact
+// (head_pad + Width*Height) while still aligning the object's start.
 template <u16 Width, u16 Height, u16 Boundary>
-struct alignas(Boundary > 1 ? Boundary : 1) ScrollTileMap
+struct ScrollTileMap
     : private detail::HeadPad<(Boundary > 1) ? (Boundary % Width) : 0> {
     static constexpr u16 width    = Width;
     static constexpr u16 height   = Height;
+    static constexpr u16 boundary = Boundary;
     static constexpr u16 head_pad = (Boundary > 1) ? (Boundary % Width) : 0;
 
     static_assert(Boundary <= 1 ||
@@ -159,6 +166,15 @@ struct alignas(Boundary > 1 ? Boundary : 1) ScrollTileMap
         cells[static_cast<u16>(row * Width + col)] = tile_code;
     }
 };
+
+// Declare a ScrollTileMap instance with the required start-alignment. Every
+// ScrollTileMap object MUST be declared with this (or an equivalent `alignas`) so its
+// single interior scan-wrap boundary lands on a row edge; the type itself is not
+// over-aligned (that would round its sizeof up to a whole extra page). Greppable so new
+// instances are easy to find/audit.
+//   EDGE_SCROLL_TILE_MAP(tank::PhysicalMap, g_map);   // (declares a file-scope static)
+// `alignas` must precede `static`, so the macro emits the whole declaration.
+#define EDGE_SCROLL_TILE_MAP(MapType, name) alignas(MapType::boundary) static MapType name
 
 // ── TileDisplay ───────────────────────────────────────────────────────
 //

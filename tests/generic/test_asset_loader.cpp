@@ -34,7 +34,7 @@ static void make_reference() {
 
 // ── Loader + its destinations ───────────────────────────────────────────────
 static tank::AssetLoader g_loader;
-static tank::PhysicalMap g_map;
+EDGE_SCROLL_TILE_MAP(tank::PhysicalMap, g_map);
 static u8 g_tileset_dest[1024];
 
 static void rebind() {

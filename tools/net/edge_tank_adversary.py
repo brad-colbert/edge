@@ -50,8 +50,9 @@ DEFAULT_SIZE = 32
 #   6..23  rec[0..2], each = x_nom LE(2) y_nom LE(2) heading(1) speed(1)
 #          (C->S: rec[0] = player state)
 #   24..25 echo_seq LE (C->S: adv[0] last-applied seq)   26 echo_flags (C->S health)
-#   27..30 reserved   31 pattern(0x5A)
-_LAYOUT = "<BBBBH" + "HHBB" * MAX_ADV + "HB4sB"
+#   27..29 hit_count[0..2] (C->S: monotonic per-adversary missile-hit counter)
+#   30 reserved   31 pattern(0x5A)
+_LAYOUT = "<BBBBH" + "HHBB" * MAX_ADV + "HB" + "B" * MAX_ADV + "BB"
 MAGIC = 0xAD
 VERSION = 0x02
 PATTERN = 0x5A
@@ -78,9 +79,11 @@ def decode(data):
         x, y, heading, speed = f[5 + i * 4: 9 + i * 4]
         recs.append({"x": x, "y": y, "heading": heading, "speed": speed})
     echo_seq, echo_flags = f[5 + MAX_ADV * 4], f[6 + MAX_ADV * 4]
+    hit_base = 7 + MAX_ADV * 4
+    hit_count = list(f[hit_base: hit_base + MAX_ADV])
     d = {"magic": magic, "version": ver, "type": ptype, "status": status,
          "seq": seq, "recs": recs, "echo_seq": echo_seq, "echo_flags": echo_flags,
-         "pattern": f[-1]}
+         "hit_count": hit_count, "pattern": f[-1]}
     # Player (C->S) state lives in rec[0]; flatten for convenience.
     d.update(x=recs[0]["x"], y=recs[0]["y"],
              heading=recs[0]["heading"], speed=recs[0]["speed"])
@@ -100,13 +103,20 @@ def encode_adversaries(seq, recs):
                        r["heading"] & 0x0F, r["speed"] & 0xFF]
         else:
             fields += [0, 0, 0, 0]
+    # Tail (S->C): echo_seq=0, echo_flags=0, hit_count[0..2]=0, reserved=0, pattern.
     return struct.pack(_LAYOUT, MAGIC, VERSION, TYPE_ADVERSARY, status,
-                       seq & 0xFFFF, *fields, 0, 0, b"\x00\x00\x00\x00", PATTERN)
+                       seq & 0xFFFF, *fields, 0, 0, *([0] * MAX_ADV), 0, PATTERN)
 
 
 def seq_delta(a, b):
     """Signed shortest-path delta on a u16 sequence ring (matches the client)."""
     return ((a - b + 0x8000) & 0xFFFF) - 0x8000
+
+
+def hit_delta(a, b):
+    """Signed shortest-path delta on a u8 hit-counter ring: > 0 means a is newer than
+    b (handles the 255->0 wrap correctly; a reordered older value reads <= 0)."""
+    return ((a - b + 0x80) & 0xFF) - 0x80
 
 
 class Reassembler:
@@ -306,7 +316,8 @@ def run_adversary_server(args, sock=None):
     for i in range(args.count):
         sx, sy = starts[i] if i < len(starts) else fallback_start
         mode = modes[i] if i < len(modes) else args.mode
-        advs.append({"sim": TankSim(sx, sy, 0, table), "mode": mode})
+        # Keep the start corner so a missile-hit respawn returns the adversary there.
+        advs.append({"sim": TankSim(sx, sy, 0, table), "mode": mode, "start": (sx, sy)})
 
     owns_sock = sock is None
     if owns_sock:
@@ -341,6 +352,9 @@ def run_adversary_server(args, sock=None):
 
     player = None             # last-known player (x,y) nominal
     player_last_seq = None
+    # Per-adversary missile-hit counter last seen from the client. None until the first
+    # player packet establishes a baseline (so we never respawn on the initial value).
+    last_hit_count = [None] * len(advs)
     period = 1.0 / args.hz
     next_send = time.monotonic()
     t0 = time.monotonic()
@@ -381,6 +395,20 @@ def run_adversary_server(args, sock=None):
                         player = (f["x"], f["y"])
                         rx += 1
                         cli_ovf = f["echo_flags"]
+                        # Missile-hit respawn: the client streams a monotonic per-adversary
+                        # hit counter. Edge-detect each change (seq_delta > 0 handles u8 wrap
+                        # and reorder) and respawn that adversary at its start corner. The
+                        # first packet only records the baseline (no spurious respawn).
+                        hc = f["hit_count"]
+                        for i, a in enumerate(advs):
+                            if i >= len(hc):
+                                break
+                            if last_hit_count[i] is not None and \
+                               hit_delta(hc[i], last_hit_count[i]) > 0:
+                                sx, sy = a["start"]
+                                a["sim"] = TankSim(sx, sy, 0, table)
+                                print("adv %d HIT — respawning to (%d,%d)" % (i, sx, sy))
+                            last_hit_count[i] = hc[i]
                         # End-to-end lag: how far adv[0]'s last-applied snapshot trails
                         # the seq we most recently sent (>=0; clamp tiny negatives from
                         # in-flight reorder to 0). Resolution ~1 packet = one send tick.

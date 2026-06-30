@@ -56,7 +56,13 @@ struct TankPacket32 {
     AdvRecord rec[kMaxAdv];    //  6..23  adversary records (C->S: rec[0] = player)
     u8 echo_seq_lo, echo_seq_hi;  // 24..25  C->S: adv[0] last-applied seq (timing echo)
     u8 echo_flags;             // 26     C->S: client health byte (RX-overflow events)
-    u8 reserved[4];            // 27..30
+    u8 hit_count[kMaxAdv];     // 27..29  C->S: monotonic per-adversary missile-hit counter.
+                               //         The client bumps hit_count[i] each time one of its
+                               //         missiles strikes adversary i; the server edge-detects
+                               //         the change and respawns that adversary. Idempotent
+                               //         (a resent/duplicated value respawns only once) and
+                               //         loss-tolerant (the value rides every C->S packet).
+    u8 reserved;               // 30
     u8 pattern;                // 31     0x5A sanity
 };
 static_assert(sizeof(TankPacket32) == 32, "TankPacket32 must be exactly 32 bytes");
@@ -145,8 +151,14 @@ inline void adv_dead_reckon(Adversary& adv) {
 // count). The server compares echo_adv_seq against the seq it most recently SENT to
 // measure end-to-end lag in packets (≈ ms via the known send rate) and whether it
 // grows over time.
+//
+// HIT COUNTERS (optional): pass a pointer to kMaxAdv monotonic per-adversary
+// missile-hit counters and they are copied into hit_count[]; the server respawns an
+// adversary when its counter changes. nullptr leaves them zero (callers that do not
+// implement firing — e.g. demo/tank_net — keep their existing behaviour unchanged).
 inline TankPacket32 make_player_packet(const tank::TankState& s, u8 speed, u16 seq,
-                                       u16 echo_adv_seq, u8 echo_flags) {
+                                       u16 echo_adv_seq, u8 echo_flags,
+                                       const u8* hit_count = nullptr) {
     TankPacket32 p{};
     p.magic   = kMagic;
     p.version = kVersion;
@@ -159,6 +171,7 @@ inline TankPacket32 make_player_packet(const tank::TankState& s, u8 speed, u16 s
     p.rec[0].speed   = speed;
     wr16(p.echo_seq_lo, p.echo_seq_hi, echo_adv_seq);  // adv[0] last-applied seq
     p.echo_flags = echo_flags;                         // client health byte
+    if (hit_count) for (u8 i = 0; i < kMaxAdv; ++i) p.hit_count[i] = hit_count[i];
     p.pattern = kPattern;
     return p;
 }
