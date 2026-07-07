@@ -1,0 +1,13 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "xex: build debug (arena_native)",
+      "type": "shell",
+      "command": "cmake -B build-atari-debug -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/atari-toolchain.cmake -DEDGE_BUILD_DEMO=ON -DEDGE_DEBUG=ON && cmake --build build-atari-debug --target arena_native",
+      "group": "build",
+      "problemMatcher": ["$gcc"],
+      "detail": "Configure + build the DWARF debug variant of arena_native (build-atari-debug)."
+    }
+  ]
+}

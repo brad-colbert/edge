@@ -1,0 +1,21 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "xex",
+      "request": "launch",
+      "name": "Debug arena_native (Fujisan)",
+      "program": "${workspaceFolder}/build-atari-debug/arena_native.xex",
+      "stopOnEntry": true,
+      "preLaunchTask": "xex: build debug (arena_native)"
+    },
+    {
+      "type": "xex",
+      "request": "launch",
+      "name": "Debug atari_tank_dual_net_demo (Fujisan) - No Stop on Entry",
+      "program": "${workspaceFolder}/build-atari-debug/atari_tank_dual_net_demo.xex",
+      "stopOnEntry": false,
+      "preLaunchTask": "xex: build debug (atari_tank_dual_net_demo)"
+    }
+  ]
+}

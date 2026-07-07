@@ -29,6 +29,25 @@ option(EDGE_BUILD_DEMO
        "Build the Atari .xex demo via add_executable (atari8-dos toolchain only)"
        OFF)
 
+# Opt-in source-level debug build. Adds DWARF and disables LTO so the emitted
+# <target>.xex.elf carries a usable per-TU line table for the vscode-xex-debug
+# extension. Kept OFF by default so release builds stay byte-identical; enable
+# with -DEDGE_DEBUG=ON in a separate build dir (e.g. build-atari-debug).
+#   -fno-lto   : mandatory — full LTO merges all TUs into one object and
+#                destroys per-source-file line mapping.
+#   -Og        : appended after the per-target -O2/-Os so it wins (last -O),
+#                giving faithful line stepping without fully disabling opt.
+option(EDGE_DEBUG
+       "Add DWARF (-g -gdwarf-5), disable LTO, and use -Og for source-level debugging"
+       OFF)
+
+function(edge_debug_flags tgt)
+    if(EDGE_DEBUG)
+        target_compile_options(${tgt} PRIVATE -g -gdwarf-5 -Og -fno-lto)
+        target_link_options(${tgt}    PRIVATE -g -fno-lto)
+    endif()
+endfunction()
+
 option(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB
        "Enable Atari FujiNet session adapter scaffolding against external fujinetlib-llvm"
        OFF)
@@ -422,6 +441,7 @@ if(EDGE_BUILD_DEMO)
     set_target_properties(arena_native PROPERTIES OUTPUT_NAME "arena_native.xex")
     target_link_options(arena_native PRIVATE
         "LINKER:--Map=$<TARGET_FILE_DIR:arena_native>/arena_native.map")
+    edge_debug_flags(arena_native)
 
     # Arena demo — VBXE Tier 2 full-overlay build (separate source): pixel sprites
     # over a VBXE overlay canvas. Run with a VBXE FX core, BASIC disabled.
@@ -667,6 +687,7 @@ if(EDGE_BUILD_DEMO)
         OUTPUT_NAME "atari_tank_dual_net_demo.xex")
     target_link_options(atari_tank_dual_net_demo PRIVATE
         "LINKER:--Map=$<TARGET_FILE_DIR:atari_tank_dual_net_demo>/atari_tank_dual_net_demo.map")
+    edge_debug_flags(atari_tank_dual_net_demo)
 
     # Phase-1 LiveSession backend: link the real fujinet-lib (session lane) when
     # enabled; otherwise the session HAL is a stub that reports Ok without connecting.
