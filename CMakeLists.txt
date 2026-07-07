@@ -29,6 +29,16 @@ option(EDGE_BUILD_DEMO
        "Build the Atari .xex demo via add_executable (atari8-dos toolchain only)"
        OFF)
 
+# Optimization level for the real-time (hot-path) demos. All tests and every
+# non-realtime demo build at -Os (the global default, CMakeLists line ~23); a
+# handful of per-frame demos default to -O2 because -Os was found to throttle
+# their frame path. This single knob overrides that pin so the whole build can be
+# flipped to size mode for characterization:  cmake ... -DEDGE_HOT_OPT=-Os
+# Must stay a single token (it is dropped verbatim into compiler command lines).
+set(EDGE_HOT_OPT "-O2" CACHE STRING
+    "Optimization level for the real-time (hot-path) demos: -O2 (default) | -Os | -Oz")
+set_property(CACHE EDGE_HOT_OPT PROPERTY STRINGS -O2 -Os -Oz)
+
 option(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB
        "Enable Atari FujiNet session adapter scaffolding against external fujinetlib-llvm"
        OFF)
@@ -309,7 +319,7 @@ if(EDGE_BUILD_DEMO)
 
     add_executable(atari_tank_demo demo/tank/atari_tank_demo.cpp ${TANK_GEN_HEADERS})
     target_compile_options(atari_tank_demo PRIVATE
-        -std=c++20 -fno-exceptions -fno-rtti -O2 -Wall -Wextra)
+        -std=c++20 -fno-exceptions -fno-rtti ${EDGE_HOT_OPT} -Wall -Wextra)
     target_include_directories(atari_tank_demo PRIVATE ${CMAKE_SOURCE_DIR} ${TANK_GEN_DIR})
     target_compile_definitions(atari_tank_demo PRIVATE EDGE_TANK_ASSET_SOURCE=${_TANK_SRC})
     set_target_properties(atari_tank_demo PROPERTIES OUTPUT_NAME "atari_tank_demo.xex")
@@ -417,7 +427,7 @@ if(EDGE_BUILD_DEMO)
     # Arena demo — native ANTIC/GTIA build (constexpr in-source charset).
     add_executable(arena_native demo/arena/arena_native.cpp)
     target_compile_options(arena_native PRIVATE
-        -std=c++20 -fno-exceptions -fno-rtti -O2 -Wall -Wextra)
+        -std=c++20 -fno-exceptions -fno-rtti ${EDGE_HOT_OPT} -Wall -Wextra)
     target_include_directories(arena_native PRIVATE ${CMAKE_SOURCE_DIR})
     set_target_properties(arena_native PROPERTIES OUTPUT_NAME "arena_native.xex")
     target_link_options(arena_native PRIVATE
@@ -427,19 +437,20 @@ if(EDGE_BUILD_DEMO)
     # over a VBXE overlay canvas. Run with a VBXE FX core, BASIC disabled.
     add_executable(arena_vbxe demo/arena/arena_vbxe.cpp)
     target_compile_options(arena_vbxe PRIVATE
-        -std=c++20 -fno-exceptions -fno-rtti -O2 -Wall -Wextra)
+        -std=c++20 -fno-exceptions -fno-rtti ${EDGE_HOT_OPT} -Wall -Wextra)
     target_include_directories(arena_vbxe PRIVATE ${CMAKE_SOURCE_DIR})
     set_target_properties(arena_vbxe PROPERTIES OUTPUT_NAME "arena_vbxe.xex")
     target_link_options(arena_vbxe PRIVATE
         "LINKER:--Map=$<TARGET_FILE_DIR:arena_vbxe>/arena_vbxe.map")
 
     # Fujinet UDP position-streaming smoke test — links the prebuilt fujinetlib.
-    # -O2 (not -Os): -Os breaks real-time performance with the template-heavy
-    # engine headers (same as the arena demos).
+    # Uses ${EDGE_HOT_OPT} (default -O2): -Os was found to break real-time
+    # performance with the template-heavy engine headers (same as the arena
+    # demos). Build -DEDGE_HOT_OPT=-Os to characterize/flip it.
     if(EXISTS "${FUJINETLIB_INC}/fujinet-network.h" AND EXISTS "${FUJINETLIB_A}")
         add_executable(fujinet_net_test demo/fujinet_net_test/fujinet_net_test.cpp)
         target_compile_options(fujinet_net_test PRIVATE
-            -std=c++20 -fno-exceptions -fno-rtti -O2 -Wall -Wextra)
+            -std=c++20 -fno-exceptions -fno-rtti ${EDGE_HOT_OPT} -Wall -Wextra)
         target_include_directories(fujinet_net_test PRIVATE
             ${CMAKE_SOURCE_DIR} ${FUJINETLIB_INC})
         target_link_libraries(fujinet_net_test PRIVATE ${FUJINETLIB_A})
@@ -495,7 +506,7 @@ if(EDGE_BUILD_DEMO)
         "LINKER:--Map=$<TARGET_FILE_DIR:net_dual_lane_demo>/net_dual_lane_demo.map")
 
     # Realtime networking diagnostic demo (Stage 9S.3; public Game::net.realtime).
-    # Built -O2 (per-frame net path), like the other realtime demos. When netstream
+    # Built ${EDGE_HOT_OPT} (default -O2; per-frame net path), like the other realtime demos. When netstream
     # is ON, link the real adapter's .S handlers (the define is already global via
     # add_compile_definitions above) so Mode B uses real SIO, not the stub HAL.
     set(NET_RT_METER_SRC demo/edge_net_realtime_meter.cpp)
@@ -506,7 +517,7 @@ if(EDGE_BUILD_DEMO)
     endif()
     add_executable(edge_net_realtime_meter ${NET_RT_METER_SRC})
     target_compile_options(edge_net_realtime_meter PRIVATE
-        -std=c++20 -fno-exceptions -fno-rtti -O2 -Wall -Wextra)
+        -std=c++20 -fno-exceptions -fno-rtti ${EDGE_HOT_OPT} -Wall -Wextra)
     target_include_directories(edge_net_realtime_meter PRIVATE
         ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/engine/platform/atari)
     set_target_properties(edge_net_realtime_meter PROPERTIES
@@ -561,7 +572,7 @@ if(EDGE_BUILD_DEMO)
     endif()
     add_executable(atari_tank_net_demo ${TANK_NET_SRC})
     target_compile_options(atari_tank_net_demo PRIVATE
-        -std=c++20 -fno-exceptions -fno-rtti -O2 -Wall -Wextra)
+        -std=c++20 -fno-exceptions -fno-rtti ${EDGE_HOT_OPT} -Wall -Wextra)
     target_include_directories(atari_tank_net_demo PRIVATE
         ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/demo/tank
         ${CMAKE_SOURCE_DIR}/engine/platform/atari ${TANK_NET_GEN_DIR})
@@ -654,7 +665,7 @@ if(EDGE_BUILD_DEMO)
     endif()
     add_executable(atari_tank_dual_net_demo ${TANK_DUAL_SRC})
     target_compile_options(atari_tank_dual_net_demo PRIVATE
-        -std=c++20 -fno-exceptions -fno-rtti -O2 -Wall -Wextra)
+        -std=c++20 -fno-exceptions -fno-rtti ${EDGE_HOT_OPT} -Wall -Wextra)
     target_include_directories(atari_tank_dual_net_demo PRIVATE
         ${CMAKE_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/demo/tank
@@ -893,7 +904,7 @@ if(MOS_ATARI8_CXX)
     add_custom_command(
         OUTPUT ${ARENA_NATIVE_XEX}
         COMMAND ${MOS_ATARI8_CXX}
-                -std=c++20 -fno-exceptions -fno-rtti -O2 -Wall -Wextra
+                -std=c++20 -fno-exceptions -fno-rtti ${EDGE_HOT_OPT} -Wall -Wextra
                 -I${CMAKE_SOURCE_DIR}
                 ${CMAKE_SOURCE_DIR}/demo/arena/arena_native.cpp
                 -o ${ARENA_NATIVE_XEX}
@@ -915,7 +926,7 @@ if(MOS_ATARI8_CXX)
     add_custom_command(
         OUTPUT ${ARENA_VBXE_XEX}
         COMMAND ${MOS_ATARI8_CXX}
-                -std=c++20 -fno-exceptions -fno-rtti -O2 -Wall -Wextra
+                -std=c++20 -fno-exceptions -fno-rtti ${EDGE_HOT_OPT} -Wall -Wextra
                 -I${CMAKE_SOURCE_DIR}
                 ${CMAKE_SOURCE_DIR}/demo/arena/arena_vbxe.cpp
                 -o ${ARENA_VBXE_XEX}
@@ -931,15 +942,16 @@ if(MOS_ATARI8_CXX)
     # ── Fujinet UDP position-streaming smoke test (fujinet_net_test.xex) ──
     #   cmake --build build --target fujinet_net_test  # -> build/fujinet_net_test.xex
     # Links the prebuilt fujinetlib static lib (passed as a command-line input)
-    # and adds its include dir. -O2 (not -Os): -Os breaks real-time performance
-    # with the template-heavy engine headers (same as the arena demos).
+    # and adds its include dir. Uses ${EDGE_HOT_OPT} (default -O2): -Os was found
+    # to break real-time performance with the template-heavy engine headers (same
+    # as the arena demos). Build -DEDGE_HOT_OPT=-Os to characterize/flip it.
     if(EXISTS "${FUJINETLIB_INC}/fujinet-network.h" AND EXISTS "${FUJINETLIB_A}")
         set(FNTEST_XEX ${CMAKE_BINARY_DIR}/fujinet_net_test.xex)
         set(FNTEST_MAP ${CMAKE_BINARY_DIR}/fujinet_net_test.map)
         add_custom_command(
             OUTPUT ${FNTEST_XEX}
             COMMAND ${MOS_ATARI8_CXX}
-                    -std=c++20 -fno-exceptions -fno-rtti -O2 -Wall -Wextra
+                    -std=c++20 -fno-exceptions -fno-rtti ${EDGE_HOT_OPT} -Wall -Wextra
                     -I${CMAKE_SOURCE_DIR} -I${FUJINETLIB_INC}
                     ${CMAKE_SOURCE_DIR}/demo/fujinet_net_test/fujinet_net_test.cpp
                     ${FUJINETLIB_A}
@@ -1223,7 +1235,7 @@ if(MOS_ATARI8_CXX)
 
     # ── Realtime networking diagnostic demo (edge_net_realtime_meter.xex) ──
     #   cmake --build build --target edge_net_realtime_meter
-    # Public Game::net.realtime only; -O2 for the per-frame net/HUD path.
+    # Public Game::net.realtime only; ${EDGE_HOT_OPT} (default -O2) for the per-frame net/HUD path.
     #
     # When EDGE_ATARI_FUJINET_REALTIME_NETSTREAM is ON, link the REAL EDGE-owned
     # Netstream adapter (define + the two .S handlers + the platform include for the
@@ -1253,7 +1265,7 @@ if(MOS_ATARI8_CXX)
     add_custom_command(
         OUTPUT ${NET_RT_METER_XEX}
         COMMAND ${MOS_ATARI8_CXX}
-                -std=c++20 -fno-exceptions -fno-rtti -O2 -Wall -Wextra
+                -std=c++20 -fno-exceptions -fno-rtti ${EDGE_HOT_OPT} -Wall -Wextra
                 ${NET_RT_METER_NS_ARGS}
                 -I${CMAKE_SOURCE_DIR}
                 ${CMAKE_SOURCE_DIR}/demo/edge_net_realtime_meter.cpp

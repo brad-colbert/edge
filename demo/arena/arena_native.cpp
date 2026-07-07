@@ -357,6 +357,13 @@ EDGE_COLD static bool title_step(const engine::Input& in) {
     // copies this shadow to the hardware register, so all title text changes colour.
     Platform::hal::set_color_pf(0, kTitleHues[(g_title_frames / kTitleColorPeriod) % kTitleHueCount]);
     ++g_title_frames;
+#ifdef EDGE_ARENA_AUTOSTART
+    // Headless perf harness (no keyboard/joystick injection available): auto-enter
+    // PlayScreen after the title has shown briefly, so the heavy gameplay path runs
+    // unattended and the HUD DROP counter can be read from a screenshot. Inert in
+    // normal builds (define only for measurement).
+    if (g_title_frames > 30) return true;
+#endif
     return fire_edge(in);
 }
 
@@ -374,6 +381,10 @@ EDGE_COLD static void play_enter() {
     // HUD: score label, level readout, and three life hearts (raw tile code 0x05).
     hud.print(0, 0, "SCORE: 00000");
     hud.print(kHudLevelCol, 0, "LV:01");
+    // Frame-overrun diagnostic: dropped frames this round (engine counter). A
+    // nonzero DROP means the per-frame gameplay path overran 60Hz — the signal
+    // that told us -Os throttled this demo. play_step refreshes the digits live.
+    hud.print(24, 0, "DROP");
     hud.put_char(36, 0, 0x05);
     hud.put_char(37, 0, 0x05);
     hud.put_char(38, 0, 0x05);
@@ -409,10 +420,22 @@ EDGE_COLD static void play_enter() {
     g_get_ready = kGetReadyFrames;
 
     arm_fire();
+
+#ifndef EDGE_ARENA_AUTOSTART
+    // Zero the frame-overrun counter so the HUD DROP readout measures this round's
+    // gameplay, not the one-shot screen bring-up above.
+    Game::reset_frame_stats();
+#endif
+    // (Under the autostart perf harness the reset is skipped so DROP accumulates
+    //  across every round, capturing the worst-case overrun of a whole run.)
 }
 
 static bool play_step(const engine::Input& in) {
     auto& play = Game::region<PlayScreen, 1>();
+
+    // Live frame-overrun readout (engine counter): 4-digit dropped-frame count in
+    // the HUD, refreshed every frame. Stays 0 while -Os keeps up; climbs if not.
+    Game::region<PlayScreen, 0>().print_num(29, 0, Game::frames_dropped(), 4);
 
     // Death pause: lives just hit 0. Freeze every entity (skip all updates so sprites
     // hold their last-committed positions) while the room stays on screen, then signal
@@ -551,8 +574,9 @@ static bool play_step(const engine::Input& in) {
                 enemy_touch = true;
         });
         if (enemy_touch) {
-            player.lives  = static_cast<u8>(player.lives - 1);
             player.iframe = kIFrames;
+#ifndef EDGE_ARENA_AUTOSTART
+            player.lives  = static_cast<u8>(player.lives - 1);
             hud_draw_lives();
             Game::sound.play(kDamageSfx, 0);
             if (player.lives == 0) {
@@ -563,6 +587,12 @@ static bool play_step(const engine::Input& in) {
                 if (g_new_high) g_high_score = g_score;
                 g_death_timer = kDeathPause;
             }
+#else
+            // Autostart perf harness: the player is immortal, so a round runs forever
+            // with the full enemy complement chasing — a sustained worst-case 4-sprite
+            // same-band load for reading the frame-overrun (DROP) counter unattended.
+            (void)0;
+#endif
         }
     }
 

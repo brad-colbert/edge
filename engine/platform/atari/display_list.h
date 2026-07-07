@@ -20,6 +20,8 @@
 // absolute (runtime) buffer address, so the list is built at set_screen time and
 // the builder inserts an extra LMS at every mode line that enters a new 4K page.
 
+#include <stddef.h>
+
 #include "../../display.h"
 #include "../../types.h"
 #include "antic.h"
@@ -113,12 +115,27 @@ constexpr u16 max_scroll_lms_count() {
 // mode-line-misaligned base) still corrupts its tail — unavoidable via the
 // display list alone; place the shared buffer so 4K boundaries align to
 // mode-line edges.
+//
+// Scroll layouts keep TWO copies of the list (double_buffered below): ANTIC
+// executes the front copy while patch_scroll() rewrites the ~one-LMS-per-line
+// coarse offset into the back copy and swaps. The commit is then a 2-byte
+// display-list-pointer write (the SDLSTL shadow, via the HAL) that the OS copies
+// to ANTIC atomically in the next vertical blank — so the heavy LMS rewrite can
+// run at any point in the frame without racing the beam. (Rewriting the live
+// list from the deferred VBI sheared the top band whenever input-lengthened OS
+// VBI work pushed the rewrite past vblank.) Both copies are built identically —
+// same 4K-crossing LMS layout, byte-for-byte — except the JVB, which loops each
+// copy back to its own start; only the scroll LMS address bytes ever differ.
 template <typename Layout>
 struct DisplayProgram {
     static constexpr u8  region_count = Layout::region_count;
     static constexpr u16 capacity     = detail::display_list_capacity<Layout>();
     static constexpr u16 max_lms      = detail::max_lms_count<Layout>();
     static constexpr u16 max_scroll_lms = detail::max_scroll_lms_count<Layout>();
+    // Only scroll layouts pay for the second list: they are the only ones whose
+    // list is rewritten per frame (the coarse LMS patch). Everything else keeps a
+    // 1-byte stub so non-scroll screens are unaffected.
+    static constexpr bool double_buffered = Layout::has_scroll;
 
     u8  bytes[capacity]              = {};
     u16 size                         = 0;   // bytes actually used by build()
@@ -129,8 +146,18 @@ struct DisplayProgram {
     // Low-byte index of every scroll-region LMS, in visible-line (top-to-bottom)
     // order, so patch_scroll() can repoint each line independently. The generic
     // ScrollManager never sees these — it only supplies coarse col/row.
+    // One table serves both list copies: they share the exact byte layout.
     u16 scroll_lms_pos[max_scroll_lms] = {};
     u16 scroll_lms_count               = 0;
+    // Back copy of the list for scroll layouts (see the struct comment); a 1-byte
+    // stub otherwise. Which copy is front alternates with every patch_scroll().
+    u8  bytes_b[double_buffered ? capacity : 1] = {};
+    u8  front_b                        = 0;   // 1 = bytes_b is the front copy
+
+    // The list copy the display hardware should be executing (the front). For a
+    // non-double-buffered layout this is always `bytes`.
+    u8*       front()       { return (double_buffered && front_b) ? bytes_b : bytes; }
+    const u8* front() const { return (double_buffered && front_b) ? bytes_b : bytes; }
 
     // Build the display list for screen memory based at `screen_base`, with the
     // list itself residing at `dl_base` (used by the JVB to loop the list).
@@ -138,6 +165,7 @@ struct DisplayProgram {
         u16 p   = 0;
         lms_count = 0;
         scroll_lms_count = 0;
+        front_b = 0;
 
         // Pure-overlay layout: ANTIC DMA is disabled entirely by the screen
         // manager, so the list need only satisfy the DLISTL pointer requirement.
@@ -218,14 +246,41 @@ struct DisplayProgram {
         bytes[p++] = lo(dl_base);
         bytes[p++] = hi(dl_base);
         size = p;
+
+        // Mirror the list into the back copy for scroll layouts: byte-identical
+        // (so the shared lms_pos/scroll_lms_pos tables index both) except the
+        // JVB, which must loop this copy back to its own start. The copy's base
+        // is derived from `dl_base` by the members' fixed offset so it stays
+        // consistent even when a test builds against a synthetic base address.
+        if constexpr (double_buffered) {
+            for (u16 i = 0; i < size; ++i) bytes_b[i] = bytes[i];
+            const u16 alt_base = static_cast<u16>(
+                dl_base + (offsetof(DisplayProgram, bytes_b) -
+                           offsetof(DisplayProgram, bytes)));
+            bytes_b[jvb_pos]     = lo(alt_base);
+            bytes_b[jvb_pos + 1] = hi(alt_base);
+        }
     }
 
     // Repoint every scroll-region LMS at the bound map for a coarse (col, row)
     // offset: visible line i loads `map_base + (coarse_row + i)*map_width +
     // coarse_col`. This is the ONLY place the ANTIC LMS bytes are rewritten at run
     // time; the generic ScrollManager supplies only the coarse offsets (it never
-    // touches the display list). A no-op for layouts with no scroll region.
-    void patch_scroll(u16 map_base, u16 map_width, u16 coarse_col, u16 coarse_row) {
+    // touches the display list).
+    //
+    // The rewrite lands in the BACK copy and swaps it to front (see the struct
+    // comment): the caller commits by handing the returned front pointer to the
+    // display-program shadow — an O(1) write the OS applies in the next vertical
+    // blank — so this per-line loop never races the beam no matter when it runs.
+    // Returns the new front (the copy just patched).
+    u8* patch_scroll(u16 map_base, u16 map_width, u16 coarse_col, u16 coarse_row) {
+#ifdef EDGE_SCROLL_RASTERBAR
+        // Diagnostic: paint the background for the duration of the rewrite so a
+        // screenshot shows where in the frame it runs (a visible band = past
+        // vblank — harmless now that the rewrite targets the off-screen copy).
+        *reinterpret_cast<volatile u8*>(0xD01A) = 0x36;   // COLBK, bright orange
+#endif
+        u8* const dst = double_buffered && !front_b ? bytes_b : bytes;
         // Successive visible lines differ by exactly one map row, so walk the load
         // address incrementally (one multiply for the first line, then += map_width)
         // instead of a 16-bit multiply per line. The per-line multiply made this the
@@ -235,10 +290,17 @@ struct DisplayProgram {
         // coarse_col` for every i.
         u16 a = static_cast<u16>(map_base + coarse_row * map_width + coarse_col);
         for (u16 i = 0; i < scroll_lms_count; ++i) {
-            bytes[scroll_lms_pos[i]]     = lo(a);
-            bytes[scroll_lms_pos[i] + 1] = hi(a);
+            dst[scroll_lms_pos[i]]     = lo(a);
+            dst[scroll_lms_pos[i] + 1] = hi(a);
             a = static_cast<u16>(a + map_width);
         }
+        if constexpr (double_buffered) front_b = static_cast<u8>(!front_b);
+#ifdef EDGE_SCROLL_RASTERBAR
+        // Restore the game's background colour from the OS shadow (COLOR4).
+        *reinterpret_cast<volatile u8*>(0xD01A) =
+            *reinterpret_cast<volatile u8*>(0x02C8);
+#endif
+        return dst;
     }
 
 private:

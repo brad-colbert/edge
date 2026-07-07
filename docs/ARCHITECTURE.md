@@ -1,6 +1,6 @@
 # Architecture
 
-> **Applies to EDGE v0.8.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
+> **Applies to EDGE v0.9.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
 
 System design, component relationships, and the abstraction
 boundaries that make the engine portable across 6502 platforms
@@ -483,14 +483,20 @@ demos, and tests (see ADR-034 in [DECISIONS.md](DECISIONS.md)):
 
 **Scroll** — manages hardware fine and coarse scrolling. The
 `ScrollManager` is portable: it owns the viewport position and
-the fine/coarse split, writes the fine-scroll registers through
+the fine/coarse split, stages the fine-scroll values through
 `Platform::hal`, and exposes `coarse_col()`/`coarse_row()`. The
 backend display program owns the load-address (coarse) patching —
-one address per visible line of a `ScrollRegion`, repointed each
-frame. Hardware conventions (per-axis fine-scroll inversion, fetch
-width) come from the display traits, so the generic layer names no
-backend specifics. The frame service applies scroll and keeps the
-Tiles viewport in sync; coarse scroll is clamped to the map edges.
+one address per visible line of a `ScrollRegion`. Scroll display
+programs are double-buffered: on a coarse change the frame service
+patches the off-screen copy and commits it with a single
+display-program-pointer write that the platform latches at the
+next frame boundary, so the per-line rewrite never races the
+display beam and fine + coarse take effect together (ADR-027,
+2026-07-07 revision). Hardware conventions (per-axis fine-scroll
+inversion, fetch width) come from the display traits, so the
+generic layer names no backend specifics. The frame service
+applies scroll and keeps the Tiles viewport in sync; coarse scroll
+is clamped to the map edges.
 
 **Sound** — manages POKEY voice allocation and sound effect /
 music playback. Sound data is `constexpr` ROM tables.

@@ -492,6 +492,16 @@ struct Hal {
     // the stack. See the edge_vbi_busy comment above.
     static void frame_consumed() { edge_vbi_busy = 0; }
 
+    // Diagnostic hook (EDGE_SIM_VBI_LATE in engine/core.h): burn ~30 scanlines of
+    // WSYNC waits at the top of the deferred service to fake the start drift that
+    // live joystick/keyboard input causes (the OS VBI's input processing runs
+    // first) — the drift that pushed the coarse scroll rewrite past vblank at -Os.
+    // Autopilot/headless runs generate no real input, so without this the race
+    // window never opens. Generates no code unless the gated call is compiled in.
+    static void sim_vbi_late() {
+        for (uint8_t i = 0; i < 30; ++i) *reg::WSYNC = 0;
+    }
+
     // ── Teardown (reverse of init) ───────────────────────────────────────
     //
     // The engine normally runs forever; a program that instead returns to the OS/DOS

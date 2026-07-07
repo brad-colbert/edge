@@ -145,7 +145,15 @@ static void submit_camera_and_sprite() {
 }
 
 static void frame_step(const engine::Input& in) {
+#ifdef EDGE_TANK_AUTOPILOT
+    // Perf harness (no input-injection tooling available): auto-drive forward while
+    // turning, so the scroll hot path runs every frame and the frame-overrun counter
+    // measures sustained scrolling unattended. Inert unless EDGE_TANK_AUTOPILOT is set.
+    (void)in;
+    const tank::Intent intent = tank::resolve_input(false, true, true, false);
+#else
     const tank::Intent intent = tank::resolve_input(in.left(), in.right(), in.up(), in.down());
+#endif
     if (intent.rotate != 0) {
         if (g_tank.turn_counter == 0) {
             g_tank.heading = (intent.rotate > 0) ? tank::heading_cw(g_tank.heading)
@@ -155,6 +163,11 @@ static void frame_step(const engine::Input& in) {
     } else { g_tank.turn_counter = 0; }
     tank::move_tank(g_tank, intent.move);
     submit_camera_and_sprite();
+    // Frame-overrun tell: tint the playfield background if the loop has dropped any
+    // frame (brighter red = more), reusing the show_progress colour convention. Stays
+    // invisible while the demo holds 60Hz (frames_dropped()==0 leaves the palette be).
+    if (const u16 d = Game::frames_dropped())
+        Platform::hal::set_color_pf(4, static_cast<u8>(0x30 | (d < 14 ? d : 14)));
 }
 
 #if TANK_NET_MODE
@@ -174,6 +187,7 @@ static void show_progress(bool failed, bool complete) {
         static_cast<u8>(reinterpret_cast<uintptr_t>(&g_net_tileset) >> 8));
     Game::scroll_map(g_map);
     submit_camera_and_sprite();
+    Game::reset_frame_stats();   // measure gameplay only, not one-shot setup stalls
     Game::run(frame_step);
 }
 [[noreturn]] static void halt_loop() { Game::run([](const engine::Input&) {}); }
@@ -354,6 +368,7 @@ int main() {
             tank::copy_chunk_to_map(g_map, tank::chunk_payload(cx, cy), cx, cy);
     Game::scroll_map(g_map);
     submit_camera_and_sprite();
+    Game::reset_frame_stats();   // measure gameplay only, not one-shot setup stalls
     Game::run(frame_step);
 
 #elif EDGE_TANK_ASSET_SOURCE == TANK_ASSET_SIMULATED

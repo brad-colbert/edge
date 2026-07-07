@@ -1,6 +1,6 @@
 # EDGE Engine Documentation
 
-> **Applies to EDGE v0.8.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
+> **Applies to EDGE v0.9.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
 
 EDGE is a C++ engine for building games and interactive applications on constrained 6502-class systems.
 

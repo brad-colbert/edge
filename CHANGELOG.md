@@ -11,13 +11,57 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-07
+
+### Fixed
+- **Horizontal-scroll top-band shear when the frame service runs late.** Rewriting the
+  *live* display list's per-line load addresses from the deferred VBI raced the display
+  beam: input-lengthened OS vertical-blank work (most visible in `-Os` builds, e.g.
+  `tank_dual_net`) pushed the ~one-LMS-per-line coarse rewrite past vertical blank, so
+  the top rows of the frame showed the previous coarse column — a one-cell shear while
+  scrolling east/west. A scroll layout's display program is now **double-buffered**:
+  `patch_scroll()` rewrites the off-screen copy and swaps, and the screen manager
+  commits with a 2-byte write to the display-list pointer shadow (SDLSTL/SDLSTH) that
+  the OS transfers to ANTIC atomically next vertical blank — an O(1) commit that cannot
+  race the beam no matter how late the service runs. Costs ~the list size in RAM
+  (~80 B for the tank screens), scroll layouts only. A/B-verified headlessly on Altirra
+  (simulated VBI lateness: 3/11 before-shots sheared, 0/11 after). See ADR-027
+  (2026-07-07 revision).
+
 ### Changed
+- **Scroll commit timing: fine scroll is staged only by the frame service.** Because
+  the pointer-swap commit latches one frame after the service writes it, the fine
+  value must ride the same latch: `apply_scroll` stages it, the immediate VBI flushes
+  it, and the OS applies the display-list pointer in the same vertical blank — fine and
+  coarse can never split. The game-loop fine publish from the earlier top-band jitter
+  fix (`Core::publish_scroll`, called by `loop.h`) is **removed**; it would put fine one
+  frame ahead of coarse and snap the picture at every cell crossing. Net effect: scroll
+  latency grows by one frame, uniformly and imperceptibly.
 - **Tank demos let the player drive over fuel/ammo depots.** The `tank_net` and
   `tank_dual_net` player wall collision now blocks only on *pure-white* (COLPF0)
   contact. Depot icons draw white letters inside a coloured COLPF1/COLPF2 box, so their
   colour bit is masked out of the wall test (`hit & kWallColpfMask && !(hit &
   kDepotSurroundMask)`) and the tank drives over them while plain walls still stop it.
   Derived from the live `P0PF` register — no depot tile codes hardcoded.
+- **Realtime demos build at a switchable optimization level (`EDGE_HOT_OPT`).** A CMake
+  cache STRING (default `-O2`; `HOT_OPT=-Os scripts/build_demos.sh` passthrough) flips
+  every realtime demo between `-O2` and `-Os` in one knob. Measured on Altirra, all
+  realtime demos (meter, arena, tank, tank_net, tank_dual_net) hold 60 fps with zero
+  dropped frames at `-Os`, for 10-33% smaller `.xex` — the old hardcoded `-O2` pins are
+  stale.
+
+### Added
+- **Frame-overrun diagnostics.** The frame service counts serviced and dropped frames
+  (`Game::frames_dropped()` / `frames_serviced()` / `reset_frame_stats()`), so a demo
+  can prove it holds frame rate; the realtime demos grew on-screen drop tells and
+  gated perf autopilots (`EDGE_TANK_AUTOPILOT`, `EDGE_ARENA_AUTOSTART`).
+- **Gated beam-race diagnostics** for headless verification: `EDGE_SIM_VBI_LATE`
+  (backend hook delays the frame service ~30 scanlines, faking the input-driven VBI
+  lateness autopilot runs can't produce), `EDGE_SCROLL_RASTERBAR` (paints the
+  background while the coarse rewrite runs, showing where in the frame it executes),
+  and `EDGE_SCROLL_AUTOPILOT` (`atari_scroll_test` sweeps east/west over a
+  ruler-patterned map so shear is machine-detectable in screenshots). All compile-time
+  off by default.
 
 ## [0.8.0] - 2026-06-27
 

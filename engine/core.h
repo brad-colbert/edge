@@ -193,6 +193,15 @@ public:
     // Frame-ready flag set by frame_service(), polled by the loop (loop.h).
     static inline volatile bool frame_ready_ = false;
 
+    // Frame-overrun diagnostic. frame_service() sets frame_ready_ once per frame;
+    // if the flag is STILL set the next time the service runs, the game loop never
+    // consumed the previous frame — the frame overran its budget and was dropped.
+    // frames_serviced_ counts every service; frames_dropped_ counts the overruns.
+    // Free-running u16 (wrap ~18 min at 60/s); read/reset via the forwarders below.
+    // Cost is a couple of increments per frame — negligible on the hot path.
+    static inline volatile u16 frames_serviced_ = 0;
+    static inline volatile u16 frames_dropped_  = 0;
+
     // ── Initialisation ──
     //
     // With a tileset: enable sprites, bring up the initial screen, load the
@@ -391,6 +400,14 @@ public:
     static void run_until(Cb cb) { engine::run_until<Core>(cb); }
     static bool frame_overrun() { return engine::frame_overrun<Core>(); }
 
+    // Frame-overrun diagnostic accessors (see frames_dropped_/frames_serviced_).
+    // frames_dropped() is the number of frames the game loop failed to consume in
+    // time; frames_serviced() is the total frames the service ran. reset_frame_stats()
+    // zeroes both so a demo can measure a clean window (e.g. after warm-up/setup).
+    static u16 frames_dropped()  { return frames_dropped_; }
+    static u16 frames_serviced() { return frames_serviced_; }
+    static void reset_frame_stats() { frames_dropped_ = 0; frames_serviced_ = 0; }
+
     // Quiesce every subsystem so a program can hand control back to its host
     // environment instead of running forever. Closes any open network lanes, then
     // asks the platform to tear down whatever it brought up (interrupt handlers,
@@ -414,13 +431,6 @@ public:
             Platform::hal::frame_consumed();
     }
 
-    // Called by the loop right after the game callback has committed this frame's
-    // scroll position, before it waits for the next frame boundary. Publishes the
-    // fine-scroll position so the backend latches THIS frame's value (keeping fine
-    // and coarse scroll coherent — see Screen::publish_fine_scroll). No-op unless a
-    // scroll map is bound.
-    static void publish_scroll() { screen.publish_fine_scroll(scroll); }
-
     // ── Per-frame service ──
     //
     // The backend's frame interrupt runs this once per frame in the
@@ -428,6 +438,15 @@ public:
     // a plain void(*)() for install_frame_isr().
     static void frame_service() {
         using caps = engine::caps_of_t<Platform>;
+
+#ifdef EDGE_SIM_VBI_LATE
+        // Diagnostic build gate: delay the whole service the way long pre-service
+        // host work (e.g. live input processing) does, so sub-frame beam-race
+        // defects reproduce headlessly — automated input keeps the host's
+        // pre-service work short, hiding them. No-op without a backend hook.
+        if constexpr (requires { Platform::hal::sim_vbi_late(); })
+            Platform::hal::sim_vbi_late();
+#endif
 
         // 0. Suppress idle-dim (the backend would otherwise dim/cycle colours
         //    after a few minutes of no console/keyboard input).
@@ -538,7 +557,12 @@ public:
         // 7. User frame hooks.
         interrupts.run_frame_hooks();
 
-        // 8. Release the loop's frame.
+        // 8. Release the loop's frame. If the previous frame was never consumed
+        //    (frame_ready_ still set), the game loop overran its budget — record the
+        //    dropped frame for the frame-overrun diagnostic before re-arming.
+        // (plain assignment, not ++: compound ops on a volatile are deprecated in C++20)
+        frames_serviced_ = static_cast<u16>(frames_serviced_ + 1);
+        if (frame_ready_) frames_dropped_ = static_cast<u16>(frames_dropped_ + 1);
         frame_ready_ = true;
     }
 
