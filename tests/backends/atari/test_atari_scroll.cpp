@@ -133,15 +133,43 @@ static void test_scroll_build() {
     CHECK(g_dl.bytes[g_dl.region_lms_pos[0] - 1] == (0x02 | M::DL_LMS));
 }
 
-// ── patch_scroll repoints each line by the map-width stride ────────────
+// ── patch_scroll repoints each line, into the back copy, and swaps ─────
 
 static void test_patch_scroll() {
     g_dl.build(0x4000, 0x4000);
-    g_dl.patch_scroll(0x8000, MAP_W, /*col*/ 3, /*row*/ 2);
 
+    // Scroll layouts are double-buffered: build mirrors the list into a second
+    // copy, byte-identical (so one scroll_lms_pos table indexes both) except the
+    // JVB, which loops each copy back to its own start.
+    static_assert(decltype(g_dl)::double_buffered, "scroll layout double-buffers");
+    const u16 alt_base = static_cast<u16>(
+        0x4000 + (addr_of(g_dl.bytes_b) - addr_of(g_dl.bytes)));
+    for (u16 i = 0; i < g_dl.size; ++i) {
+        if (i == g_dl.jvb_pos || i == g_dl.jvb_pos + 1) continue;
+        CHECK(g_dl.bytes_b[i] == g_dl.bytes[i]);
+    }
+    CHECK(read16(g_dl.bytes,   g_dl.jvb_pos) == 0x4000);
+    CHECK(read16(g_dl.bytes_b, g_dl.jvb_pos) == alt_base);
+    CHECK(g_dl.front() == g_dl.bytes);
+
+    // The coarse rewrite lands in the OFF-screen copy, which becomes the front;
+    // the returned pointer is what the caller commits to the display hardware.
+    u8* front = g_dl.patch_scroll(0x8000, MAP_W, /*col*/ 3, /*row*/ 2);
+    CHECK(front == g_dl.bytes_b);
+    CHECK(front == g_dl.front());
     for (u16 i = 0; i < g_dl.scroll_lms_count; ++i) {
         const u16 expect = static_cast<u16>(0x8000 + (2 + i) * MAP_W + 3);
-        CHECK(read16(g_dl.bytes, g_dl.scroll_lms_pos[i]) == expect);
+        CHECK(read16(front, g_dl.scroll_lms_pos[i]) == expect);
+    }
+
+    // A second patch swaps back to the primary copy, fully repatched (each patch
+    // rewrites every scroll LMS, so a stale back copy can never leak through).
+    front = g_dl.patch_scroll(0x8000, MAP_W, /*col*/ 4, /*row*/ 2);
+    CHECK(front == g_dl.bytes);
+    CHECK(front == g_dl.front());
+    for (u16 i = 0; i < g_dl.scroll_lms_count; ++i) {
+        const u16 expect = static_cast<u16>(0x8000 + (2 + i) * MAP_W + 4);
+        CHECK(read16(front, g_dl.scroll_lms_pos[i]) == expect);
     }
 }
 
@@ -169,6 +197,8 @@ static void test_apply_scroll() {
     const u16 map = addr_of(g_map);
     CHECK(scroll.active());
     CHECK(first_scroll_addr() == map);             // bound at coarse (0,0)
+    // bind committed the freshly patched front copy to the display hardware.
+    CHECK(MockHal::last_program == g_sm.active_dl());
 
     // Scroll to (20,17). Horizontal fine is inverted and absorbs into its cell;
     // vertical fine is raw. hscrol 0 (20%4==0), vscrol 1 (17%8), coarse col 5,
@@ -180,6 +210,8 @@ static void test_apply_scroll() {
     CHECK(MockHal::vscrol == 1);
     CHECK(MockHal::fine_writes == 2);
     CHECK(first_scroll_addr() == static_cast<u16>(map + 2 * MAP_W + 5));
+    // The coarse change patched the back copy, swapped, and committed it.
+    CHECK(MockHal::last_program == g_sm.active_dl());
 
     // Suspended: apply_scroll writes nothing and leaves the list unchanged.
     scroll.suspend();

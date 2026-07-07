@@ -236,12 +236,20 @@ static void frame_step(const engine::Input& in) {
     const u8 hit = Game::sprite_collisions().sprite_to_background(0);
     if ((hit & kWallColpfMask) && !(hit & kDepotSurroundMask)) {
         g_tank = g_st.tank_safe;
+#ifdef EDGE_TANK_AUTOPILOT
+        g_tank.heading = static_cast<u8>((g_tank.heading + 8) & 15);  // bounce: reverse off the wall so the patrol keeps scrolling
+#endif
     } else {
         g_st.tank_safe = g_tank;
     }
 
     // 3. Local tank input + movement (unchanged from the original tank demo).
+#ifdef EDGE_TANK_AUTOPILOT
+    (void)in;   // perf harness: auto-drive straight (reverse off walls, below) so the
+    const tank::Intent intent = tank::resolve_input(false, false, true, false);  // scroll hot path runs continuously
+#else
     const tank::Intent intent = tank::resolve_input(in.left(), in.right(), in.up(), in.down());
+#endif
     if (intent.rotate != 0) {
         if (g_tank.turn_counter == 0) {
             g_tank.heading = (intent.rotate > 0) ? tank::heading_cw(g_tank.heading)
@@ -265,6 +273,10 @@ static void frame_step(const engine::Input& in) {
 
     // 5. Draw all tanks.
     submit_sprites();
+    // Frame-overrun tell: tint the background BLUE if the loop dropped any frame
+    // (brighter = more). Blue is distinct from the red "NO NET" indicator below.
+    if (const u16 d = Game::frames_dropped())
+        Platform::hal::set_color_pf(4, static_cast<u8>(0x80 | (d < 14 ? d : 14)));
 }
 
 // ── Entry point ────────────────────────────────────────────────────────────
@@ -295,5 +307,6 @@ int main() {
     }
 
     submit_sprites();
+    Game::reset_frame_stats();   // measure gameplay only, not one-shot setup stalls
     Game::run(frame_step);
 }

@@ -357,14 +357,37 @@ static void streaming_frame_step(const engine::Input& in) {
     // Pure-white contact (COLPF0, no depot-box colour) is a wall → snap back; a depot
     // letter sets a colour bit too, so the tank drives over it.
     const u8 hit = Game::sprite_collisions().sprite_to_background(0);
+#ifdef EDGE_TANK_AUTOPILOT
+    // Bounce: reverse off the wall so the patrol keeps scrolling. The GTIA
+    // collision latch lags the restore by a frame, so a plain restore+reverse
+    // re-reads the stale hit next frame, flips the heading straight back, and
+    // parks the tank at the first wall forever. Reverse once, then ignore the
+    // latch for a few frames while the tank drives clear.
+    static u8 s_bounce_cooldown = 0;
+    if (s_bounce_cooldown) {
+        --s_bounce_cooldown;
+        g_st.tank_safe = g_tank;
+    } else if ((hit & kWallColpfMask) && !(hit & kDepotSurroundMask)) {
+        g_tank = g_st.tank_safe;
+        g_tank.heading = static_cast<u8>((g_tank.heading + 8) & 15);
+        s_bounce_cooldown = 8;
+    } else {
+        g_st.tank_safe = g_tank;
+    }
+#else
     if ((hit & kWallColpfMask) && !(hit & kDepotSurroundMask)) {
         g_tank = g_st.tank_safe;
     } else {
         g_st.tank_safe = g_tank;
     }
+#endif
 
     // 3. Local tank input + movement (unchanged from the original tank demo).
+#ifdef EDGE_TANK_AUTOPILOT
+    const tank::Intent intent = tank::resolve_input(false, false, true, false);  // perf harness: auto-drive straight (reverse off walls below)
+#else
     const tank::Intent intent = tank::resolve_input(in.left(), in.right(), in.up(), in.down());
+#endif
     if (intent.rotate != 0) {
         if (g_tank.turn_counter == 0) {
             g_tank.heading = (intent.rotate > 0) ? tank::heading_cw(g_tank.heading)
@@ -394,6 +417,10 @@ static void streaming_frame_step(const engine::Input& in) {
 
     // 5. Draw all tanks + missiles.
     submit_sprites();
+    // Frame-overrun tell: tint the background BLUE if the loop dropped any frame
+    // (brighter = more). Blue is distinct from the red "NO NET" indicator.
+    if (const u16 d = Game::frames_dropped())
+        Platform::hal::set_color_pf(4, static_cast<u8>(0x80 | (d < 14 ? d : 14)));
 }
 
 // Per-frame streaming + quit handling (one callback to keep the demo's near-full zero
@@ -465,6 +492,7 @@ static bool streaming_step(const engine::Input& in) {
     }
 
     submit_sprites();
+    Game::reset_frame_stats();   // measure gameplay only, not one-shot setup stalls
     // Streams until a keypress; on keypress it sends the "bye" to the server over a few
     // frames (so it returns to Phase 1) and then returns.
     Game::run_until(streaming_step);

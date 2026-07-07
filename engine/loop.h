@@ -47,7 +47,6 @@ template <typename Core, typename Cb>
         Core::frame_consumed();   // release the VBI guard now the frame is consumed
         sync_after_vbi();
         cb(Core::input);
-        Core::publish_scroll();   // latch THIS frame's fine scroll before the next frame service
         if (Core::hooks.post_render) Core::hooks.post_render();
     }
 }
@@ -61,7 +60,6 @@ void run_until(Cb cb) {
         Core::frame_consumed();   // release the VBI guard now the frame is consumed
         sync_after_vbi();
         const bool done = cb(Core::input);
-        Core::publish_scroll();   // latch THIS frame's fine scroll before the next frame service
         if (Core::hooks.post_render) Core::hooks.post_render();
         if (done) return;
     }

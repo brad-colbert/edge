@@ -334,6 +334,11 @@ static void draw_static_labels() {
     Game::print(20, 17, "REV");
     Game::print(0, 18, "WORST");
     Game::print(12, 18, "BEST");
+    // Engine frame-overrun diagnostic: frames the game loop failed to consume in
+    // time (dropped) out of total frames serviced. Reads Game::frames_dropped()/
+    // frames_serviced() — a nonzero DROP means the per-frame path overran 60Hz.
+    Game::print(0, 20, "FRM DROP");
+    Game::print(15, 20, "OF");
     Game::print(0, 23, "FIRE = QUIT");
     // Peer endpoint + TV/fps line (host string then ":port  ECHO  NTSC <fps>").
     Game::print(5, 1, kPeerHost);
@@ -388,6 +393,10 @@ static void draw_dynamic(bool active, u16 now) {
     print_pct(24, 17, g_loss_rev);
     print_pct(6, 18, g_loss_worst);
     print_pct(17, 18, g_loss_best);
+
+    // Frame-overrun diagnostic (engine counter): dropped / serviced.
+    Game::print_num(9, 20, Game::frames_dropped(), 5);
+    Game::print_num(18, 20, Game::frames_serviced(), 5);
 }
 
 // ── Per-frame step ────────────────────────────────────────────────────────────
@@ -486,6 +495,10 @@ int main() {
         Game::print(28, 0, "ACTIVE");
     }
 
+    // Zero the frame-overrun counters after all one-shot setup (charset load,
+    // screen bring-up, blocking netstream settle) so the on-screen DROP/SVC
+    // readout measures only the steady-state run loop, not boot-time stalls.
+    Game::reset_frame_stats();
     Game::run_until(step);
     return 0;
 }

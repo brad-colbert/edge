@@ -1,6 +1,6 @@
 # Architecture Decision Records
 
-> **Applies to EDGE v0.8.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
+> **Applies to EDGE v0.9.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
 
 Decisions made during design, with rationale. These explain the
 "why" behind architectural choices and document tradeoffs.
@@ -1258,6 +1258,36 @@ per visible line instead of one per region — e.g. 24 × 3 bytes),
 and the map must carry a few margin columns on the horizontal axis
 (the HSCROLL fetch overscan), with coarse scroll clamped to the
 fetch width. Both are small and standard for ANTIC scrolling.
+
+**Revision (2026-07-07): double-buffered display program; coarse
+commits by pointer swap.** Rewriting the *live* list's per-line
+load addresses from the deferred frame service raced the display
+beam: when input-lengthened OS vertical-blank work pushed the
+service late (more likely with the slower per-byte code of `-Os`
+builds), the rewrite ran past vertical blank and the top rows of
+the frame displayed the previous coarse offset while the rest
+showed the new one — a one-cell horizontal shear during scrolling.
+Moving the rewrite to the immediate VBI made it worse (a heavy
+operation cannot fit the blank window). A scroll layout's display
+program now keeps TWO byte-identical copies of the list (the
+second costs roughly the list size, and only for scroll layouts):
+`patch_scroll()` rewrites the OFF-screen copy and swaps, and the
+screen manager commits by writing the new front's address to the
+display-list pointer shadow — an O(1) write the OS transfers to
+the hardware atomically in the next vertical blank, so the heavy
+rewrite may run at any point in the frame. Each copy's JVB loops
+to its own base; one LMS-position table indexes both. Because the
+commit now latches one frame later than the old in-place patch,
+the fine-scroll value is staged ONLY by the frame service — the
+game-loop fine publish (added for the earlier top-band jitter fix)
+is removed, since it would put fine one frame ahead of coarse and
+snap the picture at every cell crossing. The fine flush (immediate
+VBI) and the pointer transfer (OS shadow copy) land in the same
+vertical blank, keeping fine and coarse atomic; scroll latency
+grows by one frame, uniformly. Verified A/B on the emulator with a
+gated service-delay diagnostic (`EDGE_SIM_VBI_LATE`) and a
+row-alignment analyzer over screenshots; covered by
+`tests/backends/atari/test_atari_scroll.cpp`.
 
 ---
 

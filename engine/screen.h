@@ -202,7 +202,7 @@ public:
 
         // Program the display. Blank DMA and install the program in all cases.
         Platform::hal::display_dma_disable();
-        Platform::hal::set_display_program(dl.bytes);
+        Platform::hal::set_display_program(dl.front());
         if constexpr (!S::display::is_pure_overlay) {
             // Playfield content present (playfield-only or mixed overlay+playfield):
             // re-enable playfield DMA. Mixed layouts cost only the display-program
@@ -216,7 +216,7 @@ public:
         // blitter — the bus-contention fix (formerly a manual playfield-DMA disable),
         // now automatic.
 
-        active_dl_      = dl.bytes;
+        active_dl_      = dl.front();
         active_dl_size_ = dl.size;
 
         // A fresh screen is not scroll-bound until bind_scroll_map(); apply_scroll
@@ -253,9 +253,13 @@ public:
         scroll_bound_     = true;
 
         // Point the scroll region's view at the map so region-view writes land in
-        // the map buffer, and set the initial (unscrolled) load addresses.
+        // the map buffer, and set the initial (unscrolled) load addresses. The
+        // patch lands in the program's back copy and swaps it to front, so commit
+        // the new front to the display hardware (same sequence as apply_scroll).
         views_.template for_screen<S>().template get<idx>().ptr = map_base;
-        dl.patch_scroll(scroll_map_base_, scroll_map_width_, 0, 0);
+        u8* const front = dl.patch_scroll(scroll_map_base_, scroll_map_width_, 0, 0);
+        Platform::hal::set_display_program(front);
+        active_dl_ = front;
         // Invalidate the apply_scroll coarse cache so the next frame re-patches
         // regardless of the prior (possibly different-program) coarse offset.
         last_coarse_col_ = 0xFFFF;
@@ -271,10 +275,17 @@ public:
                         tr::fine_scroll_inverts_x(mode), tr::fine_scroll_inverts_y(mode));
     }
 
-    // Per-frame scroll update (called from the frame service). Writes the fine
-    // registers and repoints the scroll-region load addresses for the current coarse
-    // offset. No-op unless a map is bound and the ScrollManager is active and not
-    // suspended.
+    // Per-frame scroll update (called from the frame service). Stages the fine
+    // registers and, when the coarse offset crossed a cell, patches the program's
+    // back copy and commits it with a display-program-pointer write. Both the
+    // staged fine value and the committed program pointer are latched by the
+    // backend at the NEXT frame boundary — the same one — so fine and coarse
+    // always go live together for the same scroll position, and neither can race
+    // the beam no matter how late in the frame this service runs. (Staging fine
+    // anywhere else — e.g. from the game loop, as an earlier design did — puts it
+    // one frame ahead of the coarse commit and snaps the picture at every cell
+    // crossing.) No-op unless a map is bound and the ScrollManager is active and
+    // not suspended.
     template <typename ScrollT>
     void apply_scroll(ScrollT& scroll) {
         if (!scroll_bound_ || !scroll.active() || scroll.suspended()) return;
@@ -288,24 +299,13 @@ public:
         const u16 cc = scroll.coarse_col();
         const u16 cr = scroll.coarse_row();
         if (cc != last_coarse_col_ || cr != last_coarse_row_) {
-            scroll_patch_(scroll_prog_, scroll_map_base_, scroll_map_width_, cc, cr);
+            u8* const front = scroll_patch_(scroll_prog_, scroll_map_base_,
+                                            scroll_map_width_, cc, cr);
+            Platform::hal::set_display_program(front);
+            active_dl_ = front;
             last_coarse_col_ = cc;
             last_coarse_row_ = cr;
         }
-    }
-
-    // Publish only the fine-scroll position to the backend. Called from the game
-    // loop right after the game commits its frame (engine/loop.h), so the value the
-    // backend latches at the next frame boundary reflects THIS frame's position.
-    // The backend may latch the fine registers at a different point in the frame
-    // than the coarse load addresses (apply_scroll, run from the frame service); if
-    // the fine value were published only there it could lag the coarse offset by a
-    // frame and shear the picture during motion. write_fine() carries no display-
-    // program side effects, so it is safe to call outside the frame service.
-    template <typename ScrollT>
-    void publish_fine_scroll(ScrollT& scroll) {
-        if (!scroll_bound_ || !scroll.active() || scroll.suspended()) return;
-        scroll.write_fine();
     }
 
     // Typed region view for region N of screen S (compile-time type safety:
@@ -354,11 +354,12 @@ private:
 
     // Type-erasing trampoline so apply_scroll can call the backend display
     // program's patch_scroll without the ScreenManager naming the per-screen
-    // program type at the call site.
+    // program type at the call site. Returns the program's new front copy for
+    // the caller to commit to the display hardware.
     template <typename S>
-    static void patch_thunk(void* p, u16 base, u16 width, u16 col, u16 row) {
+    static u8* patch_thunk(void* p, u16 base, u16 width, u16 col, u16 row) {
         using DP = typename Platform::template display_program<typename S::display>;
-        static_cast<DP*>(p)->patch_scroll(base, width, col, row);
+        return static_cast<DP*>(p)->patch_scroll(base, width, col, row);
     }
 
     alignas(buffer_align) u8 screen_buffer_[buffer_size + pad_slack] = {};
@@ -370,7 +371,7 @@ private:
     // Scroll binding (type-erased: the active program type is captured in
     // scroll_patch_ at bind time so apply_scroll names no per-screen type).
     void*  scroll_prog_      = nullptr;
-    void (*scroll_patch_)(void*, u16, u16, u16, u16) = nullptr;
+    u8* (*scroll_patch_)(void*, u16, u16, u16, u16) = nullptr;
     u16    scroll_map_base_  = 0;
     u16    scroll_map_width_ = 0;
     bool   scroll_bound_     = false;

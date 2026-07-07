@@ -99,9 +99,18 @@ static void fill_map() {
                 const u16 lc = static_cast<u16>(c - kMargin);   // logical column
                 if (r == 0)       t = g(static_cast<char>('0' + (lc / 10) % 10));  // col tens
                 else if (r == 1)  t = g(static_cast<char>('0' + (lc % 10)));       // col ones
+#ifdef EDGE_SCROLL_AUTOPILOT
+                // Diagnostic rig: repeat the column ruler on every row so a
+                // horizontal shear (a band of rows displaced by a coarse cell
+                // against the rest of the frame) is visible at any screen row —
+                // the '.' texture is one-cell periodic and hides it.
+                else if ((r & 1) == 0) t = g(static_cast<char>('0' + (lc / 10) % 10));
+                else                   t = g(static_cast<char>('0' + (lc % 10)));
+#else
                 else if (lc == 0) t = g(static_cast<char>('0' + (r / 10) % 10));   // row tens
                 else if (lc == 1) t = g(static_cast<char>('0' + (r % 10)));        // row ones
                 else              t = g('.');                                      // texture
+#endif
             }
             g_map.set_tile(c, r, t);
         }
@@ -116,12 +125,21 @@ static u16 g_frame = 0;
 // ── Per-frame logic (runs once per VBI via Game::run) ────────────────────
 
 static void frame_step(const engine::Input& in) {
+#ifdef EDGE_SCROLL_AUTOPILOT
+    // Diagnostic rig: sweep the viewport east/west continuously (2 fine units
+    // per frame crosses a coarse cell every other frame) so horizontal-scroll
+    // defects reproduce headlessly, without joystick input.
+    (void)in;
+    if ((g_frame / 60) & 1) Game::scroll.move(-2, 0);
+    else                    Game::scroll.move(2, 0);
+#else
     // Joystick scrolls the window. X is in fine (color-clock) units, Y in
     // scanlines; the engine clamps at the map edges and handles fine<->coarse.
     if (in.left())  Game::scroll.move(-1, 0);
     if (in.right()) Game::scroll.move(1, 0);
     if (in.up())    Game::scroll.move(0, -1);
     if (in.down())  Game::scroll.move(0, 1);
+#endif
 
     ++g_frame;
 

@@ -10,8 +10,8 @@
 // EDGE follows Semantic Versioning (https://semver.org/): MAJOR.MINOR.PATCH.
 
 #define EDGE_VERSION_MAJOR 0
-#define EDGE_VERSION_MINOR 8
+#define EDGE_VERSION_MINOR 9
 #define EDGE_VERSION_PATCH 0
-#define EDGE_VERSION_STRING "0.8.0"
+#define EDGE_VERSION_STRING "0.9.0"
 
 #endif // ENGINE_VERSION_H

@@ -9,6 +9,8 @@
 # Usage:  scripts/build_demos.sh
 #   BUILD_DIR=<dir>   build directory (default: build-atari)
 #   RECONF=1          force a fresh CMake configure even if the cache exists
+#   HOT_OPT=<flag>    optimization for the realtime demos: -O2 (default) | -Os | -Oz
+#                     (only applied at configure time; use RECONF=1 to change it)
 #
 # Run scripts/setup.sh first if you are unsure the toolchain is installed.
 
@@ -21,7 +23,8 @@ if [ ! -f "$BUILD_DIR/CMakeCache.txt" ] || [ "${RECONF:-0}" = "1" ]; then
     echo "== configuring Atari demo build in $BUILD_DIR =="
     cmake -S "$REPO" -B "$BUILD_DIR" \
         -DCMAKE_TOOLCHAIN_FILE="$REPO/cmake/atari-toolchain.cmake" \
-        -DEDGE_BUILD_DEMO=ON
+        -DEDGE_BUILD_DEMO=ON \
+        ${HOT_OPT:+-DEDGE_HOT_OPT="$HOT_OPT"}
 fi
 
 echo "== building all demos (target: demos) =="
