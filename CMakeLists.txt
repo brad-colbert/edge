@@ -144,18 +144,30 @@ if(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB)
         list(APPEND EDGE_FUJINETLIB_INCLUDE_FLAGS "-I${_fninc}")
     endforeach()
 
-    # The define is global: platform.h pulls <fujinet-network.h> into every
-    # target, and any target instantiating SessionLane calls into the archive.
-    # Header search path and link line therefore have to be global to match.
-    # libfujinet.a is a static archive, so targets that never call it pay
-    # nothing.
-    add_compile_definitions(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB=1)
-    include_directories(${EDGE_FUJINETLIB_INCLUDE_DIRS})
-    link_libraries(${EDGE_FUJINETLIB_LIBRARY})
     message(STATUS "EDGE FujiNet session backend: RealFujinetLib")
     message(STATUS "  include: ${EDGE_FUJINETLIB_INCLUDE_DIRS}")
     message(STATUS "  library: ${EDGE_FUJINETLIB_LIBRARY}")
 endif()
+
+# Opt a single target into the real fujinet-lib session backend: the define selects
+# the real adapter over the stub in fujinet.h, so it must travel together with the
+# header search path and the archive. No-op when the option is OFF.
+#
+# Per-target rather than global, so enabling the option does not compile the real
+# adapter and link a 1.4 MB archive into every unrelated demo. Apply it to any target
+# that instantiates the session lane OR merely branches on the macro — miss one and it
+# silently compiles the stub instead of failing to build.
+function(edge_use_fujinetlib_session tgt)
+    if(NOT EDGE_ATARI_FUJINET_SESSION_FUJINETLIB)
+        return()
+    endif()
+    target_compile_definitions(${tgt} PRIVATE EDGE_ATARI_FUJINET_SESSION_FUJINETLIB=1)
+    target_include_directories(${tgt} PRIVATE ${EDGE_FUJINETLIB_INCLUDE_DIRS})
+    get_target_property(_edge_tgt_type ${tgt} TYPE)
+    if(NOT _edge_tgt_type STREQUAL "OBJECT_LIBRARY")
+        target_link_libraries(${tgt} PRIVATE ${EDGE_FUJINETLIB_LIBRARY})
+    endif()
+endfunction()
 
 option(EDGE_ATARI_FUJINET_REALTIME_NETSTREAM
        "Enable the Atari FujiNet realtime Netstream adapter (EDGE-owned translated handler; no external CA65 dependency)"
@@ -402,8 +414,7 @@ if(EDGE_BUILD_DEMO)
         # the distinction impossible to miss: a build-embedded marker, a configure
         # line, and a loud warning for the stub case.
         if(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB)
-            target_include_directories(atari_tank_demo PRIVATE ${EDGE_FUJINETLIB_INCLUDE_DIRS})
-            target_link_libraries(atari_tank_demo PRIVATE ${EDGE_FUJINETLIB_LIBRARY})
+            edge_use_fujinetlib_session(atari_tank_demo)
             target_compile_definitions(atari_tank_demo PRIVATE EDGE_TANK_LIVE_BACKEND_REAL=1)
             message(STATUS "atari_tank_demo LiveSession — Live transport backend: RealFujinetLib")
         else()
@@ -531,9 +542,8 @@ if(EDGE_BUILD_DEMO)
         target_compile_definitions(fujinet_session_validate PRIVATE
             EDGE_FUJINET_VALIDATE_HOST="${EDGE_FUJINET_VALIDATE_HOST}"
             EDGE_FUJINET_VALIDATE_PORT=${EDGE_FUJINET_VALIDATE_PORT})
-        target_include_directories(fujinet_session_validate PRIVATE
-            ${CMAKE_SOURCE_DIR} ${EDGE_FUJINETLIB_INCLUDE_DIRS})
-        target_link_libraries(fujinet_session_validate PRIVATE ${EDGE_FUJINETLIB_LIBRARY})
+        target_include_directories(fujinet_session_validate PRIVATE ${CMAKE_SOURCE_DIR})
+        edge_use_fujinetlib_session(fujinet_session_validate)
         set_target_properties(fujinet_session_validate PROPERTIES
             OUTPUT_NAME "fujinet_session_validate.xex")
         target_link_options(fujinet_session_validate PRIVATE
@@ -741,8 +751,7 @@ if(EDGE_BUILD_DEMO)
     # enabled; otherwise the session HAL is a stub that reports Ok without connecting.
     if(_TDN_SRC EQUAL 2)
         if(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB)
-            target_include_directories(atari_tank_dual_net_demo PRIVATE ${EDGE_FUJINETLIB_INCLUDE_DIRS})
-            target_link_libraries(atari_tank_dual_net_demo PRIVATE ${EDGE_FUJINETLIB_LIBRARY})
+            edge_use_fujinetlib_session(atari_tank_dual_net_demo)
             target_compile_definitions(atari_tank_dual_net_demo PRIVATE EDGE_TANK_LIVE_BACKEND_REAL=1)
             message(STATUS "atari_tank_dual_net_demo LiveSession — session backend: RealFujinetLib")
         else()

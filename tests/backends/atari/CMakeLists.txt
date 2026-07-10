@@ -11,6 +11,10 @@ add_engine_test(test_atari_interrupt)
 add_engine_test(test_atari_core)
 add_engine_test(test_atari_net_seam)
 add_engine_test(test_atari_fujinet_session_spec)
+# Both branch on EDGE_ATARI_FUJINET_SESSION_FUJINETLIB and must keep exercising
+# the ON path when the option is ON (no-op when it is OFF).
+edge_use_fujinetlib_session(test_atari_net_seam)
+edge_use_fujinetlib_session(test_atari_fujinet_session_spec)
 add_engine_test(test_atari_fujinet_netstream_scaffold)
 add_engine_test(test_netstream_abi_smoke)
 add_engine_test(test_netstream_state_size)
@@ -26,20 +30,16 @@ if(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB)
 	add_library(test_atari_fujinet_session_send_nb_obj OBJECT
 		test_atari_fujinet_session_send_nb.cpp)
 	target_include_directories(test_atari_fujinet_session_send_nb_obj PRIVATE
-		${CMAKE_SOURCE_DIR}
-		${EDGE_FUJINETLIB_INCLUDE_DIRS})
-	target_compile_definitions(test_atari_fujinet_session_send_nb_obj PRIVATE
-		EDGE_ATARI_FUJINET_SESSION_FUJINETLIB)
+		${CMAKE_SOURCE_DIR})
+	edge_use_fujinetlib_session(test_atari_fujinet_session_send_nb_obj)
 
 	# Linked executable only under mos toolchain.
 	if(CMAKE_CXX_COMPILER MATCHES "mos")
 		add_executable(test_atari_fujinet_session_send_nb
 			test_atari_fujinet_session_send_nb.cpp)
 		target_include_directories(test_atari_fujinet_session_send_nb PRIVATE
-			${CMAKE_SOURCE_DIR}
-			${EDGE_FUJINETLIB_INCLUDE_DIRS})
-		target_link_libraries(test_atari_fujinet_session_send_nb PRIVATE
-			${EDGE_FUJINETLIB_LIBRARY})
+			${CMAKE_SOURCE_DIR})
+		edge_use_fujinetlib_session(test_atari_fujinet_session_send_nb)
 		# The target is 6502 code: run it under the simulator, not natively.
 		add_test(NAME test_atari_fujinet_session_send_nb
 			COMMAND mos-sim $<TARGET_FILE:test_atari_fujinet_session_send_nb>)
@@ -56,8 +56,8 @@ if(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB)
 	add_library(edge_fujinetlib_session_smoke_obj OBJECT
 		fujinetlib_session_smoke.cpp)
 	target_include_directories(edge_fujinetlib_session_smoke_obj PRIVATE
-		${CMAKE_SOURCE_DIR}
-		${EDGE_FUJINETLIB_INCLUDE_DIRS})
+		${CMAKE_SOURCE_DIR})
+	edge_use_fujinetlib_session(edge_fujinetlib_session_smoke_obj)
 
 	# Optional link smoke executable. Build this only for mos toolchains,
 	# because host toolchains may not link an Atari-target archive.
@@ -65,10 +65,8 @@ if(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB)
 		add_executable(edge_fujinetlib_session_smoke
 			fujinetlib_session_smoke.cpp)
 		target_include_directories(edge_fujinetlib_session_smoke PRIVATE
-			${CMAKE_SOURCE_DIR}
-			${EDGE_FUJINETLIB_INCLUDE_DIRS})
-		target_link_libraries(edge_fujinetlib_session_smoke PRIVATE
-			${EDGE_FUJINETLIB_LIBRARY})
+			${CMAKE_SOURCE_DIR})
+		edge_use_fujinetlib_session(edge_fujinetlib_session_smoke)
 	endif()
 endif()
 
