@@ -7,6 +7,8 @@ working_documents/
 .github/
 bin/
 ATARI_MCP.md
+# Vendored third-party binaries (fujinet-lib release archives)
+third_party/
 # Python bytecode cache
 __pycache__/
 *.pyc

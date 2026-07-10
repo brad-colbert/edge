@@ -173,11 +173,21 @@ For a fuller walkthrough, start with [`/documents/QUICK_START.md`](./documents/Q
   (Netstream) lane needs no external library. See
   [`documents/PLATFORM_ATARI.md`](./documents/PLATFORM_ATARI.md).
 
+  Either unpack a release archive (headers and `libfujinet.a` sit at its root):
+
+  ```sh
+  unzip fujinet-lib-atari-<version>-llvm.<n>.zip -d third_party/fujinet-lib-llvm
+  ```
+
+  or build it from source (archive lands in `build/libfujinet.a`):
+
   ```sh
   git clone -b llvm_changes https://github.com/brad-colbert/fujinet-lib-llvm.git
   cmake -S fujinet-lib-llvm -B fujinet-lib-llvm/build   # -> build/libfujinet.a
   cmake --build fujinet-lib-llvm/build
   ```
+
+  `EDGE_FUJINETLIB_ROOT` accepts either layout.
 - **[Docker](https://www.docker.com/)** *(optional)* — runs the isolated UDP peer used
   in the Mode-B networking validation stack.
 

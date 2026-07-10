@@ -97,6 +97,11 @@ Phase 1 is TCP over the `N:` device, so it must link `libfujinet.a` from the
 (upstream fujinet-lib is CC65 and will not link under llvm-mos):
 
 ```sh
+# Either unpack a release archive (headers + libfujinet.a at its root)...
+FNL="$PWD/third_party/fujinet-lib-llvm"
+unzip fujinet-lib-atari-<version>-llvm.<n>.zip -d "$FNL"
+
+# ...or build from source (EDGE_FUJINETLIB_ROOT accepts either layout):
 git clone -b llvm_changes https://github.com/brad-colbert/fujinet-lib-llvm.git ~/Projects/Atari/fujinet-lib-llvm
 FNL=~/Projects/Atari/fujinet-lib-llvm
 cmake -S "$FNL" -B "$FNL/build" && cmake --build "$FNL/build"   # -> build/libfujinet.a

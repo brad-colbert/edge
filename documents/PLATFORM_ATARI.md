@@ -460,10 +460,16 @@ using Platform = atari::FullUpgrade;   // XL, U1MB, VBXE<>, PokeyMax, NTSC, Fuji
 > **<https://github.com/brad-colbert/fujinet-lib-llvm>**:
 >
 > ```sh
+> # Either unpack a release archive (headers + libfujinet.a at its root)...
+> unzip fujinet-lib-atari-<version>-llvm.<n>.zip -d third_party/fujinet-lib-llvm
+>
+> # ...or build it from source:
 > git clone -b llvm_changes https://github.com/brad-colbert/fujinet-lib-llvm.git
 > cmake -S fujinet-lib-llvm -B fujinet-lib-llvm/build
 > cmake --build fujinet-lib-llvm/build          # -> build/libfujinet.a
 > ```
+>
+> `EDGE_FUJINETLIB_ROOT` accepts either layout.
 >
 > That branch retargets the Atari build to llvm-mos. Upstream
 > [FujiNetWIFI/fujinet-lib](https://github.com/FujiNetWIFI/fujinet-lib) builds the

@@ -40,9 +40,12 @@ NET_PORT="${NET_PORT:-9000}"
 FUJINETLIB_ROOT="${FUJINETLIB_ROOT:-$REPO/third_party/fujinet-lib-llvm}"
 LINGER="${LINGER:-10}"
 
-[ -f "$FUJINETLIB_ROOT/build/libfujinet.a" ] || {
+[ -f "$FUJINETLIB_ROOT/build/libfujinet.a" ] || [ -f "$FUJINETLIB_ROOT/libfujinet.a" ] || {
     echo "fujinet-lib not found at: $FUJINETLIB_ROOT (set FUJINETLIB_ROOT)" >&2
-    echo "This demo uses TCP over the N: device, which needs the llvm-mos build:" >&2
+    echo "This demo uses TCP over the N: device, which needs the llvm-mos build." >&2
+    echo "Unpack a release archive there:" >&2
+    echo "  unzip fujinet-lib-atari-<ver>-llvm.<n>.zip -d third_party/fujinet-lib-llvm" >&2
+    echo "or build it from source:" >&2
     echo "  git clone -b llvm_changes https://github.com/brad-colbert/fujinet-lib-llvm.git" >&2
     echo "  cmake -S fujinet-lib-llvm -B fujinet-lib-llvm/build && cmake --build fujinet-lib-llvm/build" >&2
     exit 2; }
