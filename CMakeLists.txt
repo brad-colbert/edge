@@ -51,6 +51,10 @@ set(EDGE_FUJINETLIB_INCLUDE_DIR
     ""
     CACHE PATH
     "Path to fujinetlib include directory (contains fujinet-network.h)")
+set(EDGE_FUJINETLIB_ATARI_INCLUDE_DIR
+    ""
+    CACHE PATH
+    "Path to fujinetlib Atari include directory (contains fujinet-network-atari.h); defaults to EDGE_FUJINETLIB_INCLUDE_DIR when both headers share a directory")
 set(EDGE_FUJINETLIB_LIBRARY
     ""
     CACHE FILEPATH
@@ -66,13 +70,29 @@ set(EDGE_FUJINET_VALIDATE_PORT
     "Port used by demo/fujinet_session_validate runtime validation demo")
 
 if(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB)
+    # fujinet-lib ships its public headers (fujinet-network.h) at the checkout
+    # root and its per-machine headers (fujinet-network-atari.h) under
+    # atari/src/include. Older checkouts flattened both into src/include; accept
+    # either so an in-flight checkout keeps configuring.
     if(EDGE_FUJINETLIB_ROOT)
         if(NOT EDGE_FUJINETLIB_INCLUDE_DIR)
-            set(EDGE_FUJINETLIB_INCLUDE_DIR "${EDGE_FUJINETLIB_ROOT}/src/include")
+            if(EXISTS "${EDGE_FUJINETLIB_ROOT}/src/include/fujinet-network.h")
+                set(EDGE_FUJINETLIB_INCLUDE_DIR "${EDGE_FUJINETLIB_ROOT}/src/include")
+            else()
+                set(EDGE_FUJINETLIB_INCLUDE_DIR "${EDGE_FUJINETLIB_ROOT}")
+            endif()
+        endif()
+        if(NOT EDGE_FUJINETLIB_ATARI_INCLUDE_DIR
+           AND EXISTS "${EDGE_FUJINETLIB_ROOT}/atari/src/include/fujinet-network-atari.h")
+            set(EDGE_FUJINETLIB_ATARI_INCLUDE_DIR "${EDGE_FUJINETLIB_ROOT}/atari/src/include")
         endif()
         if(NOT EDGE_FUJINETLIB_LIBRARY)
             set(EDGE_FUJINETLIB_LIBRARY "${EDGE_FUJINETLIB_ROOT}/build/libfujinet.a")
         endif()
+    endif()
+
+    if(NOT EDGE_FUJINETLIB_ATARI_INCLUDE_DIR)
+        set(EDGE_FUJINETLIB_ATARI_INCLUDE_DIR "${EDGE_FUJINETLIB_INCLUDE_DIR}")
     endif()
 
     if(NOT EDGE_FUJINETLIB_INCLUDE_DIR OR NOT EDGE_FUJINETLIB_LIBRARY)
@@ -84,9 +104,9 @@ if(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB)
         message(FATAL_ERROR
             "Missing fujinet-network.h under EDGE_FUJINETLIB_INCLUDE_DIR='${EDGE_FUJINETLIB_INCLUDE_DIR}'")
     endif()
-    if(NOT EXISTS "${EDGE_FUJINETLIB_INCLUDE_DIR}/fujinet-network-atari.h")
+    if(NOT EXISTS "${EDGE_FUJINETLIB_ATARI_INCLUDE_DIR}/fujinet-network-atari.h")
         message(FATAL_ERROR
-            "Missing fujinet-network-atari.h under EDGE_FUJINETLIB_INCLUDE_DIR='${EDGE_FUJINETLIB_INCLUDE_DIR}'")
+            "Missing fujinet-network-atari.h under EDGE_FUJINETLIB_ATARI_INCLUDE_DIR='${EDGE_FUJINETLIB_ATARI_INCLUDE_DIR}'")
     endif()
     if(NOT EXISTS "${EDGE_FUJINETLIB_LIBRARY}")
         message(FATAL_ERROR
@@ -99,6 +119,7 @@ if(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB)
     foreach(_fnpath
             "${EDGE_FUJINETLIB_ROOT}"
             "${EDGE_FUJINETLIB_INCLUDE_DIR}"
+            "${EDGE_FUJINETLIB_ATARI_INCLUDE_DIR}"
             "${EDGE_FUJINETLIB_LIBRARY}")
         if(_fnpath MATCHES "/mnt/old_ubuntu_22")
             message(FATAL_ERROR
@@ -106,9 +127,27 @@ if(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB)
         endif()
     endforeach()
 
+    # The machine-specific dir precedes the public one, matching fujinet-lib's
+    # own target_include_directories order.
+    set(EDGE_FUJINETLIB_INCLUDE_DIRS
+        "${EDGE_FUJINETLIB_ATARI_INCLUDE_DIR}"
+        "${EDGE_FUJINETLIB_INCLUDE_DIR}")
+    list(REMOVE_DUPLICATES EDGE_FUJINETLIB_INCLUDE_DIRS)
+    set(EDGE_FUJINETLIB_INCLUDE_FLAGS)
+    foreach(_fninc IN LISTS EDGE_FUJINETLIB_INCLUDE_DIRS)
+        list(APPEND EDGE_FUJINETLIB_INCLUDE_FLAGS "-I${_fninc}")
+    endforeach()
+
+    # The define is global: platform.h pulls <fujinet-network.h> into every
+    # target, and any target instantiating SessionLane calls into the archive.
+    # Header search path and link line therefore have to be global to match.
+    # libfujinet.a is a static archive, so targets that never call it pay
+    # nothing.
     add_compile_definitions(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB=1)
+    include_directories(${EDGE_FUJINETLIB_INCLUDE_DIRS})
+    link_libraries(${EDGE_FUJINETLIB_LIBRARY})
     message(STATUS "EDGE FujiNet session backend: RealFujinetLib")
-    message(STATUS "  include: ${EDGE_FUJINETLIB_INCLUDE_DIR}")
+    message(STATUS "  include: ${EDGE_FUJINETLIB_INCLUDE_DIRS}")
     message(STATUS "  library: ${EDGE_FUJINETLIB_LIBRARY}")
 endif()
 
@@ -209,7 +248,13 @@ set(GENERATE_CHARSET_HEADER_SCRIPT
 # CMakeLists.txt). Override FUJINETLIB_DIR if the checkout lives elsewhere.
 set(FUJINETLIB_DIR ""
     CACHE PATH "Path to the fujinetlib-llvm checkout")
-set(FUJINETLIB_INC ${FUJINETLIB_DIR}/src/include)
+# Public headers sit at the checkout root upstream; older checkouts flattened
+# them into src/include.
+if(EXISTS "${FUJINETLIB_DIR}/src/include/fujinet-network.h")
+    set(FUJINETLIB_INC ${FUJINETLIB_DIR}/src/include)
+else()
+    set(FUJINETLIB_INC ${FUJINETLIB_DIR})
+endif()
 set(FUJINETLIB_A   ${FUJINETLIB_DIR}/build/libfujinet.a)
 
 add_custom_command(
@@ -344,7 +389,7 @@ if(EDGE_BUILD_DEMO)
         # the distinction impossible to miss: a build-embedded marker, a configure
         # line, and a loud warning for the stub case.
         if(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB)
-            target_include_directories(atari_tank_demo PRIVATE ${EDGE_FUJINETLIB_INCLUDE_DIR})
+            target_include_directories(atari_tank_demo PRIVATE ${EDGE_FUJINETLIB_INCLUDE_DIRS})
             target_link_libraries(atari_tank_demo PRIVATE ${EDGE_FUJINETLIB_LIBRARY})
             target_compile_definitions(atari_tank_demo PRIVATE EDGE_TANK_LIVE_BACKEND_REAL=1)
             message(STATUS "atari_tank_demo LiveSession — Live transport backend: RealFujinetLib")
@@ -474,7 +519,7 @@ if(EDGE_BUILD_DEMO)
             EDGE_FUJINET_VALIDATE_HOST="${EDGE_FUJINET_VALIDATE_HOST}"
             EDGE_FUJINET_VALIDATE_PORT=${EDGE_FUJINET_VALIDATE_PORT})
         target_include_directories(fujinet_session_validate PRIVATE
-            ${CMAKE_SOURCE_DIR} ${EDGE_FUJINETLIB_INCLUDE_DIR})
+            ${CMAKE_SOURCE_DIR} ${EDGE_FUJINETLIB_INCLUDE_DIRS})
         target_link_libraries(fujinet_session_validate PRIVATE ${EDGE_FUJINETLIB_LIBRARY})
         set_target_properties(fujinet_session_validate PROPERTIES
             OUTPUT_NAME "fujinet_session_validate.xex")
@@ -683,7 +728,7 @@ if(EDGE_BUILD_DEMO)
     # enabled; otherwise the session HAL is a stub that reports Ok without connecting.
     if(_TDN_SRC EQUAL 2)
         if(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB)
-            target_include_directories(atari_tank_dual_net_demo PRIVATE ${EDGE_FUJINETLIB_INCLUDE_DIR})
+            target_include_directories(atari_tank_dual_net_demo PRIVATE ${EDGE_FUJINETLIB_INCLUDE_DIRS})
             target_link_libraries(atari_tank_dual_net_demo PRIVATE ${EDGE_FUJINETLIB_LIBRARY})
             target_compile_definitions(atari_tank_dual_net_demo PRIVATE EDGE_TANK_LIVE_BACKEND_REAL=1)
             message(STATUS "atari_tank_dual_net_demo LiveSession — session backend: RealFujinetLib")
@@ -985,7 +1030,7 @@ if(MOS_ATARI8_CXX)
                     -DEDGE_FUJINET_VALIDATE_HOST=\"${EDGE_FUJINET_VALIDATE_HOST}\"
                     -DEDGE_FUJINET_VALIDATE_PORT=${EDGE_FUJINET_VALIDATE_PORT}
                     -DEDGE_ATARI_FUJINET_SESSION_FUJINETLIB=1
-                    -I${CMAKE_SOURCE_DIR} -I${EDGE_FUJINETLIB_INCLUDE_DIR}
+                    -I${CMAKE_SOURCE_DIR} ${EDGE_FUJINETLIB_INCLUDE_FLAGS}
                     ${CMAKE_SOURCE_DIR}/demo/fujinet_session_validate/fujinet_session_validate.cpp
                     ${EDGE_FUJINETLIB_LIBRARY}
                     -o ${FN_SESSION_VALIDATE_XEX}

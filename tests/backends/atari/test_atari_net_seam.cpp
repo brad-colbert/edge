@@ -63,7 +63,12 @@ static void test_fujinet_seam_surface() {
     CHECK(FujiPlatform::hal::realtime_last_error().status == n::NetStatus::WouldBlock);
 #endif
 
-    // Session seam is independent of the netstream realtime wiring (both modes).
+#if !defined(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB)
+    // OFF-mode session seam stubs. Independent of the netstream realtime wiring
+    // (both realtime modes). In ON mode the seam delegates to the real
+    // fujinet-lib (network_init/network_open -> SIO), which cannot run here; the
+    // ON-mode session lane is covered by test_atari_fujinet_session_send_nb's
+    // pre-connection guards and validated on hardware by fujinet_session_validate.
     CHECK(FujiPlatform::hal::session_connect_tcp("host", 5000) ==
           n::NetStatus::Ok);
         CHECK(!FujiPlatform::hal::session_connected());
@@ -76,6 +81,15 @@ static void test_fujinet_seam_surface() {
     CHECK(FujiPlatform::hal::session_recv_nb(&io, 1) == n::NetStatus::WouldBlock);
 
         CHECK(FujiPlatform::hal::session_last_error().status == n::NetStatus::WouldBlock);
+#else
+    // ON mode: nullptr host is rejected before any hardware access, so this one
+    // guard is still safe to exercise under the simulator.
+    CHECK(FujiPlatform::hal::session_connect_tcp(nullptr, 5000) ==
+          n::NetStatus::InvalidArgument);
+    CHECK(FujiPlatform::hal::session_recv_nb(nullptr, 1) ==
+          n::NetStatus::InvalidArgument);
+    (void)io;
+#endif
 }
 
 int main() {

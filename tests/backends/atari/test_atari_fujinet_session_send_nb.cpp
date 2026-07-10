@@ -58,11 +58,9 @@ static void test_send_nb_valid_not_connected_closed() {
 // references network_write and the compiler must resolve the symbol.
 // Runtime behavior with hardware is tested via the mos-toolchain link smoke.
 static void test_send_nb_when_connected_network_write_compile_path() {
-    // network_write is declared inside the atari::fujinet_session namespace
-    // (included via the adapter header's extern "C" block inside that namespace).
-    // Verify the symbol resolves through the expected qualified path.
-    using atari::fujinet_session::network_write;
-    uint8_t (*p_write)(const char*, const uint8_t*, uint16_t) = &network_write;
+    // network_write is a C declaration at global scope, brought in by the
+    // adapter header. Verify the symbol resolves there and nowhere else.
+    uint8_t (*p_write)(const char*, const uint8_t*, uint16_t) = &::network_write;
     (void)p_write;  // compile-only check; not reachable without hardware
 }
 

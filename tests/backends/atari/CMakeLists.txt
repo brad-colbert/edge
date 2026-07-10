@@ -27,7 +27,7 @@ if(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB)
 		test_atari_fujinet_session_send_nb.cpp)
 	target_include_directories(test_atari_fujinet_session_send_nb_obj PRIVATE
 		${CMAKE_SOURCE_DIR}
-		${EDGE_FUJINETLIB_INCLUDE_DIR})
+		${EDGE_FUJINETLIB_INCLUDE_DIRS})
 	target_compile_definitions(test_atari_fujinet_session_send_nb_obj PRIVATE
 		EDGE_ATARI_FUJINET_SESSION_FUJINETLIB)
 
@@ -37,11 +37,12 @@ if(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB)
 			test_atari_fujinet_session_send_nb.cpp)
 		target_include_directories(test_atari_fujinet_session_send_nb PRIVATE
 			${CMAKE_SOURCE_DIR}
-			${EDGE_FUJINETLIB_INCLUDE_DIR})
+			${EDGE_FUJINETLIB_INCLUDE_DIRS})
 		target_link_libraries(test_atari_fujinet_session_send_nb PRIVATE
 			${EDGE_FUJINETLIB_LIBRARY})
+		# The target is 6502 code: run it under the simulator, not natively.
 		add_test(NAME test_atari_fujinet_session_send_nb
-			COMMAND test_atari_fujinet_session_send_nb)
+			COMMAND mos-sim $<TARGET_FILE:test_atari_fujinet_session_send_nb>)
 	endif()
 else()
 	# OFF-mode: standard test, no special includes.
@@ -56,7 +57,7 @@ if(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB)
 		fujinetlib_session_smoke.cpp)
 	target_include_directories(edge_fujinetlib_session_smoke_obj PRIVATE
 		${CMAKE_SOURCE_DIR}
-		${EDGE_FUJINETLIB_INCLUDE_DIR})
+		${EDGE_FUJINETLIB_INCLUDE_DIRS})
 
 	# Optional link smoke executable. Build this only for mos toolchains,
 	# because host toolchains may not link an Atari-target archive.
@@ -65,7 +66,7 @@ if(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB)
 			fujinetlib_session_smoke.cpp)
 		target_include_directories(edge_fujinetlib_session_smoke PRIVATE
 			${CMAKE_SOURCE_DIR}
-			${EDGE_FUJINETLIB_INCLUDE_DIR})
+			${EDGE_FUJINETLIB_INCLUDE_DIRS})
 		target_link_libraries(edge_fujinetlib_session_smoke PRIVATE
 			${EDGE_FUJINETLIB_LIBRARY})
 	endif()

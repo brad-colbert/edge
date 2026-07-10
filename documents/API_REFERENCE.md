@@ -699,8 +699,11 @@ are available.
 > **Implementation status:**
 > - **Session lane** — optionally wired to real fujinet-lib TCP transport.
 >   Enable with `-DEDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON` at configure time
->   (requires an external fujinet-lib checkout; OFF by default).
->   When OFF, session methods return `Unsupported`/`WouldBlock` stubs.
+>   (OFF by default). When OFF, session methods return `Unsupported`/`WouldBlock`
+>   stubs. On Atari, TCP and the `N:` device require linking `libfujinet.a` built
+>   from the `llvm_changes` branch of
+>   <https://github.com/brad-colbert/fujinet-lib-llvm> — upstream fujinet-lib is
+>   CC65 and will not link under llvm-mos.
 > - **Realtime lane** — wired to an EDGE-owned FujiNet Netstream path (fixed
 >   16-byte packets, all-or-nothing TX/RX, **no wire framing**; no fujinet-lib).
 >   The data path is validated against the fujinet-pc emulator stack

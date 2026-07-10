@@ -195,13 +195,23 @@ public charset API (`bind_charset_page`).
 
 ### LiveSession build + server
 
+`LiveSession` opens a TCP connection over the `N:` device, so on Atari it must
+link `libfujinet.a` from the `llvm_changes` branch of
+<https://github.com/brad-colbert/fujinet-lib-llvm>. Upstream fujinet-lib is CC65
+and will not link under llvm-mos.
+
 ```sh
-# Atari (requires the FujiNet session lane: build fujinet-lib, then configure with
-# EDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON + EDGE_FUJINETLIB_ROOT=...):
+# Build the library once:
+git clone -b llvm_changes https://github.com/brad-colbert/fujinet-lib-llvm.git
+cmake -S fujinet-lib-llvm -B fujinet-lib-llvm/build
+cmake --build fujinet-lib-llvm/build          # -> build/libfujinet.a
+
+# Atari (requires the FujiNet session lane: EDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON
+# + EDGE_FUJINETLIB_ROOT pointing at that checkout):
 cmake -B build-atari -DCMAKE_TOOLCHAIN_FILE=cmake/atari-toolchain.cmake \
       -DEDGE_BUILD_DEMO=ON -DEDGE_TANK_ASSET_SOURCE=LiveSession \
       -DEDGE_TANK_NET_HOST="192.168.1.10" -DEDGE_TANK_NET_PORT=9000 \
-      -DEDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON -DEDGE_FUJINETLIB_ROOT=/path/to/fujinet-lib
+      -DEDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON -DEDGE_FUJINETLIB_ROOT=/path/to/fujinet-lib-llvm
 cmake --build build-atari --target atari_tank_demo
 
 # Host server (Python stdlib only):

@@ -11,7 +11,11 @@
 #   REBUILD=1            force a rebuild even if the .xex already exists
 #   NET_HOST=<ip>        server address the FujiNet connects to (default LAN IP)
 #   NET_PORT=<n>         server TCP port (default 9000)
-#   FUJINETLIB_ROOT=...  fujinet-lib checkout (default validated local path)
+#   FUJINETLIB_ROOT=...  fujinet-lib checkout (default validated local path).
+#                        TCP / the N: device need the llvm-mos build: the
+#                        llvm_changes branch of
+#                        https://github.com/brad-colbert/fujinet-lib-llvm
+#                        (upstream fujinet-lib is CC65 and will not link).
 #   LINGER=<sec>         server post-COMPLETE linger (default 10)
 #   ALTIRRA_DIR / ALTIRRA_TV / ALTIRRA_EXTRA   as in run_tank_embedded.sh
 #
@@ -33,11 +37,15 @@ XEX="$BUILD_DIR/atari_tank_demo.xex"
 
 NET_HOST="${NET_HOST:-$(hostname -I | awk '{print $1}')}"
 NET_PORT="${NET_PORT:-9000}"
-FUJINETLIB_ROOT="${FUJINETLIB_ROOT:-$REPO/third_party/fujinetlib-llvm}"
+FUJINETLIB_ROOT="${FUJINETLIB_ROOT:-$REPO/third_party/fujinet-lib-llvm}"
 LINGER="${LINGER:-10}"
 
 [ -f "$FUJINETLIB_ROOT/build/libfujinet.a" ] || {
-    echo "fujinet-lib not found at: $FUJINETLIB_ROOT (set FUJINETLIB_ROOT)" >&2; exit 2; }
+    echo "fujinet-lib not found at: $FUJINETLIB_ROOT (set FUJINETLIB_ROOT)" >&2
+    echo "This demo uses TCP over the N: device, which needs the llvm-mos build:" >&2
+    echo "  git clone -b llvm_changes https://github.com/brad-colbert/fujinet-lib-llvm.git" >&2
+    echo "  cmake -S fujinet-lib-llvm -B fujinet-lib-llvm/build && cmake --build fujinet-lib-llvm/build" >&2
+    exit 2; }
 
 # ── Build if needed (real fujinet-lib backend; /usr/local/bin llvm-mos) ───────
 if [ ! -f "$XEX" ] || [ "${REBUILD:-0}" = "1" ]; then
