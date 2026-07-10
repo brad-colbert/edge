@@ -36,10 +36,10 @@ Default OFF builds remain unchanged.
 
 ## Host/Port Configuration
 
-Set via compile definitions (with source defaults):
-
-- `EDGE_FUJINET_VALIDATE_HOST` (default: `"192.168.1.100"`)
-- `EDGE_FUJINET_VALIDATE_PORT` (default: `9000`)
+Set via compile definitions. CMake always supplies both, defaulting to the cache
+variables `EDGE_FUJINET_VALIDATE_HOST` (`192.168.1.205`) and
+`EDGE_FUJINET_VALIDATE_PORT` (`9000`); the source falls back to `127.0.0.1:9000`
+only when the demo is compiled outside CMake.
 
 In CMake, pass:
 
@@ -47,7 +47,8 @@ In CMake, pass:
 -DEDGE_FUJINET_VALIDATE_HOST=192.168.1.50 -DEDGE_FUJINET_VALIDATE_PORT=9000
 ```
 
-The build injects these as preprocessor definitions.
+The build injects these as preprocessor definitions. The running demo prints the
+host and port it actually compiled in, so a mismatch is visible on screen.
 
 ## Expected Server
 
