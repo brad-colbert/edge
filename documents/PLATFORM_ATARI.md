@@ -452,21 +452,44 @@ using Platform = atari::FullUpgrade;   // XL, U1MB, VBXE<>, PokeyMax, NTSC, Fuji
 
 #### Session lane — optional fujinet-lib wiring
 
-The session lane can be wired to the real [fujinet-lib](https://github.com/FujiNetWIFI/fujinet-lib)
-C library using the `EDGE_ATARI_FUJINET_SESSION_FUJINETLIB` CMake option.
-This is **OFF by default**; default builds require no external library.
+> **TCP and the `N:` device require fujinet-lib.** On the Atari target, anything
+> that opens a TCP connection or talks to the `N:` device — the session lane, the
+> `fujinet_net_test` / `fujinet_session_validate` demos, the tank demos'
+> `LiveSession` asset source — must link `libfujinet.a` built from the
+> **`llvm_changes`** branch of
+> **<https://github.com/brad-colbert/fujinet-lib-llvm>**:
+>
+> ```sh
+> git clone -b llvm_changes https://github.com/brad-colbert/fujinet-lib-llvm.git
+> cmake -S fujinet-lib-llvm -B fujinet-lib-llvm/build
+> cmake --build fujinet-lib-llvm/build          # -> build/libfujinet.a
+> ```
+>
+> That branch retargets the Atari build to llvm-mos. Upstream
+> [FujiNetWIFI/fujinet-lib](https://github.com/FujiNetWIFI/fujinet-lib) builds the
+> Atari target with CC65 and **will not link** against EDGE's llvm-mos toolchain —
+> it is not a drop-in substitute. The realtime (Netstream) lane is EDGE-owned
+> assembly and needs no external library; only TCP / `N:` does.
+
+The session lane is wired to fujinet-lib with the
+`EDGE_ATARI_FUJINET_SESSION_FUJINETLIB` CMake option. This is **OFF by default**;
+default builds require no external library.
 
 ```sh
 # Enable at configure time and point to your fujinet-lib checkout:
 cmake -S . -B build \
     -DEDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON \
-    -DEDGE_FUJINETLIB_ROOT=/path/to/fujinetlib-llvm
+    -DEDGE_FUJINETLIB_ROOT=/path/to/fujinet-lib-llvm
 
-# Or supply include dir and archive explicitly:
+# Or supply the include dirs and archive explicitly. fujinet-lib keeps its public
+# headers at the checkout root and the per-machine ones under atari/src/include.
+# EDGE_FUJINETLIB_ATARI_INCLUDE_DIR defaults to the public dir, which is what
+# older checkouts that flattened both into src/include need.
 cmake -S . -B build \
     -DEDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON \
-    -DEDGE_FUJINETLIB_INCLUDE_DIR=/path/to/fujinetlib-llvm/src/include \
-    -DEDGE_FUJINETLIB_LIBRARY=/path/to/fujinetlib-llvm/lib/libfujinet.a
+    -DEDGE_FUJINETLIB_INCLUDE_DIR=/path/to/fujinet-lib-llvm \
+    -DEDGE_FUJINETLIB_ATARI_INCLUDE_DIR=/path/to/fujinet-lib-llvm/atari/src/include \
+    -DEDGE_FUJINETLIB_LIBRARY=/path/to/fujinet-lib-llvm/build/libfujinet.a
 ```
 
 **When ON**, the session adapter calls:

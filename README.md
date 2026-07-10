@@ -163,13 +163,21 @@ For a fuller walkthrough, start with [`/documents/QUICK_START.md`](./documents/Q
   — bridges an emulator (Altirra) to FujiNet over the NetSIO UDP protocol (`netsiohub`
   + the Altirra `netsio.atdevice`). EDGE's realtime (Netstream) lane is validated
   against this stack.
-- **fujinet-lib (llvm-mos build)** — a pre-built C library (`libfujinet.a` + headers)
-  for the session lane's real TCP transport, only required when configuring with
-  `-DEDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON` (OFF by default; see
-  [`documents/PLATFORM_ATARI.md`](./documents/PLATFORM_ATARI.md)). Note that the
-  upstream [fujinet-lib](https://github.com/FujiNetWIFI/fujinet-lib) is built for CC65
-  and is **not** compatible with EDGE's llvm-mos toolchain; an llvm-mos-compatible
-  build is required and is **not yet published**.
+- **[fujinet-lib (llvm-mos build)](https://github.com/brad-colbert/fujinet-lib-llvm/tree/llvm_changes)**
+  — a C library (`libfujinet.a` + headers) providing the `N:` device and TCP
+  transport. **On Atari, any use of TCP or the `N:` device must link this
+  library, built from the `llvm_changes` branch.** Upstream
+  [fujinet-lib](https://github.com/FujiNetWIFI/fujinet-lib) targets CC65 and will
+  not link against EDGE's llvm-mos toolchain. Only required when configuring with
+  `-DEDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON` (OFF by default); the realtime
+  (Netstream) lane needs no external library. See
+  [`documents/PLATFORM_ATARI.md`](./documents/PLATFORM_ATARI.md).
+
+  ```sh
+  git clone -b llvm_changes https://github.com/brad-colbert/fujinet-lib-llvm.git
+  cmake -S fujinet-lib-llvm -B fujinet-lib-llvm/build   # -> build/libfujinet.a
+  cmake --build fujinet-lib-llvm/build
+  ```
 - **[Docker](https://www.docker.com/)** *(optional)* — runs the isolated UDP peer used
   in the Mode-B networking validation stack.
 
@@ -194,7 +202,7 @@ Useful environment knobs (all optional; sensible defaults):
 | Variable | Used by | Meaning |
 | --- | --- | --- |
 | `ALTIRRA_DIR` | `run_tank_*.sh`, `setup.sh` | Path to your Altirra install (else common locations are searched) |
-| `FUJINETLIB_ROOT` | `run_tank_networked.sh` | fujinet-lib (llvm-mos) checkout for the live networking demo |
+| `FUJINETLIB_ROOT` | `run_tank_networked.sh` | fujinet-lib (llvm-mos, `llvm_changes` branch) checkout for the live networking demo |
 | `BUILD_DIR` | `build_demos.sh` | Build directory (default `build-atari`) |
 | `RECONF=1` | `build_demos.sh` | Force a fresh CMake configure |
 

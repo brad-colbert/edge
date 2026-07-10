@@ -9,8 +9,13 @@ using engine::net::NetStatus;
 
 namespace fs = atari::fujinet_session;
 
+#if defined(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB)
+static_assert(fs::FujinetLibSessionAdapter::state_size_bytes() > 0,
+              "ON mode must carry fujinet session adapter state");
+#else
 static_assert(fs::FujinetLibSessionAdapter::state_size_bytes() == 0,
               "OFF mode must add zero fujinet session adapter state");
+#endif
 
 static unsigned g_failures = 0;
 

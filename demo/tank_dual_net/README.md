@@ -91,18 +91,22 @@ scripts/build_demos.sh                       # → build-atari/atari_tank_dual_n
 cmake --build build-atari --target atari_tank_dual_net_demo
 ```
 
-Real dual-lane build (the decisive hardware config — both lanes + real fujinet-lib):
+Real dual-lane build (the decisive hardware config — both lanes + real fujinet-lib).
+Phase 1 is TCP over the `N:` device, so it must link `libfujinet.a` from the
+`llvm_changes` branch of <https://github.com/brad-colbert/fujinet-lib-llvm>
+(upstream fujinet-lib is CC65 and will not link under llvm-mos):
 
 ```sh
-FNL=~/Projects/Atari/fujinetlib-llvm
+git clone -b llvm_changes https://github.com/brad-colbert/fujinet-lib-llvm.git ~/Projects/Atari/fujinet-lib-llvm
+FNL=~/Projects/Atari/fujinet-lib-llvm
+cmake -S "$FNL" -B "$FNL/build" && cmake --build "$FNL/build"   # -> build/libfujinet.a
+
 cmake -S . -B build-live \
   -DCMAKE_TOOLCHAIN_FILE="$PWD/cmake/atari-toolchain.cmake" -DEDGE_BUILD_DEMO=ON \
   -DEDGE_TANK_DUAL_ASSET_SOURCE=LiveSession \
   -DEDGE_ATARI_FUJINET_REALTIME_NETSTREAM=ON \
   -DEDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON \
-  -DEDGE_FUJINETLIB_ROOT="$FNL" \
-  -DEDGE_FUJINETLIB_INCLUDE_DIR="$FNL/src/include" \
-  -DEDGE_FUJINETLIB_LIBRARY="$FNL/build/libfujinet.a"
+  -DEDGE_FUJINETLIB_ROOT="$FNL"
 cmake --build build-live --target atari_tank_dual_net_demo
 ```
 

@@ -20,10 +20,16 @@ Realtime lane is intentionally not used.
 
 ## Build Gating
 
-This demo is built only when all of the following are true:
+This demo opens a TCP connection over the `N:` device, so it must link
+`libfujinet.a` built from the `llvm_changes` branch of
+<https://github.com/brad-colbert/fujinet-lib-llvm>. Upstream fujinet-lib is CC65
+and will not link under llvm-mos.
+
+It is built only when all of the following are true:
 
 - `EDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON`
 - valid `EDGE_FUJINETLIB_INCLUDE_DIR` and `EDGE_FUJINETLIB_LIBRARY` are set
+  (both are derived for you from `EDGE_FUJINETLIB_ROOT`)
 - Atari/llvm-mos build path is active (same gating style as existing FujiNet demo rules)
 
 Default OFF builds remain unchanged.

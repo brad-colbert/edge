@@ -11,6 +11,17 @@
 #include "../../types.h"
 #include "../../net_types.h"
 
+// fujinet-lib is a C library: its declarations must land at global scope. Any
+// other translation unit that includes these headers directly sees the same
+// names, and the include guards make whichever inclusion comes first the one
+// that decides the scope.
+#if defined(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB)
+extern "C" {
+#include <fujinet-network.h>
+#include <fujinet-network-atari.h>
+}
+#endif
+
 namespace atari {
 namespace fujinet_session {
 
@@ -22,13 +33,6 @@ using engine::net::NetError;
 using engine::net::NetStatus;
 
 static constexpr u16 kTcpDeviceSpecCapacity = 96;
-
-#if defined(EDGE_ATARI_FUJINET_SESSION_FUJINETLIB)
-extern "C" {
-#include <fujinet-network.h>
-#include <fujinet-network-atari.h>
-}
-#endif
 
 // Build "N:TCP://<host>:<port>/" into a fixed destination buffer.
 inline NetStatus build_tcp_devicespec(const char* host,

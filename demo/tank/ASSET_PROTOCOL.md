@@ -182,13 +182,21 @@ transfer over real FujiNet SIO.
 
 ### Dependency
 
-- fujinet-lib root (validated local checkout):
-  `/home/brad/Dropbox/Projects/Atari/fujinetlib-llvm`
-  - source commit `7803c86` (tag `wave3b-done`)
-  - public headers: `<root>/src/include` (`fujinet-network.h`, `fujinet-network-atari.h`)
-  - static library: `<root>/build/libfujinet.a`
-  - built with the `/usr/local/bin` llvm-mos toolchain
-    (`mos-atari8-dos-clang`, `llvm-ar`) — verified, no rebuild required.
+`LiveSession` is TCP over the `N:` device, so it must link fujinet-lib. On Atari
+that means the llvm-mos build:
+
+- source: the **`llvm_changes`** branch of
+  <https://github.com/brad-colbert/fujinet-lib-llvm>. Upstream
+  [FujiNetWIFI/fujinet-lib](https://github.com/FujiNetWIFI/fujinet-lib) builds the
+  Atari target with CC65 and **will not link** under llvm-mos.
+- build: `cmake -S <root> -B <root>/build && cmake --build <root>/build`, using the
+  `/usr/local/bin` llvm-mos toolchain (`mos-atari8-dos-clang`, `llvm-ar`).
+- public headers: `<root>` (`fujinet-network.h`)
+- Atari headers: `<root>/atari/src/include` (`fujinet-network-atari.h`)
+- static library: `<root>/build/libfujinet.a`
+
+Point `EDGE_FUJINETLIB_ROOT` at `<root>`; the include dirs and archive are derived
+for you.
 
 The CMake variables are configurable; the path above is the validated default,
 not a hard-coded requirement. A focused CMake guard rejects the prohibited legacy
@@ -216,7 +224,7 @@ cmake -B build-atari-live \
   -DEDGE_BUILD_DEMO=ON \
   -DEDGE_TANK_ASSET_SOURCE=LiveSession \
   -DEDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON \
-  -DEDGE_FUJINETLIB_ROOT=/home/brad/Dropbox/Projects/Atari/fujinetlib-llvm \
+  -DEDGE_FUJINETLIB_ROOT=/path/to/fujinet-lib-llvm \
   -DEDGE_TANK_NET_HOST=192.168.1.205 \
   -DEDGE_TANK_NET_PORT=9000
 cmake --build build-atari-live --target atari_tank_demo

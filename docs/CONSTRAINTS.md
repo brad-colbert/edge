@@ -107,7 +107,10 @@ parameter, not a linear tier progression.
 - Primary target for multiplayer networking
 - Implementation status (two lanes; see ADR-032, ADR-033):
   - Session lane (TCP, framed/reliable): optionally wired to fujinet-lib
-    (`-DEDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON`; OFF by default)
+    (`-DEDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON`; OFF by default). TCP and the
+    `N:` device require `libfujinet.a` from the `llvm_changes` branch of
+    https://github.com/brad-colbert/fujinet-lib-llvm (upstream fujinet-lib is
+    CC65 and will not link under llvm-mos)
   - Realtime lane (fixed 16-byte packets, no wire framing; unframed stream, so
     the consumer reassembles units): wired to an EDGE-owned FujiNet Netstream
     path; validated against the fujinet-pc emulator stack (NetSIO + Altirra +
