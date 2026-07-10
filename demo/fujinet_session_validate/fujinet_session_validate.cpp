@@ -34,9 +34,9 @@ using engine::net::NetStatus;
 
 namespace M = atari;
 
-//#ifndef EDGE_FUJINET_VALIDATE_HOST
+#ifndef EDGE_FUJINET_VALIDATE_HOST
 #define EDGE_FUJINET_VALIDATE_HOST "127.0.0.1"
-//#endif
+#endif
 
 #ifndef EDGE_FUJINET_VALIDATE_PORT
 #define EDGE_FUJINET_VALIDATE_PORT 9000

@@ -201,13 +201,16 @@ link `libfujinet.a` from the `llvm_changes` branch of
 and will not link under llvm-mos.
 
 ```sh
-# Build the library once:
+# Get the library once — either unpack a release archive:
+unzip fujinet-lib-atari-<version>-llvm.<n>.zip -d third_party/fujinet-lib-llvm
+
+# ...or build it from source:
 git clone -b llvm_changes https://github.com/brad-colbert/fujinet-lib-llvm.git
 cmake -S fujinet-lib-llvm -B fujinet-lib-llvm/build
 cmake --build fujinet-lib-llvm/build          # -> build/libfujinet.a
 
 # Atari (requires the FujiNet session lane: EDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON
-# + EDGE_FUJINETLIB_ROOT pointing at that checkout):
+# + EDGE_FUJINETLIB_ROOT pointing at the unpacked release or the checkout):
 cmake -B build-atari -DCMAKE_TOOLCHAIN_FILE=cmake/atari-toolchain.cmake \
       -DEDGE_BUILD_DEMO=ON -DEDGE_TANK_ASSET_SOURCE=LiveSession \
       -DEDGE_TANK_NET_HOST="192.168.1.10" -DEDGE_TANK_NET_PORT=9000 \

@@ -195,8 +195,11 @@ that means the llvm-mos build:
 - Atari headers: `<root>/atari/src/include` (`fujinet-network-atari.h`)
 - static library: `<root>/build/libfujinet.a`
 
-Point `EDGE_FUJINETLIB_ROOT` at `<root>`; the include dirs and archive are derived
-for you.
+An unpacked release archive instead puts every header and `libfujinet.a` directly
+at `<root>`.
+
+Point `EDGE_FUJINETLIB_ROOT` at `<root>`; either layout is detected, and the include
+dirs and archive are derived for you.
 
 The CMake variables are configurable; the path above is the validated default,
 not a hard-coded requirement. A focused CMake guard rejects the prohibited legacy
