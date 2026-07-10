@@ -603,6 +603,27 @@ if(EDGE_BUILD_DEMO)
         target_compile_definitions(edge_net_realtime_meter PRIVATE EDGE_NET_PEER_PORT=${EDGE_NET_PEER_PORT})
     endif()
 
+    # Auto-sweep variant (edge_net_realtime_sweep.xex): the SAME source built with
+    # -DEDGE_METER_SWEEP=1, which ramps the send cadence through a ladder and tabulates
+    # the delivered downstream rate + reverse loss on-screen to locate the link's usable
+    # throughput / downstream knee. Build: cmake --build <dir> --target edge_net_realtime_sweep
+    add_executable(edge_net_realtime_sweep ${NET_RT_METER_SRC})
+    target_compile_definitions(edge_net_realtime_sweep PRIVATE EDGE_METER_SWEEP=1)
+    target_compile_options(edge_net_realtime_sweep PRIVATE
+        -std=c++20 -fno-exceptions -fno-rtti ${EDGE_HOT_OPT} -Wall -Wextra)
+    target_include_directories(edge_net_realtime_sweep PRIVATE
+        ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/engine/platform/atari)
+    set_target_properties(edge_net_realtime_sweep PROPERTIES
+        OUTPUT_NAME "edge_net_realtime_sweep.xex")
+    target_link_options(edge_net_realtime_sweep PRIVATE
+        "LINKER:--Map=$<TARGET_FILE_DIR:edge_net_realtime_sweep>/edge_net_realtime_sweep.map")
+    if(DEFINED EDGE_NET_PEER_HOST)
+        target_compile_definitions(edge_net_realtime_sweep PRIVATE EDGE_NET_PEER_HOST="${EDGE_NET_PEER_HOST}")
+    endif()
+    if(DEFINED EDGE_NET_PEER_PORT)
+        target_compile_definitions(edge_net_realtime_sweep PRIVATE EDGE_NET_PEER_PORT=${EDGE_NET_PEER_PORT})
+    endif()
+
     # Networked two-tank demo (atari_tank_net_demo.xex). Reuses demo/tank's
     # motion/camera/shapes/assets (added to the include path) and adds a
     # network-driven adversary over the realtime lane. Always EMBEDDED assets, so it
