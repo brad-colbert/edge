@@ -592,6 +592,16 @@ if(EDGE_BUILD_DEMO)
         OUTPUT_NAME "edge_net_realtime_meter.xex")
     target_link_options(edge_net_realtime_meter PRIVATE
         "LINKER:--Map=$<TARGET_FILE_DIR:edge_net_realtime_meter>/edge_net_realtime_meter.map")
+    # Optional peer-endpoint override (else the .cpp constants apply). Mirrors the
+    # tank_net/dual_net passthrough so -DEDGE_NET_PEER_HOST reaches THIS target too
+    # (the .cpp/CMake comments already advertise it; the add_executable path forgot
+    # to wire it, so the binary silently kept the 192.168.1.205 self-collision host).
+    if(DEFINED EDGE_NET_PEER_HOST)
+        target_compile_definitions(edge_net_realtime_meter PRIVATE EDGE_NET_PEER_HOST="${EDGE_NET_PEER_HOST}")
+    endif()
+    if(DEFINED EDGE_NET_PEER_PORT)
+        target_compile_definitions(edge_net_realtime_meter PRIVATE EDGE_NET_PEER_PORT=${EDGE_NET_PEER_PORT})
+    endif()
 
     # Networked two-tank demo (atari_tank_net_demo.xex). Reuses demo/tank's
     # motion/camera/shapes/assets (added to the include path) and adds a
