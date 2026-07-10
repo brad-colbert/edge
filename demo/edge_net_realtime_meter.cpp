@@ -70,6 +70,22 @@ static constexpr u8  kSparkW       = 24;   // sparkline width in characters
 static constexpr u16 kStaleFrames  = 30;   // RX age above this => STALE
 static constexpr u8  kWinSecs      = 4;    // link-quality averaging window (seconds)
 
+// HUD redraw cadence — draw the full text HUD every N frames, NOT every frame.
+// The dashboard redraw (3 sparklines * kSparkW cells with 32-bit math + ~30
+// print_num fields) is by far the heaviest per-frame work here. Because the game
+// loop and the VBI frame service run lockstep, an every-frame redraw throttles the
+// whole loop (and the frame clock with it), capping the realtime send/recv rate far
+// below what the transport can actually carry. Measured on fujinet-pc + NetSIO +
+// Altirra against a Docker echo peer: every-frame HUD held the link to ~5 pkt/s;
+// redrawing every 8th frame (~7.5 Hz — still perfectly readable) lifted it to
+// ~12 pkt/s and halved the observed DELAY. Sparkline history is pushed in the RX
+// drain (independent of when we draw), so throttling the draw loses no samples.
+// Override at build time with -DEDGE_METER_HUD_PERIOD=N (1 = old every-frame draw).
+#ifndef EDGE_METER_HUD_PERIOD
+#define EDGE_METER_HUD_PERIOD 8
+#endif
+static constexpr u8  kHudPeriod    = EDGE_METER_HUD_PERIOD;   // redraw HUD every N frames
+
 // MeterPacket16 full-scale ranges (frames) for the sparkline level mapping.
 static constexpr i16 kDelayFull  = 24;     // 0..24 frames
 static constexpr i16 kJitterFull = 12;     // 0..12 frames
@@ -190,6 +206,7 @@ static u16 g_rx_count = 0;     // total replies received
 static u16 g_last_rx_jiffy = 0;
 static bool g_have_rx = false;
 static u8  g_frame    = 0;     // send-cadence counter
+static u8  g_hud_frame = static_cast<u8>(kHudPeriod - 1);  // HUD-cadence counter (draw on 1st frame)
 static u8  g_warmup   = kWarmupFrames;
 static u8  g_last_send_status = 0;  // last NetStatus from send()
 static bool g_overflow_sticky = false;
@@ -468,7 +485,14 @@ static bool step(const engine::InputState<>& in) {
 
     const u16 now = read_jiffy16();
     if (active) update_link_window(now);
-    draw_dynamic(active, now);
+    // Redraw the HUD every kHudPeriod frames, not every frame: the full redraw is the
+    // loop's dominant cost, so throttling it lets the per-frame net path run near the
+    // kSendPeriod cadence (see kHudPeriod). All metric state is updated above every
+    // frame; only the rendering is throttled.
+    if (++g_hud_frame >= kHudPeriod) {
+        g_hud_frame = 0;
+        draw_dynamic(active, now);
+    }
     return in.fire();
 }
 
