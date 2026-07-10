@@ -11,6 +11,39 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
 
 ## [Unreleased]
 
+### Added
+- **`EDGE_FUJINETLIB_ROOT` accepts an unpacked fujinet-lib release archive**, not just a
+  source checkout. A release puts every header and `libfujinet.a` flat at its root; a
+  checkout keeps public headers at the root, per-machine headers under `atari/src/include`,
+  and the archive under `build/`. Both layouts are detected. Validated end to end against a
+  real FujiNet stack with `fujinet-lib-atari-4.11.2-llvm.1`: the `LiveSession` tank demo's
+  streamed playfield renders identically to the `Embedded`-asset build.
+
+### Changed
+- **The fujinet-lib session backend is now wired per target, not globally.**
+  `EDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON` previously applied its define, include path,
+  and archive to *every* target via `add_compile_definitions` / `include_directories` /
+  `link_libraries`. A new `edge_use_fujinetlib_session(<target>)` helper attaches all three
+  to just the targets that use the session lane or branch on the macro, so enabling the
+  option no longer pulls the real adapter and the archive into unrelated demos.
+- `FUJINETLIB_DIR` (the `fujinet_net_test` knob) now defaults from `EDGE_FUJINETLIB_ROOT`,
+  so a single variable configures every fujinet-lib consumer.
+
+### Fixed
+- **`fujinet_session_validate` ignored its configured host.** The `#ifndef` guard around
+  `EDGE_FUJINET_VALIDATE_HOST` was commented out, so the source unconditionally overrode
+  the CMake value with `127.0.0.1` and `-DEDGE_FUJINET_VALIDATE_HOST=` silently did
+  nothing. The demo now connects to the host it was configured with.
+
+### Known Issues
+- **`atari_tank_net_demo` links nondeterministically** (~2-4 failures in 12 with identical
+  inputs): `R_MOS_ADDR8 out of range: 256 ... '.zp.noinit'`. The llvm-mos LTO zero-page
+  allocator targets the whole 96-byte region (`$a0-$ff`) rather than actual demand and
+  intermittently overcommits by one byte. This is a toolchain bug, not an EDGE defect, and
+  no source change fixes it — zero page freed in the demo is immediately reabsorbed, and
+  shrinking the linker script's `zp` region fails every time. Retry the link; `-fno-lto`
+  avoids it at a ~20% size cost and the loss of zero-page globals.
+
 ## [0.9.0] - 2026-07-07
 
 ### Fixed

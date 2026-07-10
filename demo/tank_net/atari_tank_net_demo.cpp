@@ -129,10 +129,18 @@ static tank::TankState g_tank = {
 static constexpr u8 kWallColpfMask     = 0x01;          // COLPF0 = walls (white)
 static constexpr u8 kDepotSurroundMask = 0x02 | 0x04;   // COLPF1|COLPF2 = depot box
 
-// Mutable game state bundled into ONE struct so it lands in main RAM (.bss), not
-// the near-full zero page — small separate statics get zp-promoted and overflow it
-// (volatile alone does not prevent promotion; see the tank demo's SimFeed/LiveState
-// bundling). The padding keeps the struct comfortably above the zp-promotion size.
+// Mutable game state bundled into ONE struct (see the tank demo's SimFeed/LiveState
+// bundling for the same idiom).
+//
+// The struct does NOT land in main RAM: LTO promotes g_st wholesale into .zp.bss,
+// bss_anchor and all. Neither the bundling nor the padding prevents that, and neither
+// does volatile. Do not "fix" this by shrinking the struct or forcing a .bss section —
+// the llvm-mos LTO zero-page allocator targets the whole 96-byte region ($a0-$ff)
+// rather than actual demand, so any bytes freed here are immediately refilled by
+// promoting something else. That saturation is why this demo's link intermittently
+// overflows zero page by one byte and fails; the bug is in the toolchain, not here.
+// Verified: freeing 62 bytes changed nothing, and shrinking the linker script's zp
+// region made it fail every time.
 struct GameState {
     tanknet::Adversary adv[kAdvCount];   // network-driven adversaries
     tanknet::AdvRxState adv_rx;      // shared packet-level seq gate (combined snapshot)
@@ -141,7 +149,7 @@ struct GameState {
     u16 tx_seq;
     u8  tx_frame;
     u8  rx_overflow_count;           // saturating RX-overflow events since last TX (echoed)
-    u8  bss_anchor[24];              // force .bss placement (main RAM is plentiful)
+    u8  bss_anchor[24];              // inert: does NOT force .bss placement (see above)
 };
 static GameState g_st = {};
 
