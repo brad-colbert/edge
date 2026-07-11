@@ -70,6 +70,31 @@ static constexpr u8  kSparkW       = 24;   // sparkline width in characters
 static constexpr u16 kStaleFrames  = 30;   // RX age above this => STALE
 static constexpr u8  kWinSecs      = 4;    // link-quality averaging window (seconds)
 
+// HUD redraw cadence — draw the full text HUD every N frames, NOT every frame.
+// The dashboard redraw (3 sparklines * kSparkW cells with 32-bit math + ~30
+// print_num fields) is by far the heaviest per-frame work here. Because the game
+// loop and the VBI frame service run lockstep, an every-frame redraw throttles the
+// whole loop (and the frame clock with it), capping the realtime send/recv rate far
+// below what the transport can actually carry. Measured on fujinet-pc + NetSIO +
+// Altirra against a Docker echo peer: every-frame HUD held the link to ~5 pkt/s;
+// redrawing every 8th frame (~7.5 Hz — still perfectly readable) lifted it to
+// ~12 pkt/s and halved the observed DELAY. Sparkline history is pushed in the RX
+// drain (independent of when we draw), so throttling the draw loses no samples.
+// Override at build time with -DEDGE_METER_HUD_PERIOD=N (1 = old every-frame draw).
+#ifndef EDGE_METER_HUD_PERIOD
+#define EDGE_METER_HUD_PERIOD 60
+#endif
+static constexpr u8  kHudPeriod    = EDGE_METER_HUD_PERIOD;   // redraw HUD every N frames
+
+// Auto-sweep mode (default off). When on, the demo ramps the send rate through a
+// preset ladder, holds each step, and tabulates the DELIVERED downstream rate
+// (RXHZ) and reverse loss (peer->Atari) so it characterises the link's usable
+// throughput on-screen — upstream scales linearly while RXHZ plateaus and REV loss
+// climbs past the downstream "knee". Build the sweep tool with -DEDGE_METER_SWEEP=1.
+#ifndef EDGE_METER_SWEEP
+#define EDGE_METER_SWEEP 0
+#endif
+
 // MeterPacket16 full-scale ranges (frames) for the sparkline level mapping.
 static constexpr i16 kDelayFull  = 24;     // 0..24 frames
 static constexpr i16 kJitterFull = 12;     // 0..12 frames
@@ -190,6 +215,7 @@ static u16 g_rx_count = 0;     // total replies received
 static u16 g_last_rx_jiffy = 0;
 static bool g_have_rx = false;
 static u8  g_frame    = 0;     // send-cadence counter
+static u8  g_hud_frame = static_cast<u8>(kHudPeriod - 1);  // HUD-cadence counter (draw on 1st frame)
 static u8  g_warmup   = kWarmupFrames;
 static u8  g_last_send_status = 0;  // last NetStatus from send()
 static bool g_overflow_sticky = false;
@@ -303,7 +329,7 @@ static void draw_sparkline(u8 col, u8 row, const i16* ring, i16 lo, i16 hi) {
     }
 }
 
-static void draw_static_labels() {
+[[maybe_unused]] static void draw_static_labels() {   // unused in EDGE_METER_SWEEP builds
     Game::print(0, 0,  "EDGE NET REALTIME METER");
     Game::print(0, 1,  "HOST");
     Game::print(0, 3,  "TX");
@@ -400,7 +426,7 @@ static void draw_dynamic(bool active, u16 now) {
 }
 
 // ── Per-frame step ────────────────────────────────────────────────────────────
-static bool step(const engine::InputState<>& in) {
+[[maybe_unused]] static bool step(const engine::InputState<>& in) {   // unused in EDGE_METER_SWEEP builds
     const bool active = Game::net.realtime.active();
 
     if (active) {
@@ -468,13 +494,182 @@ static bool step(const engine::InputState<>& in) {
 
     const u16 now = read_jiffy16();
     if (active) update_link_window(now);
-    draw_dynamic(active, now);
+    // Redraw the HUD every kHudPeriod frames, not every frame: the full redraw is the
+    // loop's dominant cost, so throttling it lets the per-frame net path run near the
+    // kSendPeriod cadence (see kHudPeriod). All metric state is updated above every
+    // frame; only the rendering is throttled.
+    if (++g_hud_frame >= kHudPeriod) {
+        g_hud_frame = 0;
+        draw_dynamic(active, now);
+    }
     return in.fire();
 }
 
+#if EDGE_METER_SWEEP
+// ── Auto-sweep mode ───────────────────────────────────────────────────────────
+//
+// Ramp the send cadence through a preset ladder, hold each step, and tabulate the
+// delivered downstream rate (RXHZ) and reverse loss (peer->Atari). Surfaces the
+// story the fixed-rate HUD can't: upstream (TXHZ) scales linearly, but RXHZ
+// plateaus and REV loss climbs once the downstream ceiling is crossed — the "knee".
+static constexpr u8  kSweepPeriods[] = { 8, 6, 4, 3, 2, 1 };   // -> ~7/10/15/20/30/60 Hz
+static constexpr u8  kSweepSteps  = static_cast<u8>(sizeof(kSweepPeriods) / sizeof(kSweepPeriods[0]));
+static constexpr u8  kSweepHold   = 3;    // measure each step this many seconds
+static constexpr u8  kSweepSettle = 60;   // ignore ~1s after a rate change so the reverse-path
+                                          // backlog from the prior step drains before measuring
+static constexpr u8  kRevKnee     = 10;   // REV loss %: at/above this the step is over the knee
+
+struct SweepRow { u8 target; u8 txhz; u8 rxhz; u8 revloss; bool done; };
+static SweepRow g_sw[kSweepSteps] = {};
+static u8   g_sw_step    = 0;
+static bool g_sw_measure = false;         // false = settling after a rate change
+static bool g_sw_done    = false;
+static u16  g_sw_phase_j = 0;             // jiffy at the start of the current phase
+static u16  g_sw_tx0 = 0, g_sw_got0 = 0, g_sw_pseq0 = 0;
+static u8   g_sw_usable  = 0;             // best target Hz measured with REV loss < knee
+
+static inline u8 sweep_target_hz(u8 period) { return static_cast<u8>(kFps / period); }
+
+static void draw_sweep(bool active) {
+    Game::print(0, 0, "EDGE NET SWEEP");
+    Game::print(28, 0, active ? "ACTIVE " : "FAILED ");
+    Game::print(0, 1, "HOST");
+    Game::print(5, 1, kPeerHost);
+
+    if (g_sw_done) {
+        Game::print(0, 2, "SWEEP DONE          ");
+    } else {
+        Game::print(0, 2, "STEP ");
+        Game::print_num(5, 2, static_cast<u16>(g_sw_step + 1), 1);
+        Game::put_char(6, 2, 0x0F /*'/'*/);
+        Game::print_num(7, 2, kSweepSteps, 1);
+        Game::print(9, 2, g_sw_measure ? " MEASURING" : " SETTLING ");
+    }
+
+    // Column headers aligned with the data columns below. RXBPS = delivered bytes/sec
+    // (RXHZ * 16, the fixed packet size) — the throughput that survives the round trip.
+    Game::print(0, 4, "TGT");
+    Game::print(6, 4, "TXHZ");
+    Game::print(11, 4, "RXHZ");
+    Game::print(16, 4, "RXBPS");
+    Game::print(22, 4, "REV");
+    for (u8 i = 0; i < kSweepSteps; ++i) {
+        const u8 r = static_cast<u8>(6 + i);
+        Game::print_num(0, r, g_sw[i].target, 2);
+        Game::print(2, r, "HZ");
+        if (g_sw[i].done) {
+            Game::print_num(6, r, g_sw[i].txhz, 3);
+            Game::print_num(11, r, g_sw[i].rxhz, 3);
+            Game::print_num(16, r, static_cast<u16>(g_sw[i].rxhz * 16u), 4);   // delivered B/s
+            print_pct(22, r, g_sw[i].revloss);
+            Game::print(26, r, g_sw[i].revloss >= kRevKnee ? "KNEE" : "    ");
+        } else if (i == g_sw_step) {
+            Game::print(6, r, "..                      ");
+        } else {
+            Game::print(6, r, "                        ");
+        }
+    }
+
+    Game::print(0, 13, "USABLE");
+    if (g_sw_done) {
+        if (g_sw_usable > 0) {
+            Game::print(7, 13, "~");
+            Game::print_num(8, 13, g_sw_usable, 2);
+            Game::print(10, 13, "HZ (REVLOSS<");
+            Game::print_num(22, 13, kRevKnee, 2);
+            Game::print(24, 13, "%)   ");
+        } else {
+            Game::print(7, 13, "<");
+            Game::print_num(8, 13, g_sw[0].target, 2);
+            Game::print(10, 13, "HZ               ");
+        }
+    } else {
+        Game::print(7, 13, "MEASURING...      ");
+    }
+    Game::print(0, 15, "KNEE = REVLOSS >= ");
+    Game::print_num(18, 15, kRevKnee, 2);
+    Game::put_char(20, 15, 0x05 /*'%'*/);
+    Game::print(0, 16, "RXBPS = RXHZ X 16 (BYTES/SEC)");
+    Game::print(0, 23, "FIRE = QUIT");
+}
+
+// Lean per-frame step: count replies + peer_seq, send at the current step's cadence,
+// and advance the settle/measure state machine on the frame clock. No delay/offset/
+// jitter math (kept off the hot path so the measured rate isn't self-biased).
+static bool step_sweep(const engine::InputState<>& in) {
+    const bool active = Game::net.realtime.active();
+    const u8 period = kSweepPeriods[g_sw_step];
+
+    if (active) {
+        Game::net.realtime.poll();
+        MeterPacket16 pkt{};
+        while (Game::net.realtime.recv(pkt)) {
+            if (pkt.magic != kMagic) continue;
+            ++g_rx_count;
+            g_peer_seq = rd16(pkt.pseq_lo, pkt.pseq_hi);   // forward-survivor counter
+        }
+        (void)Game::net.realtime.consume_rx_overflowed();
+
+        if (!g_sw_done && ++g_frame >= period) {
+            g_frame = 0;
+            MeterPacket16 req{};
+            req.magic = kMagic; req.version = kVersion; req.type = kTypeReq;
+            wr16(req.cseq_lo, req.cseq_hi, g_tx_seq);
+            wr16(req.t1_lo, req.t1_hi, read_jiffy16());
+            req.pattern = kPattern;
+            Game::net.realtime.send(req);
+            ++g_tx_seq;
+        }
+    }
+
+    const u16 now = read_jiffy16();
+    if (active && !g_sw_done) {
+        const u16 elapsed = static_cast<u16>(sub16(now, g_sw_phase_j));
+        if (!g_sw_measure) {
+            if (elapsed >= kSweepSettle) {              // settled -> snapshot baseline, measure
+                g_sw_measure = true;
+                g_sw_phase_j = now;
+                g_sw_tx0 = g_tx_seq; g_sw_got0 = g_rx_count; g_sw_pseq0 = g_peer_seq;
+            }
+        } else if (elapsed >= static_cast<u16>(kFps) * kSweepHold) {
+            const u16 d_tx  = static_cast<u16>(sub16(g_tx_seq,   g_sw_tx0));
+            const u16 d_got = static_cast<u16>(sub16(g_rx_count, g_sw_got0));
+            const u16 d_ps  = static_cast<u16>(sub16(g_peer_seq, g_sw_pseq0));
+            const u16 txhz = static_cast<u16>(d_tx  / kSweepHold);
+            const u16 rxhz = static_cast<u16>(d_got / kSweepHold);
+            g_sw[g_sw_step].txhz    = static_cast<u8>(txhz > 255 ? 255 : txhz);
+            g_sw[g_sw_step].rxhz    = static_cast<u8>(rxhz > 255 ? 255 : rxhz);
+            g_sw[g_sw_step].revloss = pct_loss(d_ps, d_got);   // peer replied vs Atari got
+            g_sw[g_sw_step].done    = true;
+
+            if (g_sw_step + 1 >= kSweepSteps) {
+                g_sw_done = true;
+                g_sw_usable = 0;                            // highest clean target Hz
+                for (u8 i = 0; i < kSweepSteps; ++i)
+                    if (g_sw[i].done && g_sw[i].revloss < kRevKnee) g_sw_usable = g_sw[i].target;
+            } else {
+                ++g_sw_step;
+                g_sw_measure = false;
+                g_sw_phase_j = now;
+                g_frame = 0;
+            }
+        }
+    }
+
+    // Throttled redraw (see kHudPeriod) — keep the table off the measured hot path.
+    if (++g_hud_frame >= kHudPeriod) { g_hud_frame = 0; draw_sweep(active); }
+    return in.fire();
+}
+#endif  // EDGE_METER_SWEEP
+
 int main() {
     Game::init(g_charset);
+#if EDGE_METER_SWEEP
+    for (u8 i = 0; i < kSweepSteps; ++i) g_sw[i].target = sweep_target_hz(kSweepPeriods[i]);
+    draw_sweep(false);
+#else
     draw_static_labels();
+#endif
 
     // The Netstream hardware settle runs INSIDE open_udp_seq() and blocks until it
     // returns — we cannot poll it. Show intent before the (blocking) call, result
@@ -499,6 +694,11 @@ int main() {
     // screen bring-up, blocking netstream settle) so the on-screen DROP/SVC
     // readout measures only the steady-state run loop, not boot-time stalls.
     Game::reset_frame_stats();
+#if EDGE_METER_SWEEP
+    g_sw_phase_j = read_jiffy16();
+    Game::run_until(step_sweep);
+#else
     Game::run_until(step);
+#endif
     return 0;
 }
