@@ -1865,3 +1865,59 @@ The mode is covered by host regression tests
 a Y crossing, and it is validated live in the tank_net demo on Altirra Mode B. The
 multiplexer's own latent single-zone swap (the same Y-sort reassignment for ≤ 4
 multiplexed sprites) is unchanged and remains a known issue for multiplexed games.
+
+## ADR-036: Vertical Scroll Zones Self-Terminate with a Buffer Line
+
+**Status:** Accepted
+
+**Context:**
+ANTIC delimits vertical fine scroll with the display list itself: the
+consecutive mode lines carrying the VSCROLL bit form the scrolled zone, and
+VSCROL truncates the zone's two *boundary* lines. Altirra-measured (phase sweep
+0..7, split layout): the first flagged line displays only its bottom
+`8 - VSCROL` scanlines, and the **first line after the zone — the first
+instruction without the bit — is the zone's exit line**, displayed
+bottom-anchored at `VSCROL + 1` scanlines (glyph rows 0..VSCROL). The builder
+used to set VSCROLL on every line of a `ScrollRegion` through the last, so the
+exit line landed on whatever mode line *followed* the region. Every in-tree
+demo placed its scroll region last in the layout — the exit line fell into the
+JVB and vertical blank, invisible — but the first consumer layout with a text
+region *below* a scroll region had its first HUD row shrink and grow with the
+scroll phase (a blinking, vertically bobbing row).
+
+**Decision:**
+A scroll region terminates itself: `DisplayProgram::build()` emits the region's
+`height` lines with VSCROLL set **plus one buffer line with VSCROLL clear**,
+whose LMS points one map-row stride past the last visible line. The buffer line
+participates in `scroll_lms_pos[]`, so `patch_scroll()` strides it with the
+zone; at the bottom stop (`coarse_row == map_height - height`, the
+ScrollManager's clamp) its LMS is clamped to the map's **last** row. The buffer
+line keeps DL_HSCROLL.
+
+**Rationale:**
+The variable-height exit line is unavoidable hardware behaviour; the only
+question is what it displays. Landing it inside the region on the *incoming*
+map row makes the bottom edge mirror the top edge (the row scrolls in as
+`VSCROL + 1` scanlines while the top row scrolls out to `8 - VSCROL`) — the
+seamless behaviour a scrolled window wants — and guarantees every following
+region's lines display at full height at every phase. DL_HSCROLL stays set
+because the line displays map content: it must match the zone's widened fetch
+and horizontal phase or its pixels would shift against the rows above. The
+bottom-stop clamp (repeat the last row rather than fetch past the map) keeps
+the engine's existing no-legal-camera-position-fetches-out-of-map invariant
+(`tests/generic/test_mode4_geometry.cpp::test_no_oob_lms`) without demanding
+consumers pad their maps; at the stop (fine phase 0 there) it shows exactly one
+repeated scanline.
+
+**Consequences:**
+A scroll region now occupies a **constant `8*height + 1` scanlines** (8-scanline
+modes) instead of the old phase-dependent `8*height - VSCROL`; layouts must
+budget the extra line (all in-tree layouts re-checked: worst case 217 of the
+240-scanline ANTIC limit). The display list grows by one 3-byte LMS per scroll
+region and `scroll_lms_pos[]` by one entry. Verified by mos-sim construction
+tests (buffer-line opcode/stride, bottom-stop clamp, following-region bytes
+untouched) and on Altirra with `demo/atari_vscroll_split_test.cpp`: the first
+row below the region measures a full 8 scanlines with a fixed top edge at every
+VSCROL phase (pre-fix: `VSCROL + 1` scanlines, bottom-anchored), and the tank
+demo (region-last layout) is pixel-identical before/after. See the "Scrolling
+on Atari" section of `documents/PLATFORM_ATARI.md`.

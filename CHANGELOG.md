@@ -30,7 +30,24 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
   so a single variable configures every fujinet-lib consumer.
 
 ### Fixed
-- **`fujinet_session_validate` ignored its configured host.** The `#ifndef` guard around
+- **A vertical fine-scroll region truncated the first mode line of the region below
+  it.** The display-list builder set the VSCROLL bit on *every* line of a scroll
+  region, so ANTIC's variable-height exit line — the first line after the flagged
+  zone, displayed at `VSCROL + 1` scanlines (Altirra-measured) — landed on whatever
+  mode line followed the region. In-tree demos never showed it (their scroll region
+  was last, so the truncation fell into vertical blank), but any layout with a region
+  *below* a scroll region had that region's first row shrink, grow, and bob with the
+  scroll phase. A scroll region now terminates itself with a **buffer line**
+  (VSCROLL clear, HSCROLL kept, LMS one map-row stride past the last visible line),
+  so the exit line displays the map row scrolling in at the window's bottom —
+  mirroring the top edge — and every following region renders at full height at
+  every phase. At the bottom map stop the buffer LMS clamps to the last map row
+  (no out-of-map fetch; maps need no padding row). Budget note: a scroll region now
+  occupies a constant `8*height + 1` scanlines instead of a phase-dependent
+  `8*height - VSCROL` — see "Scrolling on Atari" in `documents/PLATFORM_ATARI.md`
+  and ADR-036. Verified by extended mos-sim construction tests and headless Altirra
+  phase sweeps (new regression demo `atari_vscroll_split_test`); the tank demo
+  (region-last layout) is pixel-identical before/after. The `#ifndef` guard around
   `EDGE_FUJINET_VALIDATE_HOST` was commented out, so the source unconditionally overrode
   the CMake value with `127.0.0.1` and `-DEDGE_FUJINET_VALIDATE_HOST=` silently did
   nothing. The demo now connects to the host it was configured with.

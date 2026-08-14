@@ -36,7 +36,8 @@ namespace detail {
 // Base display-list length for `Layout` assuming one LMS per region (no 4K
 // crossings): 3 blank-line instructions + per region (1 mode/LMS byte + 2 LMS
 // address bytes + height-1 mode bytes) + a 3-byte JVB. A scroll region instead
-// emits one LMS (3 bytes) per visible line, so it contributes 3*height.
+// emits one LMS (3 bytes) per visible line PLUS one for its exit buffer line
+// (see build()), so it contributes 3*(height+1).
 template <typename Layout>
 constexpr u16 display_list_base_size() {
     u16 s = 3 + 3;
@@ -45,7 +46,7 @@ constexpr u16 display_list_base_size() {
             // Overlay region: ceil(H/8) blank instructions, no mode lines / LMS.
             s += static_cast<u16>((Layout::region_height[i] + 7) / 8);
         } else if (Layout::region_is_scroll[i]) {
-            s += static_cast<u16>(3 * Layout::region_height[i]);
+            s += static_cast<u16>(3 * (Layout::region_height[i] + 1));
         } else {
             s += static_cast<u16>(Layout::region_height[i]) + 2;
         }
@@ -73,30 +74,42 @@ constexpr u16 display_list_capacity() {
     return s;
 }
 
-// Worst-case total LMS count: a scroll region emits one LMS per visible line; a
-// normal region emits one plus its potential 4K crossings.
+// Worst-case total LMS count: a scroll region emits one LMS per visible line
+// plus one for its exit buffer line; a normal region emits one plus its
+// potential 4K crossings.
 template <typename Layout>
 constexpr u16 max_lms_count() {
     u16 n = 0;
     for (u8 i = 0; i < Layout::region_count; ++i) {
         if (Layout::region_is_overlay[i]) continue;   // overlays emit no LMS
         n += Layout::region_is_scroll[i]
-                 ? static_cast<u16>(Layout::region_height[i])
+                 ? static_cast<u16>(Layout::region_height[i] + 1)
                  : static_cast<u16>(1 + lms_crossings_max(Layout::region_ram[i]));
     }
     // Min 1 so a pure-overlay layout never declares a zero-length lms_pos[] array.
     return n < 1 ? 1 : n;
 }
 
-// Total scroll LMS (one per visible line of every scroll region). Sized at least
-// 1 so DisplayProgram::scroll_lms_pos[] is never a zero-length array.
+// Total scroll LMS (one per visible line of every scroll region, plus one per
+// region for its exit buffer line). Sized at least 1 so
+// DisplayProgram::scroll_lms_pos[] is never a zero-length array.
 template <typename Layout>
 constexpr u16 max_scroll_lms_count() {
     u16 n = 0;
     for (u8 i = 0; i < Layout::region_count; ++i) {
-        if (Layout::region_is_scroll[i]) n += Layout::region_height[i];
+        if (Layout::region_is_scroll[i]) n += static_cast<u16>(Layout::region_height[i] + 1);
     }
     return n < 1 ? 1 : n;
+}
+
+// Map height (rows) of the first scroll region, or 0 if the layout has none.
+// patch_scroll() uses it to clamp the buffer line's LMS at the bottom map edge.
+template <typename Layout>
+constexpr u16 scroll_map_height() {
+    for (u8 i = 0; i < Layout::region_count; ++i) {
+        if (Layout::region_is_scroll[i]) return Layout::region_map_height[i];
+    }
+    return 0;
 }
 
 } // namespace detail
@@ -209,7 +222,26 @@ struct DisplayProgram {
                 // (each line reloads the full address anyway). The addresses here
                 // are placeholders against `screen_base`; scroll_map() repoints
                 // them at the bound map via patch_scroll().
+                //
+                // The display hardware's vertical-scroll contract makes the first
+                // line AFTER the flagged zone the zone's exit line: it displays at
+                // a height that varies with the fine-scroll phase (complementing
+                // the first zone line's top truncation). If that exit line were
+                // whatever mode line follows the region, a following region's
+                // first line would shrink and grow with the phase (Altirra-
+                // measured: it displays only its top VSCROL+1 scanlines). So the
+                // region terminates ITSELF with one extra buffer line, VSCROLL
+                // clear, whose LMS points one map-row stride past the last visible
+                // line: the variable-height exit line then shows the top of the
+                // row scrolling in at the window's bottom edge (mirroring the top
+                // edge) and every following mode line displays at full height at
+                // every phase. The buffer line keeps DL_HSCROLL: it displays map
+                // content, so it must match the zone's widened fetch and hold the
+                // same horizontal phase as the lines above it. Cost: the region
+                // occupies a constant 8*height+1 scanlines (for an 8-scanline
+                // mode) instead of a phase-dependent 8*height - VSCROL.
                 const u8  op     = static_cast<u8>(mode | DL_LMS | DL_HSCROLL | DL_VSCROLL);
+                const u8  buf_op = static_cast<u8>(mode | DL_LMS | DL_HSCROLL);
                 const u16 stride = Layout::region_map_width[r];
                 u16 line_start   = static_cast<u16>(screen_base + Layout::offset(r));
                 for (u8 i = 0; i < Layout::region_height[r]; ++i) {
@@ -218,6 +250,7 @@ struct DisplayProgram {
                     if (i == 0) region_lms_pos[r] = pos;
                     line_start = static_cast<u16>(line_start + stride);
                 }
+                scroll_lms_pos[scroll_lms_count++] = emit_load(p, buf_op, line_start);
                 continue;
             }
 
@@ -288,11 +321,28 @@ struct DisplayProgram {
         // frame rate (it runs every frame); the incremental form keeps it inside one
         // frame. Result is byte-identical to `map_base + (coarse_row+i)*map_width +
         // coarse_col` for every i.
-        u16 a = static_cast<u16>(map_base + coarse_row * map_width + coarse_col);
-        for (u16 i = 0; i < scroll_lms_count; ++i) {
-            dst[scroll_lms_pos[i]]     = lo(a);
-            dst[scroll_lms_pos[i] + 1] = hi(a);
-            a = static_cast<u16>(a + map_width);
+        //
+        // The final entry is the region's buffer line (see build()): it strides one
+        // further row so the variable-height exit line shows the row scrolling in.
+        // At the bottom stop (coarse_row == map_height - height, the ScrollManager's
+        // clamp) that row is one past the map, so its LMS is clamped to the map's
+        // last row instead — the exit line then repeats up to one scanline of the
+        // last visible row rather than fetching out-of-map RAM, keeping the engine's
+        // no-legal-camera-position-fetches-out-of-map invariant. (Single scroll
+        // region per layout, like the rest of the scroll binding.)
+        if (scroll_lms_count != 0) {
+            constexpr u16 map_h = detail::scroll_map_height<Layout>();
+            const u16 buf = static_cast<u16>(scroll_lms_count - 1);
+            u16 a = static_cast<u16>(map_base + coarse_row * map_width + coarse_col);
+            for (u16 i = 0; i < buf; ++i) {
+                dst[scroll_lms_pos[i]]     = lo(a);
+                dst[scroll_lms_pos[i] + 1] = hi(a);
+                a = static_cast<u16>(a + map_width);
+            }
+            if (static_cast<u16>(coarse_row + buf) >= map_h)
+                a = static_cast<u16>(a - map_width);
+            dst[scroll_lms_pos[buf]]     = lo(a);
+            dst[scroll_lms_pos[buf] + 1] = hi(a);
         }
         if constexpr (double_buffered) front_b = static_cast<u8>(!front_b);
 #ifdef EDGE_SCROLL_RASTERBAR

@@ -907,6 +907,29 @@ if(MOS_ATARI8_CXX)
         VERBATIM)
     add_custom_target(atari_scroll_test DEPENDS ${SCROLL_TEST_XEX})
 
+    # ── Vertical-scroll split-layout demo (atari_vscroll_split_test.xex) ──
+    # Regression guard for the scroll-region exit-line defect (ADR-036): a
+    # scrolled viewport with fixed text rows BELOW it, sweeping every VSCROL
+    # phase. Build with EXTRA -DEDGE_VSWEEP_BOTTOM for the bottom-stop variant.
+    #
+    #   cmake --build build --target atari_vscroll_split_test
+    set(VSCROLL_SPLIT_XEX ${CMAKE_BINARY_DIR}/atari_vscroll_split_test.xex)
+    set(VSCROLL_SPLIT_MAP ${CMAKE_BINARY_DIR}/atari_vscroll_split_test.map)
+    add_custom_command(
+        OUTPUT ${VSCROLL_SPLIT_XEX}
+        COMMAND ${MOS_ATARI8_CXX}
+                -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra
+                -I${CMAKE_SOURCE_DIR}
+                ${CMAKE_SOURCE_DIR}/demo/atari_vscroll_split_test.cpp
+                -o ${VSCROLL_SPLIT_XEX}
+                -Wl,--Map=${VSCROLL_SPLIT_MAP}
+        DEPENDS ${CMAKE_SOURCE_DIR}/demo/atari_vscroll_split_test.cpp
+                ${EDGE_ENGINE_HEADERS}
+        BYPRODUCTS ${VSCROLL_SPLIT_MAP}
+        COMMENT "Building Atari XEX demo (atari_vscroll_split_test.xex)"
+        VERBATIM)
+    add_custom_target(atari_vscroll_split_test DEPENDS ${VSCROLL_SPLIT_XEX})
+
     # ── VBXE Phase 4a bring-up smoke test (atari_vbxe_bringup.xex) ───────
     #   cmake -B build -DEDGE_VBXE_BRINGUP_MODE=2 ...   # 0=bars, 1=solid, 2=probe
     #   cmake --build build --target atari_vbxe_bringup  # -> build/atari_vbxe_bringup.xex

@@ -5,10 +5,13 @@
 //
 // The portable split math lives in tests/generic/test_scroll.cpp. Here we test
 // the ANTIC-specific half: that atari::DisplayProgram emits one LMS per visible
-// scroll line (with the HSCROLL/VSCROLL bits) striding by the map width, that
-// patch_scroll() rewrites those addresses for a coarse offset, and that
-// ScreenManager::apply_scroll() drives it end-to-end (including suspend gating)
-// while a non-scroll region in the same layout still emits a single LMS.
+// scroll line (with the HSCROLL/VSCROLL bits) striding by the map width plus a
+// VSCROLL-clear buffer line terminating the zone (so the variable-height exit
+// line never lands on a following region), that patch_scroll() rewrites those
+// addresses for a coarse offset (clamping the buffer line at the bottom map
+// edge), and that ScreenManager::apply_scroll() drives it end-to-end (including
+// suspend gating) while a non-scroll region in the same layout still emits a
+// single LMS with no scroll bits.
 
 #include <stdint.h>
 #include <stdio.h>
@@ -82,6 +85,11 @@ using Layout = ScrollScreen::display;
 // Scroll-line opcode: Mode 2 | LMS | HSCROLL | VSCROLL.
 static constexpr u8 SCROLL_OP =
     static_cast<u8>(0x02 | M::DL_LMS | M::DL_HSCROLL | M::DL_VSCROLL);
+// Buffer-line opcode (the zone's self-terminating exit line): VSCROLL clear so
+// the variable-height exit falls on it, HSCROLL kept so it matches the zone's
+// widened fetch and horizontal phase.
+static constexpr u8 BUFFER_OP =
+    static_cast<u8>(0x02 | M::DL_LMS | M::DL_HSCROLL);
 
 // ── Runtime harness ────────────────────────────────────────────────────
 
@@ -117,15 +125,22 @@ static atari::DisplayProgram<Layout> g_dl;   // ~80 bytes -> static, not stack
 static void test_scroll_build() {
     g_dl.build(0x4000, 0x4000);
 
-    // 22 scroll LMS + 1 for the HUD region = 23 total (no 4K crossing here).
-    CHECK(g_dl.scroll_lms_count == VIS);
-    CHECK(g_dl.lms_count == VIS + 1);
+    // 22 zone lines + 1 buffer line, + 1 for the HUD region (no 4K crossing here).
+    CHECK(g_dl.scroll_lms_count == VIS + 1);
+    CHECK(g_dl.lms_count == VIS + 2);
 
-    // Every scroll line carries LMS | HSCROLL | VSCROLL.
-    for (u16 i = 0; i < g_dl.scroll_lms_count; ++i) {
+    // Every visible zone line carries LMS | HSCROLL | VSCROLL.
+    for (u16 i = 0; i < VIS; ++i) {
         const u16 pos = g_dl.scroll_lms_pos[i];
         CHECK(g_dl.bytes[pos - 1] == SCROLL_OP);
     }
+    // The trailing buffer line terminates the zone: VSCROLL clear, HSCROLL kept,
+    // LMS one map-row stride past the last visible line.
+    const u16 bpos = g_dl.scroll_lms_pos[VIS];
+    CHECK(g_dl.bytes[bpos - 1] == BUFFER_OP);
+    CHECK((g_dl.bytes[bpos - 1] & M::DL_VSCROLL) == 0);
+    CHECK(read16(g_dl.bytes, bpos) ==
+          static_cast<u16>(read16(g_dl.bytes, g_dl.scroll_lms_pos[VIS - 1]) + MAP_W));
     // The scroll region's first LMS is recorded as its region LMS.
     CHECK(g_dl.region_lms_pos[1] == g_dl.scroll_lms_pos[0]);
 
@@ -171,6 +186,56 @@ static void test_patch_scroll() {
         const u16 expect = static_cast<u16>(0x8000 + (2 + i) * MAP_W + 4);
         CHECK(read16(front, g_dl.scroll_lms_pos[i]) == expect);
     }
+
+    // Bottom stop: coarse_row = MAP_H - VIS (the ScrollManager's clamp) puts the
+    // buffer line's natural row one past the map, so its LMS clamps to the map's
+    // last row — same address as the last zone line, never an out-of-map fetch.
+    front = g_dl.patch_scroll(0x8000, MAP_W, /*col*/ 0, /*row*/ MAP_H - VIS);
+    const u16 last_zone = read16(front, g_dl.scroll_lms_pos[VIS - 1]);
+    CHECK(last_zone == static_cast<u16>(0x8000 + (MAP_H - 1) * MAP_W));
+    CHECK(read16(front, g_dl.scroll_lms_pos[VIS]) == last_zone);
+
+    // One row above the stop the buffer line is unclamped (last in-map row).
+    front = g_dl.patch_scroll(0x8000, MAP_W, /*col*/ 0, /*row*/ MAP_H - VIS - 1);
+    CHECK(read16(front, g_dl.scroll_lms_pos[VIS]) ==
+          static_cast<u16>(0x8000 + (MAP_H - 1) * MAP_W));
+}
+
+// ── Split layout: a region BELOW the scroll region is never truncated ──
+//
+// The layout shape that exposed the exit-line defect: the scrolled viewport
+// sits ABOVE fixed text rows. The zone must terminate inside the region (the
+// buffer line), so the following region's mode lines carry no scroll bits and
+// display at full height at every fine-scroll phase.
+
+struct SplitScreen {
+    using display = DisplayLayout<
+        ScrollRegion<TextRegion<M::Mode::MODE_2, VIS>, MAP_W, MAP_H>,
+        TextRegion<M::Mode::MODE_2, 2>>;
+};
+
+static atari::DisplayProgram<SplitScreen::display> g_split_dl;
+
+static void test_split_layout_build() {
+    g_split_dl.build(0x4000, 0x4000);
+
+    CHECK(g_split_dl.scroll_lms_count == VIS + 1);
+    CHECK(g_split_dl.lms_count == VIS + 2);
+
+    // Zone lines flagged; the buffer line ends the zone before the HUD.
+    for (u16 i = 0; i < VIS; ++i)
+        CHECK(g_split_dl.bytes[g_split_dl.scroll_lms_pos[i] - 1] == SCROLL_OP);
+    const u16 bpos = g_split_dl.scroll_lms_pos[VIS];
+    CHECK(g_split_dl.bytes[bpos - 1] == BUFFER_OP);
+
+    // The HUD below is untouched: its LMS is the instruction immediately after
+    // the buffer line, carries no scroll bits, and its second line is a plain
+    // full-height mode byte.
+    const u16 hud = g_split_dl.region_lms_pos[1];
+    CHECK(hud == bpos + 3);
+    CHECK(g_split_dl.bytes[hud - 1] == (0x02 | M::DL_LMS));
+    CHECK((g_split_dl.bytes[hud - 1] & (M::DL_VSCROLL | M::DL_HSCROLL)) == 0);
+    CHECK(g_split_dl.bytes[hud + 2] == 0x02);
 }
 
 // ── ScreenManager.apply_scroll drives the live list + suspend gating ───
@@ -225,6 +290,7 @@ static void test_apply_scroll() {
 int main() {
     test_scroll_build();
     test_patch_scroll();
+    test_split_layout_build();
     test_apply_scroll();
 
     if (g_failures == 0) {
