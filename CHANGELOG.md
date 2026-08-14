@@ -11,6 +11,8 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-08-14
+
 ### Added
 - **`EDGE_FUJINETLIB_ROOT` accepts an unpacked fujinet-lib release archive**, not just a
   source checkout. A release puts every header and `libfujinet.a` flat at its root; a
