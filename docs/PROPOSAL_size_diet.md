@@ -3,9 +3,25 @@
 **Answering:** ATank's "EDGE writeup — the size diet (pay-for-what-you-use)",
 2026-08-12 (Slice 18, Prompt 5)
 **Branch:** `size_diet`
-**Status:** proposal. Nothing in this document is implemented; every number
-below was obtained by ablation against an unmodified tree, which was restored
-after each measurement.
+**Status:** revision 2, after ATank's answers. Stages A and B1 are **landed**;
+B2's plumbing is landed with its payoff uncounted. Every number was obtained by
+ablation, and the stage-A/B1 figures have since been re-confirmed against the
+landed code.
+
+## Revision 2 — what ATank's answers changed
+
+1. **One binary is the standing decision.** Per-phase builds are the declared
+   last resort, under evaluation but not chosen. B2's 2,596 B therefore does
+   **not** count toward the threshold, and C moves onto the critical path.
+2. **Do not gate input or sound.** Keyboard is used for name entry; sound is
+   unused today but reserved for imminent weapon work. The ~340 B those two
+   would have returned is off the table by instruction, not by oversight.
+3. **ATank will re-measure A on its real image** once `size_diet` carries it.
+
+**The consequence, stated plainly: the re-ranked plan no longer clears the
+threshold.** A (616, landed) + C (~1,500, unproven) = **2,116 B — 407 B short of
+2,523**, with the two easiest remaining levers (input/sound) ruled out. The gap
+is real and needs a decision; see "The 407-byte gap" below.
 
 ## Verdict up front
 
@@ -128,9 +144,12 @@ unused lane becomes unreachable and the linker drops it — ATank's reported
 lanes by construction, so forcing either off fails the build. It must be
 measured on ATank.
 
-This is the only ask that crosses 2,523 by itself, and it depends on ATank
-actually shipping per-phase builds. If they hold at one `.xex`, B2 returns
-nothing and the threshold has to come from Ask 1 + Ask 3 together.
+**Revision 2 — decided.** ATank ships one binary; per-phase builds are the
+declared last resort. The trait is landed and defaults to current behaviour, so
+it costs nothing and is ready the day that decision changes, but **its 2,596 B
+is not counted toward the threshold**. This was the only ask that crossed 2,523
+by itself; without it the threshold has to come from Ask 1 + Ask 3, which as
+costed do not reach it.
 
 ### Ask 3 — init-only code made discardable · ~1,500 B · **highest engineering cost**
 
@@ -151,8 +170,15 @@ emitted once regardless. Returning the bytes requires one of:
   reclaims — the mechanism from the memory-epochs writeup already with this
   table.
 
-(b) composes with work already queued and is the one I'd pursue. Either way
-this is the ask most likely to slip, so it should not be on the threshold path.
+(b) composes with work already queued and is the one I'd pursue.
+
+**Revision 2 — now the critical path.** With B2 uncounted this is the largest
+remaining lever, and ATank has asked that the mechanism be proven on one screen
+so it stops being the unproven leg. That is the right next move, with one
+caveat worth stating in advance: this was ranked "most likely to slip" on
+engineering risk, and putting it on the critical path does not lower that risk —
+it raises the cost of it slipping. The ~1,500 B is an estimate from the inlined
+size of `main`, not a measurement of a working mechanism.
 
 ### Ask 4 — frame-service diet · configuration part folded into Ask 1
 
@@ -176,29 +202,79 @@ exists — worth taking whenever Ask 2's storage work touches the same area.
 
 ## Recommended sequence
 
-| stage | work | code returned | confidence |
+| stage | work | code returned | status |
 |---|---|---|---|
-| **A** | Ask 1 specialization package | **616 B** | measured, low risk |
-| **B1** | session lane trait plumbing | 0 (+637 B RAM) | measured |
-| **B2** | `net_lanes` selection + ATank phase builds | ≤2,596 B | ATank-reported, unmeasured here |
-| **C** | init-scratch mechanism (memory-epochs) | ~1,500 B | mechanism unproven |
-| **D** | assembly: `prepare_chain` tables, `apply_scroll`, `sprites.commit` | remainder | not estimated |
+| **A** | Ask 1 specialization package | **616 B** | **landed** — measured on the landed code |
+| **B1** | Session lane trait plumbing | 0 (+496–637 B RAM) | **landed** — measured |
+| **B2** | `net_lanes` trait | not counted | **plumbing landed**, defaults to current behaviour |
+| **C** | Init-scratch mechanism (memory epochs) | ~1,500 B | **critical path** — mechanism still unproven |
+| **D** | Assembly: chain tables, `apply_scroll`, `sprites.commit` | not estimated | after C |
 
-**Threshold path (2,523 B):** A + B2. A alone is 616 B — a quarter of the way.
-A + B2 clears it with margin *if* ATank ships per-phase builds; if it does not,
-the threshold path becomes A + C, which is slower and less certain.
+### The 407-byte gap
 
-**Target path (~6 KB):** A + B1 + B2 + C ≈ 4.7 KB of code plus 637 B RAM. The
-last ~1.3 KB has to come from D. I would not commit to 6 KB until B2 is measured
-on ATank and the epoch mechanism from ask 3 is proven on one screen.
+With B2 uncounted and input/sound ruled out, the arithmetic no longer reaches
+the unblock threshold:
 
-## What I need from ATank
+| | bytes |
+|---|---|
+| A — landed, measured | 616 |
+| C — estimated, unproven | ~1,500 |
+| **subtotal** | **2,116** |
+| threshold | 2,523 |
+| **short by** | **407** |
 
-1. **Re-measure A on the real image.** The 616 B is a proxy figure; the demo is
-   similar but not identical.
-2. **Is per-phase building actually on the table?** B2's entire value depends
-   on it. If ATank must ship a single `.xex`, say so now and I will re-rank
-   toward C.
-3. **Does ATank use `sound_channels` and the keyboard?** `sound.tick` (162 B)
-   and `input.update` (177 B) are gateable on the same pattern as
-   `uses_hw_collisions`, but only if genuinely unused — worth ~340 B together.
+Three ways to close it, in the order I'd try them:
+
+1. **ATank's own priced fallback** — the second `.xex` segment via linker-script
+   deviation, which ATank already costed at ~736 B. A + C + that = 2,852, clearing
+   the threshold by 329 B. This is the only combination on the table today that
+   closes with margin and without new unknowns.
+2. **Stage D on `prepare_chain`'s init-time residue** — the display-list walk and
+   table build (~692 B combined) are the most self-contained assembly targets in
+   the frame service, and unlike `apply_scroll`/`sprites.commit` they run once
+   rather than every frame, so hand-assembly there risks no gameplay timing.
+3. **Revisit B2** — if the last-resort decision goes to per-phase builds, the gap
+   closes several times over and C stops being load-bearing at all.
+
+**Target path (~6 KB):** not reachable on the current ranking. A + C ≈ 2.1 KB;
+even with the fallback and all of D's safe targets it is roughly half the ask.
+Reaching 6 KB requires either per-phase builds (B2) or accepting the
+input/sound gating that is currently ruled out. I would not plan around 6 KB
+until one of those changes.
+
+## What ATank sets to collect stage A
+
+```cpp
+struct GameConfig {
+    // ... existing fields ...
+    static constexpr u8   max_raster_hooks   = 1;      // was 12 by default
+    static constexpr u8   max_frame_hooks    = 0;      // was 4 by default
+    static constexpr bool uses_hw_collisions = false;  // software AABB
+
+    // B1 — size to ATank's actual session protocol; these are illustrative.
+    static constexpr u16  session_rx_bytes    = 64;    // was 256
+    static constexpr u16  session_tx_bytes    = 32;    // was 256
+    static constexpr u16  session_max_message = 48;    // was 128
+};
+```
+
+Setting nothing changes nothing: every field defaults to prior behaviour, which
+is why the unchanged demo still measures byte-identical. The 616 B only arrives
+when ATank declares the first three.
+
+One caution on `uses_hw_collisions`: set it `false` only if ATank never calls
+`Game::sprite_collisions()`. The query still compiles when gated off — it
+reports all zeroes — so a stray reader fails silently rather than loudly. The
+dual-net demo in this tree is exactly such a reader (it takes GTIA wall hits),
+which is why the demo does **not** set it.
+
+## Open questions
+
+1. **Which way to close the 407 B?** My recommendation is ATank's own `.xex`
+   segment fallback — it is already priced, already understood on your side, and
+   clears with 329 B of margin. C alone will not get there.
+2. **Should I start C now, or the safe half of D first?** C is the larger prize
+   but the mechanism is unproven; D's `prepare_chain` residue (~692 B) is
+   smaller, self-contained, and runs once rather than per frame, so it carries no
+   gameplay-timing risk. If the answer to (1) is the fallback, D may be
+   unnecessary entirely.

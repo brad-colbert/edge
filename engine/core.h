@@ -95,6 +95,19 @@ struct uses_missiles<C, void_t<decltype(C::uses_missiles)>> {
     static constexpr bool value = C::uses_missiles;
 };
 
+// uses_hw_collisions: whether the game reads the hardware collision registers via
+// Core::sprite_collisions(). Default true. A game that resolves overlaps itself
+// (software AABB, tile lookup) can set `uses_hw_collisions = false`; the frame
+// service then skips latching and clearing the collision banks every frame.
+// sprite_collisions() keeps returning its state — all zeroes — so the query
+// compiles either way.
+template <typename C, typename = void>
+struct uses_hw_collisions { static constexpr bool value = true; };
+template <typename C>
+struct uses_hw_collisions<C, void_t<decltype(C::uses_hw_collisions)>> {
+    static constexpr bool value = C::uses_hw_collisions;
+};
+
 // sprite_binding: GameConfig::sprite_binding if present, else Multiplexed (the
 // per-frame Y-sort multiplexer). Direct pins logical slot i to hardware player i
 // for the whole frame (requires max_sprites <= 4); see SpriteBinding in sprites.h.
@@ -158,6 +171,8 @@ public:
     // none (uses_missiles=false), the buffer is dropped to free RAM. Non-blitter
     // backends always need it (hardware sprites live here).
     static constexpr bool kUsesMissiles  = cdetail::uses_missiles<GameConfig>::value;
+    static constexpr bool kUsesHwCollisions =
+        cdetail::uses_hw_collisions<GameConfig>::value;
     static constexpr bool kNeedSpriteMem =
         !engine::caps_of_t<Platform>::has_blitter || kUsesMissiles;
     static constexpr u16 kSpriteMemBytes =
@@ -509,14 +524,19 @@ public:
             }
         } else {
             // Baseline path: write hardware-sprite memory, then latch + clear collisions.
+            // The latch is skipped entirely for a game that resolves overlaps itself
+            // (GameConfig::uses_hw_collisions = false) — it is 16 register reads plus
+            // the clear, every frame, feeding a query that game never makes.
             sprites.commit(sprite_mem_);
-            for (u8 i = 0; i < 4; ++i) {
-                collisions_.s_bg[i] = Platform::hal::coll_player_playfield(i);
-                collisions_.s_s[i]  = Platform::hal::coll_player_player(i);
-                collisions_.p_bg[i] = Platform::hal::coll_missile_playfield(i);
-                collisions_.p_s[i]  = Platform::hal::coll_missile_player(i);
+            if constexpr (kUsesHwCollisions) {
+                for (u8 i = 0; i < 4; ++i) {
+                    collisions_.s_bg[i] = Platform::hal::coll_player_playfield(i);
+                    collisions_.s_s[i]  = Platform::hal::coll_player_player(i);
+                    collisions_.p_bg[i] = Platform::hal::coll_missile_playfield(i);
+                    collisions_.p_s[i]  = Platform::hal::coll_missile_player(i);
+                }
+                Platform::hal::clear_collisions();
             }
-            Platform::hal::clear_collisions();
         }
 
         // 5. Recompute multiplex zones for the next commit (harmless on a blitter backend,

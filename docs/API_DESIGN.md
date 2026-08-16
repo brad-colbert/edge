@@ -1758,17 +1758,73 @@ keeping overhead to ~20-30 cycles.
 ### Interrupt Manager Configuration
 
 MaxRasterHooks and MaxFrameHooks are template parameters on the
-InterruptManager, not GameConfig fields:
+InterruptManager, and `Core` sources them from GameConfig:
 
 ```cpp
-// Engine default: 12 raster-hook slots, 4 frame hooks
-// Override if your game needs more or fewer:
+struct GameConfig {
+    static constexpr uint8_t max_raster_hooks = 1;   // engine default 12
+    static constexpr uint8_t max_frame_hooks  = 0;   // engine default 4
+};
+```
+
+To instantiate the manager directly (tests, bespoke wiring) the
+parameters are still positional:
+
+```cpp
 using MyInterrupts = engine::InterruptManager<Platform, 16, 2>;
 ```
 
 Memory cost: `MaxRasterHooks * 8 + MaxFrameHooks * 2 + 44` bytes RAM
 plus 2 bytes of zero page. For defaults (12 raster hooks, 4 frame hooks):
 approximately 152 bytes RAM.
+
+These capacities are *specialization triggers*, not just array bounds.
+Declaring `max_raster_hooks = 1` discards the chain's insertion sort
+outright — a one-slot chain is sorted by construction, an invariant the
+optimiser cannot recover from the runtime counter. Declaring
+`max_frame_hooks = 0` discards the frame-hook dispatch loop. Neither is
+a micro-optimisation: on a real image the pair measures ~517 bytes of
+code (docs/PROPOSAL_size_diet.md).
+
+### Pay-for-What-You-Use Capacity
+
+Every field below is optional and defaults to current behaviour, so an
+existing GameConfig is unaffected by their existence. Each one exists
+because unused capacity was costing bytes a game could not reclaim.
+
+```cpp
+struct GameConfig {
+    // ── Interrupt capacity ──
+    static constexpr uint8_t max_raster_hooks = 1;      // default 12
+    static constexpr uint8_t max_frame_hooks  = 0;      // default 4
+
+    // ── Collision model ──
+    // false: the game resolves overlaps itself (software AABB, tile
+    // lookup) and the frame service stops latching + clearing the
+    // hardware collision banks every frame. sprite_collisions() still
+    // compiles; it reports all zeroes.
+    static constexpr bool uses_hw_collisions = false;   // default true
+
+    // ── Session lane capacity, per direction ──
+    static constexpr uint16_t session_rx_bytes    = 64;  // default 256
+    static constexpr uint16_t session_tx_bytes    = 32;  // default 256
+    static constexpr uint16_t session_max_message = 48;  // default 128
+
+    // ── Transport lanes ──
+    // Which lanes this binary wants storage and code for. Narrows only:
+    // selecting a lane the platform's capability profile does not offer
+    // still yields no lane.
+    static constexpr engine::net::NetLanes net_lanes =
+        engine::net::NetLanes::Realtime;                // default Both
+};
+```
+
+`net_lanes` matters on transports where the lanes are mutually exclusive
+(one lane taking the serial vectors the other needs). A game that runs
+them in sequence rather than concurrently, and that can build a separate
+binary per phase, names the single lane each binary needs and lets the
+linker drop the other. A game shipping one binary that uses both lanes
+leaves the field unset.
 
 ### Frame Hooks
 

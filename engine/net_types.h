@@ -17,6 +17,28 @@ inline constexpr u8 default_realtime_packet_bytes = 16;
 inline constexpr u8 default_realtime_rx_packets   = 8;
 inline constexpr u8 default_realtime_tx_packets   = 2;
 
+// Default session lane capacities (bytes). Sized for the download-a-playfield
+// case; a game with a narrower protocol overrides them per direction through
+// GameConfig (session_rx_bytes / session_tx_bytes / session_max_message).
+inline constexpr u16 default_session_rx_bytes    = 256;
+inline constexpr u16 default_session_tx_bytes    = 256;
+inline constexpr u16 default_session_max_message = 128;
+
+// Which transport lanes a game intends to use.
+//
+// A platform's capability profile says which lanes the hardware *can* offer;
+// this says which ones the game actually wants storage and code for. On
+// transports where the lanes are mutually exclusive (one lane taking the serial
+// vectors the other needs), a game that runs them in sequence rather than
+// together can name the single lane a given binary needs and let the linker drop
+// the other. Selecting a lane the platform does not provide yields no lane —
+// capability still gates availability, this only ever narrows.
+enum class NetLanes : u8 {
+    Realtime,   // realtime lane only
+    Session,    // session lane only
+    Both,       // both concurrently (the default)
+};
+
 // Generic non-throwing status codes for network operations.
 enum class NetStatus : u8 {
     Ok = 0,

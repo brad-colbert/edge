@@ -188,8 +188,13 @@ public:
     // Invoke every registered frame hook in registration order. The engine's frame
     // service (engine/core.h) calls this as the final step of the per-frame
     // sequence (ARCHITECTURE.md "Data Flow Per Frame" — user frame hooks).
+    //
+    // A game that declares MaxFrameHooks == 0 pays nothing: the dispatch loop is
+    // discarded at compile time rather than executing zero iterations, so neither
+    // the loop nor the indirect call survives in the frame service.
     void run_frame_hooks() const {
-        for (u8 i = 0; i < hook_count_; ++i) hooks_[i]();
+        if constexpr (MaxFrameHooks == 0) return;
+        else for (u8 i = 0; i < hook_count_; ++i) hooks_[i]();
     }
 
     // ── Chain construction ──
@@ -205,7 +210,11 @@ public:
         // stale DLI bits and disable raster.
         if (total_count_ == 0 && last_prepared_count_ == 0) return;
         last_prepared_count_ = total_count_;
-        sort_slots();
+        // A chain that can hold at most one slot is sorted by construction. The
+        // bound is a compile-time invariant (total_count_ <= MaxRasterHooks) the
+        // optimiser cannot recover from the runtime counter, so state it here: on a
+        // single-hook game this discards the whole insertion sort.
+        if constexpr (MaxRasterHooks > 1) sort_slots();
 
         const u16 dispatcher = Platform::hal::raster_dispatch_addr();
         const u16 terminal   = Platform::hal::raster_terminal_addr();
@@ -358,7 +367,10 @@ private:
     u8 next_lo_[MaxRasterHooks + 1] = {};
     u8 next_hi_[MaxRasterHooks + 1] = {};
 
-    void (*hooks_[MaxFrameHooks])() = {};
+    // One spare entry when the game declares zero frame hooks: a zero-length array
+    // is a compiler extension, and add_frame_hook's capacity check already makes the
+    // slot unreachable, so the table costs one pointer and no code.
+    void (*hooks_[MaxFrameHooks ? MaxFrameHooks : 1])() = {};
     u8 hook_count_ = 0;
 
     u16 first_entry_ = 0;

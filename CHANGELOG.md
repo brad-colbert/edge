@@ -11,6 +11,35 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
 
 ## [Unreleased]
 
+### Added
+- **Pay-for-what-you-use capacity traits on `GameConfig`**, answering ATank's size-diet
+  request. All optional, all defaulting to prior behaviour — an existing `GameConfig`
+  compiles to a byte-identical image.
+  - `uses_hw_collisions` (default `true`): a game that resolves overlaps itself stops
+    paying for the frame service's per-frame collision latch (16 register reads plus the
+    clear). `sprite_collisions()` still compiles when gated off, reporting zeroes.
+  - `session_rx_bytes` / `session_tx_bytes` / `session_max_message` (defaults 256/256/128):
+    the session lane's buffers are sized per direction, so a narrow protocol stops
+    carrying storage for a wide one. Measured −496 B `.bss` at 64/32/48.
+  - `net_lanes` (`Realtime` | `Session` | `Both`, default `Both`): declares which transport
+    lanes a binary wants storage and code for, for transports where the lanes are mutually
+    exclusive. Narrows only — selecting a lane the platform does not offer still yields no
+    lane.
+
+### Changed
+- **`max_raster_hooks` / `max_frame_hooks` are now specialization triggers, not just array
+  bounds.** They already sized the hook tables; they never specialized the code walking
+  them, so a game declaring 1/0 kept paying for 12/4 dispatch. A chain that can hold at
+  most one slot is sorted by construction — an invariant the optimiser cannot recover from
+  the runtime counter — so the insertion sort is now discarded at compile time, as is the
+  frame-hook dispatch loop at zero capacity. Measured on `atari_tank_dual_net_demo` at
+  `-Os`: declaring 1/0 returns **517 B** of `.text+.rodata` and 113 B of `.data`, where
+  before it returned 69 B. With `uses_hw_collisions = false` the package measures **616 B**.
+  See [docs/PROPOSAL_size_diet.md](docs/PROPOSAL_size_diet.md) for the full ablation.
+- **`docs/API_DESIGN.md` corrected**: it claimed `MaxRasterHooks`/`MaxFrameHooks` were
+  "template parameters on the InterruptManager, not GameConfig fields". `Core` has sourced
+  them from `GameConfig` for some time, and they are now load-bearing for image size.
+
 ## [0.10.0] - 2026-08-14
 
 ### Added

@@ -372,22 +372,75 @@ struct realtime_facet<Platform, GameConfig, true> {
     RealtimeLane<Platform, realtime_packet_bytes_or_default<GameConfig>::value> realtime{};
 };
 
-template <typename Platform, bool Enabled>
+// Session lane capacities: GameConfig fields if the game defines them, else the
+// engine defaults. Sized per direction so a game with a small request/large
+// response protocol (or the reverse) pays only for the direction it uses —
+// the buffers are the bulk of the lane's storage.
+template <typename C, typename = void>
+struct session_rx_bytes_or_default {
+    static constexpr u16 value = default_session_rx_bytes;
+};
+template <typename C>
+struct session_rx_bytes_or_default<C, void_t<decltype(C::session_rx_bytes)>> {
+    static constexpr u16 value = C::session_rx_bytes;
+};
+
+template <typename C, typename = void>
+struct session_tx_bytes_or_default {
+    static constexpr u16 value = default_session_tx_bytes;
+};
+template <typename C>
+struct session_tx_bytes_or_default<C, void_t<decltype(C::session_tx_bytes)>> {
+    static constexpr u16 value = C::session_tx_bytes;
+};
+
+template <typename C, typename = void>
+struct session_max_message_or_default {
+    static constexpr u16 value = default_session_max_message;
+};
+template <typename C>
+struct session_max_message_or_default<C, void_t<decltype(C::session_max_message)>> {
+    static constexpr u16 value = C::session_max_message;
+};
+
+// net_lanes: GameConfig::net_lanes if present, else Both (current behaviour).
+template <typename C, typename = void>
+struct net_lanes_or_default { static constexpr NetLanes value = NetLanes::Both; };
+template <typename C>
+struct net_lanes_or_default<C, void_t<decltype(C::net_lanes)>> {
+    static constexpr NetLanes value = C::net_lanes;
+};
+
+template <typename C>
+inline constexpr bool wants_realtime_lane =
+    net_lanes_or_default<C>::value != NetLanes::Session;
+template <typename C>
+inline constexpr bool wants_session_lane =
+    net_lanes_or_default<C>::value != NetLanes::Realtime;
+
+template <typename Platform, typename GameConfig, bool Enabled>
 struct session_facet { };
 
-template <typename Platform>
-struct session_facet<Platform, true> {
-    SessionLane<Platform> session{};
+template <typename Platform, typename GameConfig>
+struct session_facet<Platform, GameConfig, true> {
+    SessionLane<Platform,
+                session_rx_bytes_or_default<GameConfig>::value,
+                session_tx_bytes_or_default<GameConfig>::value,
+                session_max_message_or_default<GameConfig>::value> session{};
 };
 
 } // namespace ndetail
 
 // Game-facing network facade: owns both lanes.
+// A lane exists only where the platform provides it AND the game asks for it, so
+// GameConfig::net_lanes can narrow the set but never widen it past the hardware.
 template <typename Platform, typename GameConfig,
-          bool HasRealtime = engine::caps_of_t<Platform>::has_network_realtime,
-          bool HasSession  = engine::caps_of_t<Platform>::has_network_session>
+          bool HasRealtime = engine::caps_of_t<Platform>::has_network_realtime &&
+                             ndetail::wants_realtime_lane<GameConfig>,
+          bool HasSession  = engine::caps_of_t<Platform>::has_network_session &&
+                             ndetail::wants_session_lane<GameConfig>>
 struct NetManager : ndetail::realtime_facet<Platform, GameConfig, HasRealtime>,
-                    ndetail::session_facet<Platform, HasSession> {
+                    ndetail::session_facet<Platform, GameConfig, HasSession> {
     void close_all() {
         if constexpr (HasRealtime) this->realtime.close();
         if constexpr (HasSession)  this->session.close();
