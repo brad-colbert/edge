@@ -55,9 +55,33 @@ struct ScreenSet {
     static constexpr u16 max_screen_ram =
         detail::vmax(Screens::display::total_ram...);
 
+    // Largest display program across the set, for a given platform. Screens that
+    // share one block of program storage must size it to the biggest of them.
+    template <typename Platform>
+    static constexpr u16 max_display_program_bytes =
+        detail::vmax(static_cast<u16>(sizeof(
+            typename Platform::template display_program<typename Screens::display>))...);
+
     template <u8 I>
     using screen_at = pack_element_t<I, Screens...>;
 };
+
+// Bytes of display-program storage a screen set needs on a given platform.
+//
+// Sizing helper for a game supplying its own arena. It deliberately takes the
+// ScreenSet rather than the GameConfig: the arena has to be *declared* before the
+// GameConfig that names it, so sizing it from the config would be circular.
+//
+//   using Screens = engine::ScreenSet<TitleScreen, PlayScreen>;
+//   alignas(2) static u8 g_dl_arena[engine::display_program_bytes<Platform, Screens>];
+//   struct GameConfig {
+//       using screens = Screens;
+//       static u8* display_program_arena() { return g_dl_arena; }
+//       static constexpr u16 display_program_arena_bytes = sizeof(g_dl_arena);
+//   };
+template <typename Platform, typename Screens>
+inline constexpr u16 display_program_bytes =
+    Screens::template max_display_program_bytes<Platform>;
 
 // ── View storage ──────────────────────────────────────────────────────
 //
@@ -118,6 +142,27 @@ struct screen_views_of<ScreenSet<Screens...>> {
     using type = ScreenViews<Screens...>;
 };
 
+// ── Display-program arena detection ───────────────────────────────────
+//
+// A game may hand the engine one block of its own memory to hold display
+// programs, instead of letting each screen keep a private engine-owned static.
+// The contract is two members on GameConfig:
+//
+//   static u8* display_program_arena();                  // base address
+//   static constexpr u16 display_program_arena_bytes;    // usable size
+//
+// Detection is the same idiom as the rest of the config traits: absent members
+// mean "engine-owned statics", exactly as before.
+template <typename...> using void_t = void;
+
+template <typename C, typename = void>
+struct has_dl_arena { static constexpr bool value = false; };
+template <typename C>
+struct has_dl_arena<C, void_t<decltype(C::display_program_arena()),
+                              decltype(C::display_program_arena_bytes)>> {
+    static constexpr bool value = true;
+};
+
 } // namespace detail
 
 // ── ScreenManager ─────────────────────────────────────────────────────
@@ -130,6 +175,24 @@ class ScreenManager {
 public:
     using screens = typename GameConfig::screens;
     using caps    = engine::caps_of_t<Platform>;
+
+    // ── Display-program placement ─────────────────────────────────────
+    //
+    // True when the game supplied its own arena (GameConfig::display_program_arena
+    // + _bytes) for display programs. See program_for().
+    static constexpr bool kUsesDlArena = detail::has_dl_arena<GameConfig>::value;
+
+    // Bytes an arena must provide: the largest display program across every screen
+    // in the set, since they share the block. A game sizes its storage from this,
+    // and program_for() static_asserts the arena is at least this large.
+    //
+    // NOTE the placement rules the game inherits by taking ownership: the block
+    // must be at least 2-byte aligned (the program holds u16 fields), and the
+    // display hardware may constrain where a program may sit (e.g. a program that
+    // must not cross a display-list page boundary). The engine cannot enforce
+    // placement it does not choose — that is the cost of the game owning the block.
+    static constexpr u16 display_program_arena_min_bytes =
+        screens::template max_display_program_bytes<Platform>;
 
     // Clamp to at least 1 byte: a pure-overlay-only ScreenSet contributes no
     // screen RAM (overlay pixels live in VRAM, ram_bytes == 0), which would
@@ -195,13 +258,21 @@ public:
         // hardware executes.
         auto& dl = program_for<S>();
         u8* const canvas = canvas_base<S>();
+
+        // Blank the display BEFORE building. With engine-owned per-screen statics
+        // the outgoing screen's program is a different object, so a build could
+        // safely overlap it; with a game-supplied arena every screen shares one
+        // block, and building the incoming program rewrites the very bytes the
+        // display hardware is still executing. Disabling first covers both, and
+        // costs the default path only a slightly earlier blank during a transition
+        // that already blanks.
+        Platform::hal::display_dma_disable();
+
         dl.build(addr(canvas), addr(&dl.bytes[0]));
 
         // Rebind this screen's region views to their buffer slices.
         views_.template for_screen<S>().set_base(canvas);
 
-        // Program the display. Blank DMA and install the program in all cases.
-        Platform::hal::display_dma_disable();
         Platform::hal::set_display_program(dl.front());
         if constexpr (!S::display::is_pure_overlay) {
             // Playfield content present (playfield-only or mixed overlay+playfield):
@@ -343,13 +414,30 @@ private:
         return static_cast<u16>(reinterpret_cast<uintptr_t>(p));
     }
 
-    // The one persistent display program for screen S (a function-local static so
-    // it has a stable resident address the display hardware can read). set_screen, bind_scroll_map,
-    // and patch_thunk all reach the same instance through here.
+    // The display program for screen S, at a stable resident address the display
+    // hardware can read. set_screen, bind_scroll_map, and patch_thunk all reach the
+    // same instance through here.
+    //
+    // Default: a function-local static per screen, engine-owned and live for the
+    // whole program. With a game-supplied arena every screen's program is placed at
+    // the arena base instead — the screens share it, which is sound because exactly
+    // one screen is live at a time and set_screen rebuilds unconditionally. That
+    // sharing is the point: the game owns the block and may reuse it for other data
+    // once the screens that need it are gone.
     template <typename S>
     static auto& program_for() {
-        static typename Platform::template display_program<typename S::display> dl;
-        return dl;
+        using DP = typename Platform::template display_program<typename S::display>;
+        if constexpr (kUsesDlArena) {
+            static_assert(sizeof(DP) <= GameConfig::display_program_arena_bytes,
+                          "display_program_arena is too small for this screen's "
+                          "display program — size it to "
+                          "ScreenManager::display_program_arena_min_bytes");
+            return *static_cast<DP*>(
+                static_cast<void*>(GameConfig::display_program_arena()));
+        } else {
+            static DP dl;
+            return dl;
+        }
     }
 
     // Type-erasing trampoline so apply_scroll can call the backend display

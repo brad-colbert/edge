@@ -15,6 +15,7 @@
 #include <stdio.h>
 
 #include <engine/interrupt.h>
+#include <engine/screen.h>
 #include <engine/net_api.h>
 #include <engine/net_types.h>
 
@@ -242,7 +243,61 @@ static void test_narrowing_cannot_widen() {
     CHECK(!HasRealtime<Net>::value);   // config says no
 }
 
+// ── Display-program arena (stage C) ───────────────────────────────────
+
+// Mock layouts/screens of differing display-program size, so the "size the block
+// to the biggest screen" rule is observable.
+struct LayoutSmall { static constexpr u16 total_ram = 100; static constexpr u16 kBytes = 64; };
+struct LayoutBig   { static constexpr u16 total_ram = 200; static constexpr u16 kBytes = 200; };
+struct ScreenSmall { using display = LayoutSmall; };
+struct ScreenBig   { using display = LayoutBig; };
+
+template <typename Layout> struct MockProgram { u8 bytes[Layout::kBytes]; };
+struct MockDisplayPlatform {
+    using hal = MockHal;
+    template <typename Layout> using display_program = MockProgram<Layout>;
+};
+
+static u8 g_test_arena[256];
+
+struct NoArenaConfig {
+    using screens = engine::ScreenSet<ScreenSmall, ScreenBig>;
+};
+struct ArenaConfig {
+    using screens = engine::ScreenSet<ScreenSmall, ScreenBig>;
+    static u8* display_program_arena() { return g_test_arena; }
+    static constexpr u16 display_program_arena_bytes = sizeof(g_test_arena);
+};
+
+// Absent members mean engine-owned statics — the default must not shift.
+static void test_arena_detection() {
+    CHECK(!engine::detail::has_dl_arena<NoArenaConfig>::value);
+    CHECK(engine::detail::has_dl_arena<ArenaConfig>::value);
+    CHECK(!engine::detail::has_dl_arena<DefaultConfig>::value);
+}
+
+// Screens sharing one block must size it to the largest of them, not the first.
+static void test_arena_sizing() {
+    using Screens = engine::ScreenSet<ScreenSmall, ScreenBig>;
+    constexpr u16 need = engine::display_program_bytes<MockDisplayPlatform, Screens>;
+    CHECK(need == sizeof(MockProgram<LayoutBig>));
+    CHECK(need >= sizeof(MockProgram<LayoutSmall>));
+
+    // Order must not matter — the max is over the whole set.
+    using Reversed = engine::ScreenSet<ScreenBig, ScreenSmall>;
+    constexpr u16 reversed_need =
+        engine::display_program_bytes<MockDisplayPlatform, Reversed>;
+    CHECK(reversed_need == need);
+
+    // Single-screen set: exactly that screen's program.
+    using One = engine::ScreenSet<ScreenSmall>;
+    constexpr u16 one_need = engine::display_program_bytes<MockDisplayPlatform, One>;
+    CHECK(one_need == sizeof(MockProgram<LayoutSmall>));
+}
+
 int main() {
+    test_arena_detection();
+    test_arena_sizing();
     test_defaults_unchanged();
     test_single_slot_chain();
     test_multi_slot_still_sorts();

@@ -111,8 +111,16 @@ struct PlayScreen {
 // direct-bind; 3 fills it exactly (single zone, no multiplexer).
 static constexpr u8 kAdvCount = 3;
 
+// Stage-C proof: the game owns the display-program storage, sized by the engine
+// helper so it is exact rather than guessed.
+using TankScreens = engine::ScreenSet<PlayScreen>;
+alignas(2) static engine::u8
+    g_dl_arena[engine::display_program_bytes<Platform, TankScreens>];
+
 struct GameConfig {
-    using screens = engine::ScreenSet<PlayScreen>;
+    using screens = TankScreens;
+    static engine::u8* display_program_arena() { return g_dl_arena; }
+    static constexpr engine::u16 display_program_arena_bytes = sizeof(g_dl_arena);
     static constexpr u8 max_sprites    = 1 + kAdvCount;   // local player + adversaries
     static constexpr u8 sound_channels = 1;
     // No multiplexer: pin slot i -> player i for the whole frame so the tanks never
