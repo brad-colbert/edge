@@ -1,6 +1,6 @@
 # EDGE Atari Platform Guide
 
-> **Applies to EDGE v0.9.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
+> **Applies to EDGE v0.10.0** — see [CHANGELOG](../CHANGELOG.md) for version history.
 
 This document describes the first concrete EDGE backend: the Atari 8-bit family.
 
@@ -276,6 +276,30 @@ the leftmost map column lives in the left border (the HSCROLL fetch margin) and 
 not visible. Reserve a margin column in your map. This is intentional hardware
 behaviour, captured in ADR-027 of [`docs/DECISIONS.md`](../docs/DECISIONS.md) and
 demonstrated by `atari_scroll_test`.
+
+### Vertical scroll and the region's scanline budget
+
+ANTIC's vertical fine scroll truncates the two *boundary* lines of the scrolled
+zone: the first line shows only its bottom `8 - VSCROL` scanlines, and the first
+line *after* the zone is a variable-height "exit" line of `VSCROL + 1`
+scanlines. So that this exit line never lands on the region that follows (which
+would make that region's first row shrink and grow as the camera fine-scrolls),
+the engine terminates every scroll region with its own **buffer line**: an extra
+mode line, fine-scroll-flagged for horizontal only, that displays the top of the
+map row scrolling in at the window's bottom edge.
+
+Budget consequence: a scroll region occupies a **constant `8 x height + 1`
+scanlines** (for 8-scanline modes) — one scanline more than `height` text rows —
+at every scroll phase. Example: a 22-row scrolled viewport plus a 2-row text HUD
+is `22*8 + 1 + 16 = 193` scanlines after the standard top blanks, comfortably
+inside ANTIC's 240-scanline display ceiling.
+
+At the bottom edge of the map (camera at its lowest stop) the buffer line
+repeats one scanline of the map's last row instead of fetching past the map —
+no out-of-map memory is ever displayed, and maps need no spare padding row.
+Rationale and measurements: ADR-036 of
+[`docs/DECISIONS.md`](../docs/DECISIONS.md); demonstrated by
+`atari_vscroll_split_test` (a viewport with a text HUD *below* it).
 
 ## Sound on Atari
 
