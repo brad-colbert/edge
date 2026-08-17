@@ -21,6 +21,7 @@
 // Depends on the subsystem headers and the Platform template parameter only
 // (Dependency Rule 2) — never a platform header by name.
 
+#include "attributes.h"
 #include "types.h"
 
 #include "config/capabilities.h"
@@ -93,6 +94,28 @@ struct uses_missiles { static constexpr bool value = true; };
 template <typename C>
 struct uses_missiles<C, void_t<decltype(C::uses_missiles)>> {
     static constexpr bool value = C::uses_missiles;
+};
+
+// defer_initial_screen: whether Core::init() brings up InitialScreen itself.
+// Default false — init() builds the initial screen, which is what most games want.
+//
+// A game that has load-time content living where the engine would write must set
+// this true. The case that motivated it: the display-program arena is game-owned
+// memory, but its FIRST write is engine-timed — init() calls set_screen, which
+// builds into the arena before any game code runs. A consumer whose splash image
+// is loaded into that same memory by the loader loses it. With this set, init()
+// does everything except build the initial screen, and the game calls
+// Game::set_screen<S>() itself once its load-time content is spent.
+//
+// The cost of deferring: the frame service is installed and running before any
+// screen exists, so the display shows whatever the consumer put there until that
+// first set_screen. That is precisely the point for a load-time splash, but it
+// means the consumer owns the display until then.
+template <typename C, typename = void>
+struct defer_initial_screen { static constexpr bool value = false; };
+template <typename C>
+struct defer_initial_screen<C, void_t<decltype(C::defer_initial_screen)>> {
+    static constexpr bool value = C::defer_initial_screen;
 };
 
 // uses_hw_collisions: whether the game reads the hardware collision registers via
@@ -173,6 +196,8 @@ public:
     static constexpr bool kUsesMissiles  = cdetail::uses_missiles<GameConfig>::value;
     static constexpr bool kUsesHwCollisions =
         cdetail::uses_hw_collisions<GameConfig>::value;
+    static constexpr bool kDeferInitialScreen =
+        cdetail::defer_initial_screen<GameConfig>::value;
     static constexpr bool kNeedSpriteMem =
         !engine::caps_of_t<Platform>::has_blitter || kUsesMissiles;
     static constexpr u16 kSpriteMemBytes =
@@ -224,7 +249,7 @@ public:
     // base to it, then install the frame service. The no-tileset form leaves the
     // charset base at its power-on default.
     template <typename Tileset>
-    static void init(const Tileset& cs) {
+    EDGE_INIT static void init(const Tileset& cs) {
         using caps = engine::caps_of_t<Platform>;
         if constexpr (caps::has_blitter) {
             // Overlay bring-up (HAL sets up its memory window, display list, and
@@ -241,7 +266,7 @@ public:
         // (the screen manager preserves the sprite-DMA bits — see the HAL note). The
         // empty player strips on a blitter backend simply draw nothing.
         setup_sprites();
-        set_screen<InitialScreen>([] {});
+        if constexpr (!kDeferInitialScreen) set_screen<InitialScreen>([] {});
         // The character-set buffer is only used by the baseline tile path; the
         // blitter backend's overlay-font upload to VRAM lands with the 4b text path.
         if constexpr (!caps::has_blitter) {
@@ -252,7 +277,7 @@ public:
         sprites.arm_multiplex_hook();  // bind the raw zone-boundary raster hook (baseline)
         Platform::hal::install_frame_isr(&frame_service);
     }
-    static void init() {
+    EDGE_INIT static void init() {
         using caps = engine::caps_of_t<Platform>;
         if constexpr (caps::has_blitter) {
             // Pure-overlay layouts no longer need a manual playfield-DMA disable:
@@ -262,7 +287,7 @@ public:
         // Arm hardware-sprite base + DMA on every backend (hardware sprites on
         // baseline; the hardware missiles on a blitter backend — see init(cs) above).
         setup_sprites();
-        set_screen<InitialScreen>([] {});
+        if constexpr (!kDeferInitialScreen) set_screen<InitialScreen>([] {});
         interrupts.arm_dispatch();
         sprites.arm_multiplex_hook();  // bind the raw zone-boundary raster hook (baseline)
         Platform::hal::install_frame_isr(&frame_service);

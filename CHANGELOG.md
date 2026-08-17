@@ -12,6 +12,37 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
 ## [Unreleased]
 
 ### Added
+- **Init-only named sections (`EDGE_INIT`)** — setup-phase engine code (`Core::init`,
+  `set_screen`, `bind_scroll_map`, the backend display-program builder) can be emitted
+  into a consumer-named section that the link step places over memory the game later
+  reclaims. Opt in with `-DEDGE_INIT_SECTION=\".edge_init\"` plus a rule in the link
+  script. Measured on `atari_tank_dual_net_demo` at `-Os`: `.text` 12,448 → 11,603 with
+  `.edge_init` at 1,080 B — a **845 B** resident saving.
+  Without the define `EDGE_INIT` expands to *nothing*, deliberately not to `EDGE_COLD`:
+  these are single-call-site functions where the required `noinline` costs more than
+  out-of-lining saves (measured +235 B), so a consumer who has not arranged placement
+  pays zero. The validity contract (setup code dies when the consumer reuses the memory
+  under it) and the `-Tlink.ld` augment-don't-replace gotcha are documented in
+  [docs/API_DESIGN.md](docs/API_DESIGN.md).
+- **`GameConfig::defer_initial_screen`** (default `false`) — `Core::init()` otherwise
+  builds `InitialScreen` itself, making the first write to the game-owned display-program
+  arena engine-timed and clobbering any load-time content there (a loader-placed splash).
+  Setting it true defers that first build to the game's own `set_screen`.
+- **Game-owned display-program arena** — `GameConfig::display_program_arena()` /
+  `display_program_arena_bytes` let a game supply one block for every screen's display
+  program instead of each screen holding a private engine-owned static, so the block can
+  join an epoch union and be reused. Size it with
+  `engine::display_program_bytes<Platform, Screens>` (largest screen in the set; takes the
+  ScreenSet rather than the GameConfig, which would be circular). Measured: `.bss`
+  unchanged, with 273 B moving from engine-private to game-owned.
+
+### Fixed
+- **`set_screen` built the display program before disabling display DMA.** Harmless with
+  per-screen statics (the outgoing program is a different object), but with a shared
+  game-owned arena the build rewrites the bytes the display hardware is still executing.
+  The blank now precedes the build.
+
+### Added
 - **Pay-for-what-you-use capacity traits on `GameConfig`**, answering ATank's size-diet
   request. All optional, all defaulting to prior behaviour — an existing `GameConfig`
   compiles to a byte-identical image.

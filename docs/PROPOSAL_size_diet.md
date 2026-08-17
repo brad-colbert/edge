@@ -3,7 +3,28 @@
 **Answering:** ATank's "EDGE writeup — the size diet (pay-for-what-you-use)",
 2026-08-12 (Slice 18, Prompt 5)
 **Branch:** `size_diet`
-**Status:** revision 2, after ATank's answers. Stages A and B1 are **landed**;
+**Status:** revision 3, after ATank's stage-A field measurement. Stages A, B1 and
+C are **landed**; C's code half measures **845 B**, not the ~1,500 B estimated.
+
+## Revision 3 — C-code measured, and it is smaller than estimated
+
+ATank's field numbers for stage A: **606 B** on the real image against my 616 B
+proxy. The incrementals agree closely (specialization 429 vs 448) even though the
+absolutes do not (bare knob 176 vs 69, `uses_hw_collisions` 30 vs 99 — ATank has
+less latching to delete). ATank's control leg measured within one byte of its
+pre-diet baseline, confirming the default-path discipline on a second consumer.
+
+C's code half is now **measured at 845 B**, replacing the ~1,500 B estimate that
+came from `main`'s inlined size. That estimate was too optimistic: not all of
+`main` is relocatable setup code.
+
+**The consequence: C-code does not close ATank's remaining wall.** Against
+1,370 B remaining, 845 B leaves **525 B** still to find. The `prepare_chain`
+assembly reserve (~692 B) does close it, and the two together would fund the
+remaining prompts — but C-code alone will not, contrary to the expectation that
+either lever closes the gap by itself.
+
+**Status:** revision 2 notes retained below. Stages A and B1 are **landed**;
 B2's plumbing is landed with its payoff uncounted. Every number was obtained by
 ablation, and the stage-A/B1 figures have since been re-confirmed against the
 landed code.

@@ -1786,6 +1786,60 @@ optimiser cannot recover from the runtime counter. Declaring
 a micro-optimisation: on a real image the pair measures ~517 bytes of
 code (docs/PROPOSAL_size_diet.md).
 
+### Init-Only Named Sections
+
+Setup-phase engine code — `Core::init`, `set_screen`, `bind_scroll_map`, and the
+backend display-program builder — can be emitted into a named section that the
+consumer's link step places wherever it likes, typically over memory the game
+reclaims as data once setup is done. On a platform whose image cannot discard
+code, relocating it is the only way to get those bytes out of the resident
+budget.
+
+Opt in with the section name and add a rule for it to the link script:
+
+```
+-DEDGE_INIT_SECTION=\".edge_init\"
+```
+
+Without the define, `EDGE_INIT` expands to **nothing** — not to `EDGE_COLD`.
+These are mostly single-call-site functions where the `noinline` a named section
+requires costs more than out-of-lining saves; defaulting them to `EDGE_COLD`
+measured **+235 bytes**. A consumer who has not arranged placement pays zero.
+
+Measured on `atari_tank_dual_net_demo` at `-Os`: `.text` 12,448 → 11,603, with
+`.edge_init` carrying **1,080 bytes**. The resident saving is **845 bytes**; the
+difference is the `noinline` cost, paid once, inside the relocatable section.
+
+**The contract, which the engine cannot enforce:** code in the init section is
+valid until the consumer reuses the memory under it. Reclaiming that memory and
+then re-entering setup — most obviously another `set_screen` — jumps into
+whatever now occupies those addresses. A one-way splash→play transition is the
+safe shape; a game that returns to a menu screen later is not.
+
+**Toolchain note.** The engine's compiler driver passes `-Tlink.ld` itself. A
+consumer link script that *replaces* the default script is therefore silently
+overridden; the working approach is to **augment** the existing script with a
+rule for the init section rather than substitute a new one.
+
+### Deferring the Initial Screen
+
+`Core::init()` brings up `InitialScreen` itself, which means the first write to
+the display-program arena is **engine-timed** — it happens inside `init()`,
+before any game code runs. A consumer whose loader places content in that same
+memory (a load-time splash image, say) loses it.
+
+```cpp
+struct GameConfig {
+    static constexpr bool defer_initial_screen = true;   // default false
+};
+```
+
+`init()` then does everything except build the initial screen, and the game
+calls `Game::set_screen<S>()` when its load-time content is spent. The frame
+service is installed and running before any screen exists, so the consumer owns
+the display until that first `set_screen` — which is the point for a load-time
+splash, but it is the consumer's display to manage until then.
+
 ### Pay-for-What-You-Use Capacity
 
 Every field below is optional and defaults to current behaviour, so an
@@ -1809,6 +1863,12 @@ struct GameConfig {
     static constexpr uint16_t session_rx_bytes    = 64;  // default 256
     static constexpr uint16_t session_tx_bytes    = 32;  // default 256
     static constexpr uint16_t session_max_message = 48;  // default 128
+
+    // ── Setup sequencing ──
+    // true: init() does not build the initial screen; the game calls
+    // set_screen<S>() itself once any load-time content living in engine-
+    // written memory (e.g. the display-program arena) is spent.
+    static constexpr bool defer_initial_screen = true;  // default false
 
     // ── Transport lanes ──
     // Which lanes this binary wants storage and code for. Narrows only:
