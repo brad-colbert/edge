@@ -251,7 +251,7 @@ public:
     // rebind views, program the display hardware, then run the user transition
     // callback.
     template <typename S, typename Cb>
-    EDGE_INIT void set_screen(Cb cb) {
+    EDGE_INIT_FN(set_screen) void set_screen(Cb cb) {
         // One display program per screen, in BSS (not on the 256-byte 6502
         // stack). The hardware reads it directly, so it is built at its own
         // resident address. program_for<S>() returns that one persistent instance
@@ -312,7 +312,7 @@ public:
     // initial screen). `map_width` is the map's row stride in the region's native
     // units; it must match the layout's scroll-region map width.
     template <typename S, typename ScrollT>
-    EDGE_INIT void bind_scroll_map(ScrollT& scroll, u8* map_base, u16 map_width) {
+    EDGE_INIT_FN(bind_scroll_map) void bind_scroll_map(ScrollT& scroll, u8* map_base, u16 map_width) {
         using Layout = typename S::display;
         static_assert(Layout::has_scroll, "screen S has no scroll region");
         constexpr u8 idx = Layout::scroll_region_index();

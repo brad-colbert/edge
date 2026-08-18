@@ -117,8 +117,14 @@ using TankScreens = engine::ScreenSet<PlayScreen>;
 alignas(2) static engine::u8
     g_dl_arena[engine::display_program_bytes<Platform, TankScreens>];
 
+// Ask-6 proof: the game owns the 2K sprite block, so its hardware-dead head
+// region becomes general storage.
+alignas(2048) static engine::u8 g_pm_block[2048];
+
 struct GameConfig {
     using screens = TankScreens;
+    static engine::u8* sprite_memory() { return g_pm_block; }
+    static constexpr engine::u16 sprite_memory_bytes = sizeof(g_pm_block);
     static engine::u8* display_program_arena() { return g_dl_arena; }
     static constexpr engine::u16 display_program_arena_bytes = sizeof(g_dl_arena);
     static constexpr u8 max_sprites    = 1 + kAdvCount;   // local player + adversaries

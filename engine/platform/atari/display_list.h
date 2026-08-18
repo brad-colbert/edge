@@ -175,7 +175,7 @@ struct DisplayProgram {
 
     // Build the display list for screen memory based at `screen_base`, with the
     // list itself residing at `dl_base` (used by the JVB to loop the list).
-    EDGE_INIT void build(u16 screen_base, u16 dl_base) {
+    EDGE_INIT_FN(build) void build(u16 screen_base, u16 dl_base) {
         u16 p   = 0;
         lms_count = 0;
         scroll_lms_count = 0;

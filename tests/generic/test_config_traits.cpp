@@ -16,6 +16,7 @@
 
 #include <engine/interrupt.h>
 #include <engine/screen.h>
+#include <engine/core.h>
 #include <engine/net_api.h>
 #include <engine/net_types.h>
 
@@ -295,7 +296,41 @@ static void test_arena_sizing() {
     CHECK(one_need == sizeof(MockProgram<LayoutSmall>));
 }
 
+// ── Sprite-memory arena (ask 6) ───────────────────────────────────────
+
+static u8 g_test_pm[2048];
+
+struct NoSpriteArenaConfig { };
+struct SpriteArenaConfig {
+    static u8* sprite_memory() { return g_test_pm; }
+    static constexpr u16 sprite_memory_bytes = sizeof(g_test_pm);
+};
+
+// A HAL that declares no dead head region: the query must stay total and answer 0
+// rather than failing to compile.
+struct HeadlessHal { };
+struct HeadlessPlatform { using hal = HeadlessHal; };
+// A HAL that does declare one.
+struct HeadedHal { static constexpr u16 sprite_area_head_bytes = 768; };
+struct HeadedPlatform { using hal = HeadedHal; };
+
+static void test_sprite_arena_detection() {
+    CHECK(!engine::cdetail::has_sprite_arena<NoSpriteArenaConfig>::value);
+    CHECK(engine::cdetail::has_sprite_arena<SpriteArenaConfig>::value);
+    // The display-program arena and the sprite arena are independent opt-ins.
+    CHECK(!engine::cdetail::has_sprite_arena<DefaultConfig>::value);
+}
+
+// The head region is a platform fact, so a game must query it rather than assume
+// a value — and a backend without the concept must still compile.
+static void test_sprite_head_bytes_is_total() {
+    CHECK(engine::cdetail::sprite_head_bytes<HeadlessPlatform>::value == 0);
+    CHECK(engine::cdetail::sprite_head_bytes<HeadedPlatform>::value == 768);
+}
+
 int main() {
+    test_sprite_arena_detection();
+    test_sprite_head_bytes_is_total();
     test_arena_detection();
     test_arena_sizing();
     test_defaults_unchanged();

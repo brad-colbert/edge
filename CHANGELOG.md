@@ -12,6 +12,22 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
 ## [Unreleased]
 
 ### Added
+- **Per-function init subsections.** Each `EDGE_INIT` function now lands in its own
+  `.edge_init.<name>` subsection, so a consumer whose free memory is fragmented can
+  distribute init code across several holes instead of needing one contiguous region.
+  A single `*(.edge_init .edge_init.*)` rule reproduces the previous behaviour exactly.
+  Splitting is free: the four subsections total 1,080 B on the dual-net demo, the same
+  as the single section (`build` 414, `init` 384, `bind_scroll_map` 170, `set_screen` 112).
+  The names are a placement contract and are documented in
+  [docs/API_DESIGN.md](docs/API_DESIGN.md).
+- **Game-owned sprite memory** (`GameConfig::sprite_memory()` / `sprite_memory_bytes`),
+  generalizing the display-program arena to the hardware sprite-graphics block. The
+  engine still writes the block and points the display hardware at it; the game owns
+  the address, the alignment, and — via the new `Core::sprite_memory_head_bytes` query —
+  the head region the display hardware never fetches, which was unreachable while the
+  block was engine-private. `Core::sprite_memory_bytes_required` and
+  `sprite_memory_alignment` complete the placement contract; the head-bytes query is
+  platform-driven and answers 0 where no such region exists.
 - **Init-only named sections (`EDGE_INIT`)** — setup-phase engine code (`Core::init`,
   `set_screen`, `bind_scroll_map`, the backend display-program builder) can be emitted
   into a consumer-named section that the link step places over memory the game later

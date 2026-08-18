@@ -409,6 +409,12 @@ struct Hal {
     // arms the GTIA P/M latches. Full DMACTL P/M-DMA bit setup arrives with the
     // live display path.
     static constexpr uint16_t sprite_area_bytes = 2048;
+    // Bytes at the START of the sprite area that the display hardware never
+    // fetches in the single-line layout: P/M DMA begins at the missile strip
+    // (pm_missile_base), so everything below it is dead space the engine would
+    // otherwise reserve for nothing. Exposed so a game that supplies its own
+    // sprite-memory block can use this head region as general storage.
+    static constexpr uint16_t sprite_area_head_bytes = atari::pm_missile_base(true);
     static void set_sprite_base(uint8_t page) { *reg::PMBASE = page; }
     // Latch the GTIA P/M DMA (GRACTL, a chip register the OS does not shadow) and
     // OR the P/M DMA bits into SDMCTL alongside whatever DL/playfield bits the

@@ -37,9 +37,34 @@
 // costs more than the out-of-lining saves — marking them EDGE_COLD by default
 // measured +235 bytes on the dual-net demo. A consumer who has not asked for the
 // section pays exactly zero.
+//
+// PLACEMENT GRANULARITY. Each marked function goes in its OWN subsection,
+// EDGE_INIT_SECTION "." <name>, rather than all of them sharing one. A consumer
+// whose free memory is one contiguous region gathers them with a single wildcard
+// rule and gets exactly the old behaviour:
+//
+//     *(.edge_init .edge_init.*)
+//
+// A consumer whose free memory is fragmented — several holes, none big enough for
+// the whole section — instead writes a rule per hole and distributes the pieces:
+//
+//     hole_a : { *(.edge_init.set_screen) *(.edge_init.build) }
+//     hole_b : { *(.edge_init.init) }
+//     hole_c : { *(.edge_init.bind_scroll_map) }
+//
+// The engine cannot know the shape of the consumer's holes, so it emits the
+// pieces separately and lets the link step decide. Subsection names are the
+// engine's placement contract: renaming one is a breaking change for any script
+// that names it, so they are listed in docs/API_DESIGN.md.
 #ifdef EDGE_INIT_SECTION
+#  define EDGE_INIT_STR2(x) #x
+#  define EDGE_INIT_STR(x)  EDGE_INIT_STR2(x)
+#  define EDGE_INIT_FN(name)                                                   \
+       [[gnu::noinline, clang::minsize,                                        \
+         gnu::section(EDGE_INIT_SECTION "." EDGE_INIT_STR(name))]]
 #  define EDGE_INIT [[gnu::noinline, clang::minsize, gnu::section(EDGE_INIT_SECTION)]]
 #else
+#  define EDGE_INIT_FN(name)
 #  define EDGE_INIT
 #endif
 

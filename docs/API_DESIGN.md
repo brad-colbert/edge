@@ -1821,6 +1821,75 @@ consumer link script that *replaces* the default script is therefore silently
 overridden; the working approach is to **augment** the existing script with a
 rule for the init section rather than substitute a new one.
 
+### Distributing Init Code Across Fragmented Memory
+
+Each `EDGE_INIT` function is emitted into its **own** subsection, so a consumer
+whose free memory is several holes — none big enough for the whole init section —
+can place the pieces separately. The subsection names are a placement contract;
+renaming one breaks any script that names it:
+
+| subsection | contents |
+|---|---|
+| `.edge_init.init` | `Core::init` (both overloads) |
+| `.edge_init.set_screen` | `ScreenManager::set_screen` |
+| `.edge_init.bind_scroll_map` | `ScreenManager::bind_scroll_map` |
+| `.edge_init.build` | backend display-program builder |
+
+One contiguous region — identical to the old single-section behaviour:
+
+```
+*(.edge_init .edge_init.*)
+```
+
+Fragmented holes — a rule per hole:
+
+```
+hole_a : { *(.edge_init.build) *(.edge_init.set_screen) }
+hole_b : { *(.edge_init.init) }
+hole_c : { *(.edge_init.bind_scroll_map) }
+```
+
+Splitting costs nothing: measured on `atari_tank_dual_net_demo`, the four
+subsections total 1,080 B, exactly the single-section figure (`build` 414,
+`init` 384, `bind_scroll_map` 170, `set_screen` 112).
+
+### Game-Owned Sprite Memory
+
+The hardware sprite-graphics block can be supplied by the game rather than
+reserved in engine-private storage, on the same pattern as the display-program
+arena:
+
+```cpp
+alignas(Game::sprite_memory_alignment)
+static u8 g_pm_block[Game::sprite_memory_bytes_required];
+
+struct GameConfig {
+    static u8* sprite_memory() { return g_pm_block; }
+    static constexpr u16 sprite_memory_bytes = sizeof(g_pm_block);
+};
+```
+
+The engine still writes the block and still points the display hardware at it —
+what changes is who owns it, and ownership is the point. Query the layout rather
+than assuming it:
+
+| query | meaning |
+|---|---|
+| `Game::sprite_memory_bytes_required` | how large the block must be |
+| `Game::sprite_memory_alignment` | alignment the block must satisfy |
+| `Game::sprite_memory_head_bytes` | bytes at the **start** the display hardware never fetches |
+
+`sprite_memory_head_bytes` is the reclaimable region: on a platform whose sprite
+DMA begins partway into the block, everything below that point is dead space the
+engine would otherwise reserve for nothing, and a game that places the block
+itself can use it as general storage. It is **0** on a platform with no such
+region, so query it rather than hardcoding a value.
+
+Two caveats the game inherits with ownership: the block is zeroed at program
+start like any other storage, and the engine writes the live part of it every
+frame — only the head region is the game's to keep. The engine `static_assert`s
+the size but cannot check an address it does not choose.
+
 ### Deferring the Initial Screen
 
 `Core::init()` brings up `InitialScreen` itself, which means the first write to
