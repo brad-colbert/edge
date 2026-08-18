@@ -52,13 +52,6 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
   ScreenSet rather than the GameConfig, which would be circular). Measured: `.bss`
   unchanged, with 273 B moving from engine-private to game-owned.
 
-### Fixed
-- **`set_screen` built the display program before disabling display DMA.** Harmless with
-  per-screen statics (the outgoing program is a different object), but with a shared
-  game-owned arena the build rewrites the bytes the display hardware is still executing.
-  The blank now precedes the build.
-
-### Added
 - **Pay-for-what-you-use capacity traits on `GameConfig`**, answering ATank's size-diet
   request. All optional, all defaulting to prior behaviour — an existing `GameConfig`
   compiles to a byte-identical image.
@@ -86,6 +79,12 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
 - **`docs/API_DESIGN.md` corrected**: it claimed `MaxRasterHooks`/`MaxFrameHooks` were
   "template parameters on the InterruptManager, not GameConfig fields". `Core` has sourced
   them from `GameConfig` for some time, and they are now load-bearing for image size.
+
+### Fixed
+- **`set_screen` built the display program before disabling display DMA.** Harmless with
+  per-screen statics (the outgoing program is a different object), but with a shared
+  game-owned arena the build rewrites the bytes the display hardware is still executing.
+  The blank now precedes the build.
 
 ## [0.10.0] - 2026-08-14
 
