@@ -11,6 +11,26 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
 
 ## [Unreleased]
 
+### Fixed
+- **The realtime lane discarded its transport's verdict too.** `RealtimeLane::poll()` ran
+  flush and drain and then returned `Ok` unconditionally, exactly as the session lane did,
+  so a terminal transport status never reached the caller. Nothing in that lane reports
+  `Closed` today, which is why it went unnoticed — the defect is that the verdict is
+  *discarded*, not that closure specifically is missed. Both halves now report how they
+  ended and `poll()` propagates; a `Closed` also deactivates the lane. The session lane's
+  TX half got the same treatment (only its RX half was fixed previously).
+- **`realtime_close()` left the DEVICE in stream mode** — the NETSTREAM-disable gap. The
+  device leaves stream mode when it sees the SIO COMMAND line asserted, but it only looks
+  while the MOTOR line is still asserted: its service block is gated on motor, and the
+  command check sits inside that gate. The client-side teardown deasserts motor, so once
+  it had run the device could never observe the exit and stayed streaming with its baud
+  still at the stream rate — which is what made the transport unusable for the session
+  lane afterwards. `realtime_close()` now asserts COMMAND while motor is still up, holds
+  it for the device's service loop to notice, then proceeds with teardown. Ordering is the
+  fix and is pinned by test.
+  **Not yet verified on real hardware**: the hold duration (`kDeviceReleaseFrames`) is
+  chosen with margin from the device's loop structure, not measured on a device.
+
 ### Added
 - **Per-function init subsections.** Each `EDGE_INIT` function now lands in its own
   `.edge_init.<name>` subsection, so a consumer whose free memory is fragmented can

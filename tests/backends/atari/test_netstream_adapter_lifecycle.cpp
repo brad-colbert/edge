@@ -28,6 +28,7 @@ struct FakeOps {
     static uint8_t  init_rc;      // scripted init result (0 = success, 1 = failure)
     static uint8_t  status_val;   // scripted get_status byte
     static int init_calls, begin_calls, end_calls, status_calls, settle_calls;
+    static int release_calls, release_seq, end_seq, seq_counter;
 
     // 9R.2 data-path model.
     static uint8_t  tx_free;          // scripted tx_space() return (0..128)
@@ -46,7 +47,10 @@ struct FakeOps {
         ++init_calls; return init_rc;
     }
     static void    begin()  { ++begin_calls; }
-    static void    end()    { ++end_calls; }
+    static void    end()    { ++end_calls; end_seq = seq_counter++; }
+    // Device-side stream exit. Ordering witness: it MUST run before end(), because
+    // end() drops the motor line the device needs asserted to observe the exit.
+    static void    release_device() { ++release_calls; release_seq = seq_counter++; }
     static void    settle() { ++settle_calls; }   // no-op delay stand-in (must not block tests)
     static uint8_t status() { ++status_calls; return status_val; }
 
@@ -71,6 +75,8 @@ uint8_t  FakeOps::init_rc = 0;
 uint8_t  FakeOps::status_val = 0;
 int FakeOps::init_calls = 0, FakeOps::begin_calls = 0, FakeOps::end_calls = 0,
     FakeOps::status_calls = 0, FakeOps::settle_calls = 0;
+int FakeOps::release_calls = 0, FakeOps::release_seq = -1, FakeOps::end_seq = -1,
+    FakeOps::seq_counter = 0;
 uint8_t  FakeOps::tx_free = 0;
 uint8_t  FakeOps::tx_captured[64] = {};
 int      FakeOps::tx_count = 0;
@@ -155,20 +161,32 @@ int main() {
     // ----- bind unsupported -----
     CHECK(A::realtime_bind_udp_seq(5000) == n::NetStatus::Unsupported);
 
-    // ----- close while active: end called, inactive, last_error Closed -----
+    // ----- close while active: device released BEFORE end, inactive, Closed -----
     {
         const int before = FakeOps::end_calls;
+        const int rbefore = FakeOps::release_calls;
+        FakeOps::seq_counter = 0;
+        FakeOps::release_seq = FakeOps::end_seq = -1;
         A::realtime_close();
         CHECK(FakeOps::end_calls == before + 1);
+        CHECK(FakeOps::release_calls == rbefore + 1);   // device taken out of stream mode
+        // ORDER IS THE FIX: end() drops the motor line, and the device only sees the
+        // exit while motor is still asserted. Releasing after end() would be a no-op
+        // and leave the device streaming — the gap this closes.
+        CHECK(FakeOps::release_seq >= 0);
+        CHECK(FakeOps::end_seq >= 0);
+        CHECK(FakeOps::release_seq < FakeOps::end_seq);
         CHECK(!A::realtime_active());
         CHECK(A::realtime_last_error().status == n::NetStatus::Closed);
     }
 
-    // ----- close while inactive: end NOT called, last_error still Closed -----
+    // ----- close while inactive: neither release nor end called -----
     {
         const int before = FakeOps::end_calls;
+        const int rbefore = FakeOps::release_calls;
         A::realtime_close();
         CHECK(FakeOps::end_calls == before);            // end not called again
+        CHECK(FakeOps::release_calls == rbefore);       // nor the device release
         CHECK(!A::realtime_active());
         CHECK(A::realtime_last_error().status == n::NetStatus::Closed);
     }

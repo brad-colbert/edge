@@ -56,8 +56,20 @@ public:
         if (st != NetStatus::Ok && st != NetStatus::WouldBlock)
             return set_status(st);
 
-        flush_tx_();
-        drain_rx_();
+        // Both halves report how they ENDED; poll must not overwrite that with Ok.
+        // Nothing in this lane's transport returns Closed today, so propagation is
+        // observably neutral — but a terminal status discarded here is a real error
+        // the consumer never sees, which is how the session lane hid a dead peer.
+        const NetStatus tx = flush_tx_();
+        if (tx != NetStatus::Ok) {
+            if (tx == NetStatus::Closed) active_ = false;
+            return set_status(tx);
+        }
+        const NetStatus rx = drain_rx_();
+        if (rx != NetStatus::Ok) {
+            if (rx == NetStatus::Closed) active_ = false;
+            return set_status(rx);
+        }
         return set_status(NetStatus::Ok);
     }
 
@@ -107,7 +119,10 @@ private:
     NetError last_error_{};
     bool active_ = false;
 
-    void flush_tx_() {
+    // Ok when the queue drained or the transport asked us to retry later
+    // (WouldBlock is normal backpressure, not an error); otherwise the terminal
+    // status, for poll() to propagate.
+    NetStatus flush_tx_() {
         u8 packet[PacketBytes] = {};
         while (queues_.tx_count() > 0) {
             if (!queues_.tx_peek(packet)) break;
@@ -118,11 +133,14 @@ private:
             }
             if (st == NetStatus::WouldBlock) break;
             set_status(st);
-            break;
+            return st;
         }
+        return NetStatus::Ok;
     }
 
-    void drain_rx_() {
+    // Ok when the drain caught up (WouldBlock from the transport); otherwise the
+    // terminal status, for poll() to propagate.
+    NetStatus drain_rx_() {
         u8 packet[PacketBytes] = {};
         for (;;) {
             const NetStatus st = Platform::hal::realtime_recv_nb(packet, PacketBytes);
@@ -130,9 +148,9 @@ private:
                 queues_.rx_push(packet);
                 continue;
             }
-            if (st == NetStatus::WouldBlock) break;
+            if (st == NetStatus::WouldBlock) return NetStatus::Ok;
             set_status(st);
-            break;
+            return st;
         }
     }
 };
@@ -178,7 +196,11 @@ public:
         if (st == NetStatus::Closed) connected_ = false;
         if (st != NetStatus::Ok && st != NetStatus::WouldBlock)
             return set_status(st);
-        flush_tx_();
+        const NetStatus tx = flush_tx_();
+        if (tx != NetStatus::Ok) {
+            if (tx == NetStatus::Closed) connected_ = false;
+            return set_status(tx);
+        }
         // The drain is where the transport reports EOF, so its verdict has to
         // survive this call. Returning Ok unconditionally discarded it: a lane
         // whose peer had gone away still answered Ok and stayed connected(), so a
@@ -298,29 +320,31 @@ private:
     SessionMessageView current_view_{};
     NetError last_error_{};
 
-    EDGE_COLD void flush_tx_() {
+    // Ok when the frame went out or the transport asked us to retry later;
+    // otherwise the terminal status, for poll() to propagate.
+    EDGE_COLD NetStatus flush_tx_() {
         // Session framing: [kind(1)] [size_lo(1)] [size_hi(1)] [payload(size)]
         // Read the frame header first to determine total frame size, then send
         // the entire frame as one unit to session_send_nb().
-        if (tx_.count() < 3) return;  // Not enough for header yet
+        if (tx_.count() < 3) return NetStatus::Ok;  // not enough for a header yet
 
         u8 kind = 0, size_lo = 0, size_hi = 0;
         if (!tx_.peek_at(0, kind) || !tx_.peek_at(1, size_lo) || !tx_.peek_at(2, size_hi)) {
-            return;  // Shouldn't happen if count >= 3, but be defensive
+            return NetStatus::Ok;  // shouldn't happen if count >= 3, but be defensive
         }
 
         u16 payload_size = static_cast<u16>(size_lo | (size_hi << 8));
         u16 frame_size = static_cast<u16>(3 + payload_size);
 
         // Only try to send if we have the complete frame buffered
-        if (tx_.count() < frame_size) return;
+        if (tx_.count() < frame_size) return NetStatus::Ok;   // frame not buffered yet
 
         // Read the entire frame into a temporary buffer
         u8 frame_buf[MaxMessageBytes + 3] = {};
         for (u16 i = 0; i < frame_size; ++i) {
             if (!tx_.peek_at(i, frame_buf[i])) {
                 set_status(NetStatus::InvalidArgument);
-                return;
+                return NetStatus::InvalidArgument;
             }
         }
 
@@ -333,10 +357,12 @@ private:
                 tx_.pop(unused);
             }
         } else if (st == NetStatus::WouldBlock) {
-            // Don't break; let the next flush retry the entire frame
+            // Normal backpressure: let the next flush retry the entire frame.
         } else {
             set_status(st);
+            return st;
         }
+        return NetStatus::Ok;
     }
 
     // Returns how the drain ENDED, not merely that it ended: Ok when it caught up

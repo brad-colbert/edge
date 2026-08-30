@@ -45,6 +45,8 @@ struct MockHal {
     static u16 sess_rx_tail;
     static u16 sess_rx_count;
     static bool sess_recv_forces_closed;
+    static n::NetStatus rt_recv_force;
+    static n::NetStatus rt_send_force;
 
     static void reset() {
         realtime_open = false;
@@ -58,6 +60,8 @@ struct MockHal {
         rt_rx_head = rt_rx_tail = rt_rx_count = 0;
         sess_rx_head = sess_rx_tail = sess_rx_count = 0;
         sess_recv_forces_closed = false;
+        rt_recv_force = n::NetStatus::Ok;
+        rt_send_force = n::NetStatus::Ok;
     }
 
     static void inject_realtime_packet(u8 tag) {
@@ -107,12 +111,14 @@ struct MockHal {
     static n::NetStatus realtime_send_nb(const void* bytes, u16 size) {
         if (bytes == nullptr && size > 0) return rt_err.status = n::NetStatus::InvalidArgument;
         if (!realtime_open) return rt_err.status = n::NetStatus::Closed;
+        if (rt_send_force != n::NetStatus::Ok) return rt_err.status = rt_send_force;
         ++realtime_send_calls;
         return rt_err.status = n::NetStatus::Ok;
     }
     static n::NetStatus realtime_recv_nb(void* bytes, u16 size) {
         if (bytes == nullptr && size > 0) return rt_err.status = n::NetStatus::InvalidArgument;
         if (!realtime_open) return rt_err.status = n::NetStatus::Closed;
+        if (rt_recv_force != n::NetStatus::Ok) return rt_err.status = rt_recv_force;
         if (rt_rx_count == 0) return rt_err.status = n::NetStatus::WouldBlock;
         u8* out = static_cast<u8*>(bytes);
         for (u16 i = 0; i < size; ++i) out[i] = rt_rx[rt_rx_tail][i];
@@ -175,6 +181,8 @@ u16 MockHal::sess_rx_head = 0;
 u16 MockHal::sess_rx_tail = 0;
 u16 MockHal::sess_rx_count = 0;
 bool MockHal::sess_recv_forces_closed = false;
+n::NetStatus MockHal::rt_recv_force = n::NetStatus::Ok;
+n::NetStatus MockHal::rt_send_force = n::NetStatus::Ok;
 
 struct MockCaps : engine::Capabilities {
     static constexpr bool has_network_realtime = true;
@@ -373,7 +381,60 @@ static void test_idle_drain_keeps_lane_connected() {
     CHECK(s.connected());
 }
 
+// The realtime lane had the identical clobber: poll() ran flush/drain and then
+// returned Ok unconditionally, so a terminal transport status never reached the
+// caller. Nothing in this lane's transport reports Closed today, which is exactly
+// why it went unnoticed — the defect is that the verdict is DISCARDED, not that
+// closure specifically is missed.
+static void test_realtime_poll_propagates_drain_error() {
+    MockHal::reset();
+    n::RealtimeLane<MockPlatform> rt;
+    CHECK(rt.open_udp_seq("host", 1000) == n::NetStatus::Ok);
+
+    MockHal::rt_recv_force = n::NetStatus::TransportError;
+    CHECK(rt.poll() == n::NetStatus::TransportError);
+}
+
+static void test_realtime_poll_propagates_send_error() {
+    MockHal::reset();
+    n::RealtimeLane<MockPlatform> rt;
+    CHECK(rt.open_udp_seq("host", 1000) == n::NetStatus::Ok);
+
+    // send() flushes immediately, so force the failure FIRST: the packet is then
+    // queued but unsent, and poll()'s retry is what must surface the error.
+    // (Note send() itself still answers Ok here — the same discard, reported.)
+    MockHal::rt_send_force = n::NetStatus::TransportError;
+    Packet16 pkt{};
+    rt.send(pkt);
+    CHECK(rt.poll() == n::NetStatus::TransportError);
+}
+
+// A closed transport drops the lane, mirroring the session lane's semantics.
+static void test_realtime_poll_closure_deactivates() {
+    MockHal::reset();
+    n::RealtimeLane<MockPlatform> rt;
+    CHECK(rt.open_udp_seq("host", 1000) == n::NetStatus::Ok);
+    CHECK(rt.active());
+
+    MockHal::rt_recv_force = n::NetStatus::Closed;
+    CHECK(rt.poll() == n::NetStatus::Closed);
+    CHECK(!rt.active());
+}
+
+// The quiet path is unchanged: an idle lane still polls Ok and stays active.
+static void test_realtime_idle_poll_unchanged() {
+    MockHal::reset();
+    n::RealtimeLane<MockPlatform> rt;
+    CHECK(rt.open_udp_seq("host", 1000) == n::NetStatus::Ok);
+    CHECK(rt.poll() == n::NetStatus::Ok);
+    CHECK(rt.active());
+}
+
 int main() {
+    test_realtime_poll_propagates_drain_error();
+    test_realtime_poll_propagates_send_error();
+    test_realtime_poll_closure_deactivates();
+    test_realtime_idle_poll_unchanged();
     test_drain_closure_disconnects_lane();
     test_idle_drain_keeps_lane_connected();
     test_game_net_shape();

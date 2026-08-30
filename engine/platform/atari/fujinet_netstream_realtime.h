@@ -91,6 +91,10 @@ static constexpr u16 to_netstream_port_arg(u16 remote_port) {
 // immediately after begin corrupts the first ~5-9 bytes (the firmware reports the new peer
 // baudrate ~475 ms after the baud switch); ~30 frames (~0.5 s NTSC) makes the stream byte-perfect.
 inline constexpr u8 kNetstreamSettleFrames = 30;
+// OS frames to hold COMMAND asserted in release_device() so the device's service
+// loop observes it. Its check runs once per bus iteration; two frames is a wide
+// margin. UNVERIFIED ON HARDWARE — see the close-path note in the changelog.
+inline constexpr u8 kDeviceReleaseFrames = 2;
 
 // ── Real backend ops: the 9Q.2 ABI. Linked only where handler.S/abi.s are linked ────────
 // (the Atari .xex / Altirra probe). ODR-used only when NetstreamRealtimeAdapterT<RealNetstreamOps>
@@ -102,6 +106,31 @@ struct RealNetstreamOps {
     }
     static void begin() { _edge_ns_begin_stream(); }
     static void end()   { _edge_ns_end_stream(); }
+
+    // Take the DEVICE out of stream mode, before the client-side teardown drops
+    // the motor line.
+    //
+    // The device leaves stream mode when it sees the SIO COMMAND line asserted —
+    // but it only looks while the MOTOR line is still asserted (its service block
+    // is gated on motor, and the command check sits inside that gate). end()
+    // deasserts motor, so once it has run the device can never observe the exit
+    // and stays streaming with its baud still at the stream rate, which is what
+    // makes the transport unusable for the other lane afterwards.
+    //
+    // So: assert COMMAND while motor is still up, hold it long enough for the
+    // device's service loop to notice, then release. Values match the OS's
+    // command-asserted / command-idle PBCTL values.
+    static void release_device() {
+        volatile u8* const pbctl  = (volatile u8*)0xD303;
+        volatile u8* const rtclok = (volatile u8*)0x0014;
+        *pbctl = 0x34;                       // COMMAND asserted
+        u8 last = *rtclok, frames = 0;
+        while (frames < kDeviceReleaseFrames) {
+            const u8 now = *rtclok;
+            if (now != last) { last = now; ++frames; }
+        }
+        *pbctl = 0x3C;                       // COMMAND released
+    }
     static u8   status(){ return _edge_ns_get_status(); }
     // Wait kNetstreamSettleFrames OS frames (RTCLOK low byte $14) for the external TX clock to
     // renegotiate after begin, before the first transmit. Atari-specific; only compiled into
@@ -178,6 +207,9 @@ struct NetstreamRealtimeAdapterT {
     static void realtime_close() {
         State& s = state();
         if (s.active) {
+            // Order matters: the device can only see the exit while the motor line
+            // is still asserted, and end() is what drops it.
+            if constexpr (requires { Ops::release_device(); }) Ops::release_device();
             Ops::end();
             s.active = false;
         }
