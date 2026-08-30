@@ -44,6 +44,7 @@ struct MockHal {
     static u16 sess_rx_head;
     static u16 sess_rx_tail;
     static u16 sess_rx_count;
+    static bool sess_recv_forces_closed;
 
     static void reset() {
         realtime_open = false;
@@ -56,6 +57,7 @@ struct MockHal {
         sess_err = {n::NetStatus::WouldBlock, 0};
         rt_rx_head = rt_rx_tail = rt_rx_count = 0;
         sess_rx_head = sess_rx_tail = sess_rx_count = 0;
+        sess_recv_forces_closed = false;
     }
 
     static void inject_realtime_packet(u8 tag) {
@@ -143,6 +145,9 @@ struct MockHal {
     static n::NetStatus session_recv_nb(void* bytes, u16 capacity) {
         if (bytes == nullptr && capacity > 0) return sess_err.status = n::NetStatus::InvalidArgument;
         if (!session_open) return sess_err.status = n::NetStatus::Closed;
+        // Models the transport reporting EOF while the seam's own connected flag
+        // is still up — the case that hid the disconnect.
+        if (sess_recv_forces_closed) return sess_err.status = n::NetStatus::Closed;
         if (sess_rx_count == 0) return sess_err.status = n::NetStatus::WouldBlock;
         // Lane asks one byte at a time.
         static_cast<u8*>(bytes)[0] = sess_rx[sess_rx_tail];
@@ -169,6 +174,7 @@ u8 MockHal::sess_rx[512] = {};
 u16 MockHal::sess_rx_head = 0;
 u16 MockHal::sess_rx_tail = 0;
 u16 MockHal::sess_rx_count = 0;
+bool MockHal::sess_recv_forces_closed = false;
 
 struct MockCaps : engine::Capabilities {
     static constexpr bool has_network_realtime = true;
@@ -338,7 +344,38 @@ static void test_session_recv_parses_inbound_frame_from_mock_hal() {
     CHECK(view.data[0] == 7 && view.data[1] == 8 && view.data[2] == 9);
 }
 
+// A transport that reports EOF during the drain must disconnect the lane, even
+// though the seam's own poll still answers Ok. Before the fix, poll() discarded
+// the drain's verdict and returned Ok unconditionally: connected() stayed true
+// and a consumer whose only disconnect test is connected() spun forever.
+static void test_drain_closure_disconnects_lane() {
+    MockHal::reset();
+    n::SessionLane<MockPlatform> s;
+    CHECK(s.connect_tcp("host", 1234) == n::NetStatus::Ok);
+    CHECK(s.connected());
+
+    MockHal::sess_recv_forces_closed = true;      // peer went away mid-session
+    const n::NetStatus st = s.poll();
+
+    CHECK(st == n::NetStatus::Closed);            // verdict reaches the caller
+    CHECK(!s.connected());                        // and the lane actually drops
+}
+
+// The ordinary idle case must still look idle: a drain that merely catches up
+// reports Ok and leaves the lane connected.
+static void test_idle_drain_keeps_lane_connected() {
+    MockHal::reset();
+    n::SessionLane<MockPlatform> s;
+    CHECK(s.connect_tcp("host", 1234) == n::NetStatus::Ok);
+
+    const n::NetStatus st = s.poll();             // nothing queued, peer alive
+    CHECK(st == n::NetStatus::Ok);
+    CHECK(s.connected());
+}
+
 int main() {
+    test_drain_closure_disconnects_lane();
+    test_idle_drain_keeps_lane_connected();
     test_game_net_shape();
     test_open_and_connect_delegate_to_hal();
     test_realtime_send_recv_and_queueing();

@@ -102,7 +102,36 @@ static void test_pack_fujinet_detail_fallback_when_globals_zero() {
     CHECK(d == 0x00E7);
 }
 
+// ── Read classification (closed vs idle) ──────────────────────────────
+//
+// The defect this pins: a zero-byte read was mapped to WouldBlock regardless of
+// the connection flag, so EOF looked exactly like an idle socket. Observed live
+// as fn_error=136 (EOF), conn=0, adapter still reporting connected, consumer
+// spinning. These run without fujinet-lib because classify_read is pure.
+static void test_classify_read() {
+    using fs::ReadClass;
+
+    // Data is data whatever the flag says.
+    CHECK(fs::classify_read(1,  1) == ReadClass::Data);
+    CHECK(fs::classify_read(64, 1) == ReadClass::Data);
+    CHECK(fs::classify_read(64, 0) == ReadClass::Data);
+
+    // Zero bytes: the connection flag is what disambiguates.
+    CHECK(fs::classify_read(0, 1) == ReadClass::Idle);     // live, nothing yet
+    CHECK(fs::classify_read(0, 0) == ReadClass::Closed);   // EOF — the defect
+
+    // Negative is a transport error regardless of the flag, and must NOT be
+    // reclassified as closure just because conn happens to be down.
+    CHECK(fs::classify_read(-1,   1) == ReadClass::Error);
+    CHECK(fs::classify_read(-136, 0) == ReadClass::Error);
+
+    // Any non-zero conn value counts as connected, not just 1.
+    CHECK(fs::classify_read(0, 2)    == ReadClass::Idle);
+    CHECK(fs::classify_read(0, 0xFF) == ReadClass::Idle);
+}
+
 int main() {
+    test_classify_read();
     test_valid_devicespec();
     test_too_long_host_fails();
     test_null_host_fails();

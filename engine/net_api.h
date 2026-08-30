@@ -179,7 +179,16 @@ public:
         if (st != NetStatus::Ok && st != NetStatus::WouldBlock)
             return set_status(st);
         flush_tx_();
-        drain_rx_();
+        // The drain is where the transport reports EOF, so its verdict has to
+        // survive this call. Returning Ok unconditionally discarded it: a lane
+        // whose peer had gone away still answered Ok and stayed connected(), so a
+        // consumer whose only disconnect test is connected() never saw one.
+        const NetStatus rx = drain_rx_();
+        if (rx == NetStatus::Closed) {
+            connected_ = false;
+            return set_status(NetStatus::Closed);
+        }
+        if (rx != NetStatus::Ok) return set_status(rx);
         return set_status(NetStatus::Ok);
     }
 
@@ -330,20 +339,23 @@ private:
         }
     }
 
-    void drain_rx_() {
+    // Returns how the drain ENDED, not merely that it ended: Ok when it caught up
+    // (WouldBlock from the transport), otherwise the terminal status. poll() acts
+    // on that verdict — Closed in particular must reach the consumer.
+    NetStatus drain_rx_() {
         u8 byte = 0;
         for (;;) {
             const NetStatus st = Platform::hal::session_recv_nb(&byte, 1);
             if (st == NetStatus::Ok) {
                 if (!rx_.push(byte)) {
                     set_status(NetStatus::Overflow);
-                    break;
+                    return NetStatus::Overflow;
                 }
                 continue;
             }
-            if (st == NetStatus::WouldBlock) break;
+            if (st == NetStatus::WouldBlock) return NetStatus::Ok;
             set_status(st);
-            break;
+            return st;
         }
     }
 };
