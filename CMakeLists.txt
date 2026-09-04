@@ -1124,6 +1124,34 @@ if(MOS_ATARI8_CXX)
             "Skipping fujinet_session_validate custom target: requires EDGE_ATARI_FUJINET_SESSION_FUJINETLIB=ON and valid EDGE_FUJINETLIB include/library paths")
     endif()
 
+    # Raster-vector tear probe (.xex). Emulator/hardware validation for
+    # Hal::set_raster_vector's atomicity against the raster interrupt: it places the
+    # two legal vectors and BOTH of their possible hybrids on stubs of its own, so a
+    # torn write lands on a counter instead of on whatever code the hybrid address
+    # happens to hit. Read as an A/B -- zero tears with the guard, thousands without
+    # it. Neither half can run under mos-sim (no ANTIC, no NMI), so this is
+    # emulator-only and intentionally NOT a CTest. Drive it with
+    # scripts/fujisan_probe.sh (reads page 6 over Fujisan's control port) or
+    # scripts/altirra_probe.sh (reads it back through the probe's H: self-dump).
+    set(RASTER_TEAR_PROBE_XEX ${CMAKE_BINARY_DIR}/raster_vector_tear_altirra_probe.xex)
+    set(RASTER_TEAR_PROBE_MAP ${CMAKE_BINARY_DIR}/raster_vector_tear_altirra_probe.map)
+    add_custom_command(
+        OUTPUT ${RASTER_TEAR_PROBE_XEX}
+        COMMAND ${MOS_ATARI8_CXX}
+                -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra
+                -I${CMAKE_SOURCE_DIR}
+                -I${CMAKE_SOURCE_DIR}/engine/platform/atari
+                ${CMAKE_SOURCE_DIR}/tests/backends/atari/raster_vector_tear_altirra_probe.cpp
+                -o ${RASTER_TEAR_PROBE_XEX}
+                -Wl,--Map=${RASTER_TEAR_PROBE_MAP}
+        DEPENDS ${CMAKE_SOURCE_DIR}/tests/backends/atari/raster_vector_tear_altirra_probe.cpp
+                ${CMAKE_SOURCE_DIR}/tests/backends/atari/atari_hostdump.h
+                ${EDGE_ENGINE_HEADERS}
+        BYPRODUCTS ${RASTER_TEAR_PROBE_MAP}
+        COMMENT "Building Atari raster-vector tear probe (raster_vector_tear_altirra_probe.xex)"
+        VERBATIM)
+    add_custom_target(raster_vector_tear_probe DEPENDS ${RASTER_TEAR_PROBE_XEX})
+
     # Stage 9E Atari-only ABI/link smoke for the EDGE-owned Netstream scaffold.
     # Build-only smoke: verifies symbol/link compatibility between:
     # - EDGE ABI shim assembly (fujinet_netstream_realtime_abi.s)

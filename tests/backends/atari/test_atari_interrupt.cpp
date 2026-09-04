@@ -8,6 +8,10 @@
 // sets the DLI bit on the ANTIC display-list mode line that displays each requested
 // scanline, clearing every stale DLI bit. It also pulls in the platform header for
 // compile coverage of the dispatcher asm (never executed under the simulator).
+//
+// It further covers Hal::set_raster_vector's atomicity against the DLI: the two
+// VDSLST bytes must be written with NMI masked, or a DLI landing between them takes
+// a hybrid address neither writer produced. See the block above main().
 
 #include <stdint.h>
 #include <stdio.h>
@@ -222,6 +226,93 @@ static void test_blank_height_accounting() {
     CHECK(dl[1] == A::dl_blank(8));
 }
 
+// ── set_raster_vector is atomic against the DLI ────────────────────────
+//
+// VDSLST is two bytes and its reader is an unmaskable NMI, so an unguarded pair of
+// stores can be split by a DLI: the interrupt then takes a HYBRID vector, the low
+// byte of one address with the high byte of the other. Field capture (ATank,
+// 2026-08-30): VDSLST = $4574 = lo(edge_dli_terminal $4474) : hi(the game's raw hook
+// $452B), a value neither writer can produce, and the machine wedged inside whatever
+// function that address landed in. The write must therefore run with NMI masked.
+//
+// Two independent checks, because neither alone is sufficient under a simulator with
+// no NMI: a behavioural witness that the mask happened at all, and a structural one
+// that it BRACKETS the pair rather than merely surrounding one end of it.
+
+// Runtime-valued argument so the vector cannot be constant-folded away, and a
+// non-inlined wrapper so the guarded body has an address the structural check can
+// read. (Reading engine code as data is the same trick install_dispatch uses.)
+static volatile u16 g_probe_vector = 0x1234;
+
+[[gnu::noinline]] static void probe_set_raster_vector() {
+    A::Hal::set_raster_vector(g_probe_vector);
+}
+
+// Behavioural witness. NmiGuard restores NMIEN from the SHADOW, not from whatever
+// the register held on entry — so poking the register behind the shadow's back
+// leaves a fingerprint only a guarded write can erase. NMIEN is write-only on real
+// hardware (a read returns NMIST); under mos-sim $D40E is plain RAM, which is what
+// makes this observable at all.
+static void test_raster_vector_masks_nmi() {
+    A::nmien_set(A::nmien::VBI | A::nmien::DLI);   // shadow and register agree
+    *A::reg::NMIEN = 0x55;                         // register only — shadow untouched
+    A::os::VDSLST[0] = 0x00;
+    A::os::VDSLST[1] = 0x00;
+
+    g_probe_vector = 0x1234;
+    probe_set_raster_vector();
+
+    // Masked and then restored from the shadow, so the poke is gone. An unguarded
+    // write never touches NMIEN and 0x55 would survive.
+    CHECK(*A::reg::NMIEN == (A::nmien::VBI | A::nmien::DLI));
+    CHECK(A::g_nmi_guard_depth == 0);              // entry/exit balanced
+    // ...and the vector itself still landed, both bytes.
+    CHECK(A::os::VDSLST[0] == 0x34);
+    CHECK(A::os::VDSLST[1] == 0x12);
+
+    A::nmien_set(A::nmien::VBI);                   // leave the shadow as found
+}
+
+// Structural oracle. STA/STX/STY absolute are 8D/8E/8C followed by a little-endian
+// address; the guarded body contains no other absolute stores, so matching the
+// opcode trio locates every store without decoding the whole instruction stream.
+static bool abs_store_to(const u8* p, u16 addr) {
+    const u8 op = p[0];
+    if (op != 0x8D && op != 0x8E && op != 0x8C) return false;
+    return static_cast<u16>(p[1] | (static_cast<u16>(p[2]) << 8)) == addr;
+}
+
+// Both VDSLST stores must lie strictly between a store to NMIEN and a LATER store to
+// NMIEN. That is the property — which of the two VDSLST bytes goes first does not
+// matter, only that no NMI can be taken while one of them has landed and the other
+// has not. Deleting the guard, or moving it so it no longer spans the pair, breaks
+// exactly this and nothing else does.
+static void test_raster_vector_write_is_bracketed() {
+    // The guarded body is ~24 bytes; the window is generous enough to absorb codegen
+    // changes and tight enough that a missing guard runs out of function rather than
+    // finding a store in unrelated code. The scan stops at the first complete match.
+    constexpr u16 kWindow = 64;
+    const u8* code = reinterpret_cast<const u8*>(
+        reinterpret_cast<uintptr_t>(&probe_set_raster_vector));
+
+    int mask = -1, vlo = -1, vhi = -1, restore = -1;
+    for (u16 i = 0; i < kWindow && restore < 0; ++i) {
+        if (abs_store_to(code + i, A::reg::NMIEN_ADDR)) {
+            if (mask < 0)                       mask    = i;
+            else if (vlo >= 0 && vhi >= 0)      restore = i;
+        } else if (vlo < 0 && abs_store_to(code + i, A::os::VDSLST_ADDR)) {
+            vlo = i;
+        } else if (vhi < 0 && abs_store_to(code + i, A::os::VDSLST_ADDR + 1)) {
+            vhi = i;
+        }
+    }
+
+    CHECK(mask >= 0);                    // the mask store exists
+    CHECK(vlo >= 0 && vhi >= 0);         // both vector bytes are written
+    CHECK(vlo > mask && vhi > mask);     // ...after the mask went down
+    CHECK(restore > vlo && restore > vhi);  // ...and the unmask comes after both
+}
+
 int main() {
     test_dli_program();
     test_two_hooks_one_line();
@@ -234,6 +325,8 @@ int main() {
     test_terminator_stops_walk();
     test_line_boundary_is_half_open();
     test_blank_height_accounting();
+    test_raster_vector_masks_nmi();
+    test_raster_vector_write_is_bracketed();
 
     if (g_failures == 0) {
         printf("ALL TESTS PASSED\n");

@@ -754,6 +754,44 @@ Example Mode A output for the adapter probe (page 6 `$0600..$064F`):
 
 The script paths assume Altirra 4.50 at the location in `$ALTIRRA_DIR`; adjust for your install.
 
+## Fujisan headless probe runner
+
+The same probe binaries run under **Fujisan** with no change, via
+`scripts/fujisan_probe.sh`. Use it as the primary runner, or to cross-check a result the
+Altirra runner produced:
+
+```bash
+scripts/fujisan_probe.sh build/raster_vector_tear_altirra_probe.xex
+```
+
+It prints the captured bytes and keeps the last capture at `/tmp/fujisan_probe_last.bin`.
+
+### How it works (each piece is load-bearing)
+
+- **Fujisan ignores atari800 command-line options.** Its binary embeds atari800 and so
+  contains strings like `-Hpath`, `-run` and `-hreadwrite`, but the Qt front end never
+  parses them: it boots from its saved profile (`~/.config/8bitrelics/Fujisan.conf`) and
+  the `.xex` on the command line is simply not loaded. Do not build a runner on them.
+- **The automation channel is a JSON control port on `localhost:6510`.** One JSON object
+  per line, `{"command":"<category>.<action>","params":{…}}`; the server announces its
+  capabilities on connect (`media`, `system`, `input`, `debug`, `config`, `status`,
+  `screen`). The three that matter here:
+  `media.load_xex` (`params.path`), `system.cold_boot`, and `debug.read_memory`
+  (`params.address` decimal, `params.length`). `screen.capture` writes a PCX — into the
+  **emulator process's working directory**, ignoring any path parameter, so launch Fujisan
+  from a scratch directory if you want the captures to land there.
+- **No H: self-dump is needed.** `debug.read_memory` reads emulated RAM directly, so the
+  script reads the probe's page-6 snapshot out of `$0600` and never touches the H: device.
+  The probe still carries its `edge_host_dump()` call, which is what the Altirra runner
+  needs — one probe binary, both emulators.
+- **Cold boot before each load.** Without it, page 6 still holds the previous run's result
+  and a stale snapshot reads as a fresh pass; the previous probe's spin loop is also still
+  running. The script polls a caller-nominated "done" offset that the probe writes last, so
+  it never reads a half-finished snapshot.
+- **Never `pkill -f fujisan`** from a shell whose own command line contains "fujisan" — the
+  same trap the Altirra runner documents. Kill by PID. If Fujisan is already running the
+  script reuses its port and leaves that instance alone.
+
 ## Netstream Mode B emulator validation
 
 The FujiNet **Netstream** realtime data path is validated end-to-end against a real FujiNet

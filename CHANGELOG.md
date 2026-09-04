@@ -12,6 +12,44 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
 ## [Unreleased]
 
 ### Fixed
+- **The raster vector was written non-atomically against its own interrupt.**
+  `Hal::set_raster_vector` (`engine/platform/atari/hal.h`) wrote VDSLST as two bare
+  stores. VDSLST is read by ANTIC to enter a DLI, which is an unmaskable NMI, so a DLI
+  landing between the stores took a *hybrid* address — the low byte of one vector with
+  the high byte of the other, a value neither writer can produce — and jumped to it.
+  Reported by ATank with the evidence read out of a wedged machine: VDSLST = `$4574` =
+  `lo(edge_dli_terminal $4474) : hi(the game's raw hook $452B)`. The NMI entered an
+  ordinary compiled function mid-body with no prologue; its `rts` popped two of the
+  NMI's three pushed bytes as a return address, and the skipped setup ran a row loop
+  against the interrupted thread's zero page (verified byte-for-byte, 24 of 24 rows).
+  Fatal roughly once a minute of display time, and it looked like anything but an
+  engine fault. The write is now bracketed in `NmiGuard`, the primitive added for
+  exactly this hazard; both VDSLST and NMIEN are volatile, so neither store can be
+  moved out of the guarded region. Masking the VBI as well costs nothing — every
+  caller already runs with this frame's VBI taken.
+  **This was never ATank-specific**: the sprite multiplexer's zone-boundary hook is raw
+  by construction (ADR-019), so the exposure was the engine's own default path above
+  four sprites.
+  A/B-proven on **both emulators** with a probe that places the two legal vectors and
+  *both* of their hybrids on stubs of its own, so a tear lands on a counter instead of
+  on whatever code the hybrid address hits
+  (`tests/backends/atari/raster_vector_tear_altirra_probe.cpp`, target
+  `raster_vector_tear_probe`). Over 180 frames of hammering: unguarded **711 tears**
+  (Altirra) / **756** (Fujisan); guarded **0 and 0**, with 11.6k and 12.6k legitimate
+  DLI dispatches in the same runs to show the interrupts were firing.
+- **The raw chain tail could install a zero vector** — the address-zero variant of the
+  same defect. `prepare_chain` filled `next_lo_`/`next_hi_` only for live slots, so on a
+  one-hook chain `next_[1]` was `0`. The C++ dispatcher re-syncs an out-of-range
+  `current_` at its head, but a raw handler is entered directly and indexes
+  `next_*[current_]` unchecked — and `current_` is one past the end whenever a raster
+  interrupt fires before the frame service has re-armed the chain. The tail then wrote
+  the vector as zero and the next interrupt jumped to address zero. Every unused entry
+  is now the terminal, including the spare one past capacity, so any reachable index is
+  harmless: the chain ends early for that frame instead of running off.
+  `next_raster_addr()`, the portable mirror of that tail, carries the same clamp.
+  Bounds-checking the tail itself was rejected — see the ADR-019 addendum. Costs nothing
+  at interrupt time, and nothing measurable in size (`atari_hw_test` is 9,341 B either
+  way).
 - **The realtime lane discarded its transport's verdict too.** `RealtimeLane::poll()` ran
   flush and drain and then returned `Ok` unconditionally, exactly as the session lane did,
   so a terminal transport status never reached the caller. Nothing in that lane reports
@@ -32,6 +70,14 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
   chosen with margin from the device's loop structure, not measured on a device.
 
 ### Added
+- **`scripts/fujisan_probe.sh`** — a Fujisan runner for the Atari `.xex` probes, the
+  counterpart of `scripts/altirra_probe.sh`. Fujisan embeds atari800 but its Qt front end
+  ignores atari800's command-line options entirely (it boots from its saved profile), so
+  the runner drives its JSON control port on `localhost:6510` instead: `system.cold_boot`,
+  `media.load_xex`, then `debug.read_memory` to read the probe's page-6 snapshot straight
+  out of emulated RAM — no H: self-dump needed on this path. Probes are unchanged and run
+  under both emulators. Documented in
+  [documents/PLATFORM_ATARI.md](documents/PLATFORM_ATARI.md).
 - **Per-function init subsections.** Each `EDGE_INIT` function now lands in its own
   `.edge_init.<name>` subsection, so a consumer whose free memory is fragmented can
   distribute init code across several holes instead of needing one contiguous region.

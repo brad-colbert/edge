@@ -279,7 +279,26 @@ struct Hal {
 
     // Point the OS DLI vector (os::VDSLST, $0200/1) at the chain head the VBI
     // computed; the dispatcher rewrites it mid-frame as it walks the chain.
+    //
+    // The pair MUST be written with the DLI masked. VDSLST is two bytes and its
+    // reader is an unmaskable NMI, so a DLI landing between the stores takes a
+    // HYBRID vector -- the low byte of one address with the high byte of the other,
+    // a value neither writer can produce -- and jumps to it. Captured on a wedged
+    // machine (ATank, 2026-08-30): VDSLST = $4574 = lo(terminal $4474) : hi(raw hook
+    // $452B). The NMI entered an ordinary compiled function mid-body with no
+    // prologue; its `rts` popped two of the NMI's three pushed bytes as a return
+    // address, and the skipped setup ran a row loop against the interrupted thread's
+    // zero page. The window is the few cycles between the two `sta abs` and this runs
+    // twice a frame, so it lands on the order of once a minute of display time.
+    //
+    // NmiGuard (nmi.h) is the engine's primitive for exactly this hazard: the NMI
+    // simply cannot fire inside its scope. Both os::VDSLST and reg::NMIEN are
+    // volatile, so neither store may be hoisted or sunk out of the guarded region.
+    // Masking the VBI too costs nothing here -- every caller (prepare_chain and
+    // rearm_delivery, from the frame service; shutdown, from the main thread on the
+    // way out) already runs with this frame's VBI taken.
     static void set_raster_vector(uint16_t a) {
+        NmiGuard g;
         os::VDSLST[0] = static_cast<uint8_t>(a & 0xFF);
         os::VDSLST[1] = static_cast<uint8_t>(a >> 8);
     }
