@@ -25,11 +25,21 @@
 // -- that second half is what proves the probe is actually exercising the window and
 // not just failing to look. Altirra-only; intentionally NOT a CTest.
 //
+// The run is timed by ANTIC's VCOUNT, not by the OS jiffy clock. A guard that masks
+// every NMI, called from the main thread as this loop calls it, can swallow the VBI:
+// ANTIC samples NMIEN once at the VBI line and raises nothing if the bit is clear. A
+// lost VBI is a lost RTCLOK tick, so a jiffy-timed run stretches over more real frames
+// and collects more DLIs than 180 frames hold -- which read as ~2.5x "extra" dispatches
+// before this clock replaced it (ATank, 2026-09-13). VCOUNT is read, never interrupted,
+// so it counts every frame. The jiffies seen over the same run are reported beside it:
+// real frames minus jiffies is the number of VBIs the guard swallowed.
+//
 // Dump layout at $0600 (little-endian 16-bit counters):
 //   $0600 dispatches through A      $0608 address of A
 //   $0602 dispatches through B      $060A address of B
 //   $0604 TEARS caught at H1        $060C loop iterations
-//   $0606 TEARS caught at H2        $060E frames run / $060F NMIEN shadow
+//   $0606 TEARS caught at H2        $060E jiffies seen (RTCLOK) / $060F NMIEN shadow
+//   $0610 real frames (VCOUNT)      $0612 unused / $0613 done marker $A5 (written last)
 
 #include <stdint.h>
 
@@ -46,6 +56,8 @@ static constexpr uint16_t kCountA = 0x0600;
 static constexpr uint16_t kCountB = 0x0602;
 static constexpr uint16_t kTearH1 = 0x0604;
 static constexpr uint16_t kTearH2 = 0x0606;
+static constexpr uint16_t kDumpBytes = 20;
+static constexpr uint16_t kRunFrames = 180;   // ~3 s of real frames at 60 Hz
 
 // 256-alignment is achieved by over-allocating a page and rounding up, rather than
 // by trusting an alignas() the linker may or may not honour on this target.
@@ -91,7 +103,7 @@ static void store16(uint16_t at, uint16_t v) {
 }
 
 int main() {
-    for (uint16_t i = 0; i < 16; ++i) kResult[i] = 0;
+    for (uint16_t i = 0; i < kDumpBytes; ++i) kResult[i] = 0;
 
     // Lay the four stubs out on the 128-byte grid described above.
     const uint16_t pool = uint16_t(reinterpret_cast<uintptr_t>(g_stub_pool));
@@ -122,16 +134,21 @@ int main() {
     A::Hal::set_raster_vector(addrA);
     A::nmien_set(A::nmien::VBI | A::nmien::DLI);
 
-    // Hammer the two-store window. RTCLOK+2 ($14) is the OS jiffy counter.
+    // Hammer the two-store window. A frame is a VCOUNT wrap: VCOUNT counts scanlines
+    // in pairs and resets at the top of the frame, and one iteration is far shorter
+    // than the frame, so every wrap is seen as a decrease. RTCLOK+2 ($14) is the OS
+    // jiffy counter, counted alongside to expose swallowed VBIs.
     volatile uint8_t* const jiffy = reinterpret_cast<volatile uint8_t*>(0x0014);
-    const uint8_t deadline = uint8_t(*jiffy + 180);       // ~3 s at 60 Hz
-    uint16_t iterations = 0;
-    uint8_t frames = 0, last = *jiffy;
-    while (*jiffy != deadline) {
+    uint16_t iterations = 0, frames = 0;
+    uint8_t jiffies = 0, last_jiffy = *jiffy, last_line = *A::reg::VCOUNT;
+    while (frames != kRunFrames) {
         A::Hal::set_raster_vector(addrA);
         A::Hal::set_raster_vector(addrB);
         ++iterations;
-        if (*jiffy != last) { last = *jiffy; ++frames; }
+        const uint8_t line = *A::reg::VCOUNT;
+        if (line < last_line) ++frames;
+        last_line = line;
+        if (*jiffy != last_jiffy) { last_jiffy = *jiffy; ++jiffies; }
     }
 
     A::nmien_set(A::nmien::VBI);                          // DLI off before the dump
@@ -141,9 +158,11 @@ int main() {
     store16(0x0608, addrA);
     store16(0x060A, addrB);
     store16(0x060C, iterations);
-    kResult[0x0E] = frames;
+    kResult[0x0E] = jiffies;
     kResult[0x0F] = A::g_nmien_shadow;
+    store16(0x0610, frames);
+    kResult[0x13] = 0xA5;                                 // done marker, written last
 
-    edge_host_dump("H1:NSDUMP.BIN", reinterpret_cast<const void*>(0x0600), 16);
+    edge_host_dump("H1:NSDUMP.BIN", reinterpret_cast<const void*>(0x0600), kDumpBytes);
     for (;;) {}
 }

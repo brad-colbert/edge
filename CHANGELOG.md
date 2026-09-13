@@ -35,8 +35,9 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
   on whatever code the hybrid address hits
   (`tests/backends/atari/raster_vector_tear_altirra_probe.cpp`, target
   `raster_vector_tear_probe`). Over 180 frames of hammering: unguarded **711 tears**
-  (Altirra) / **756** (Fujisan); guarded **0 and 0**, with 11.6k and 12.6k legitimate
-  DLI dispatches in the same runs to show the interrupts were firing.
+  (Altirra) / **756** (Fujisan); guarded **0 and 0**. *Superseded — see the next-but-one
+  entry:* the 11.6k and 12.6k dispatches first reported alongside were more than the
+  4,320 DLIs those runs could hold, and the zero depended on how the loop compiled.
 - **The raw chain tail could install a zero vector** — the address-zero variant of the
   same defect. `prepare_chain` filled `next_lo_`/`next_hi_` only for live slots, so on a
   one-hook chain `next_[1]` was `0`. The C++ dispatcher re-syncs an out-of-range
@@ -50,6 +51,50 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
   Bounds-checking the tail itself was rejected — see the ADR-019 addendum. Costs nothing
   at interrupt time, and nothing measurable in size (`atari_hw_test` is 9,341 B either
   way).
+- **The raster-vector guard now fits its client, and closes an interrupt-latency hole the
+  first fix only missed by luck.** ATank measured the fix above at +133 B of
+  `.text+.rodata` against the 82 it had (the counted `NmiGuard` inlined at three call sites
+  was 59 of it, the terminal-fill loop 74), so the client stopped linking. Now
+  `Hal::set_raster_vector` is out of line behind a new `NmiLeafGuard`
+  (`engine/platform/atari/nmi.h`), and a one-slot chain's fill is straight-line stores
+  behind the same `if constexpr` gate `sort_slots` already has. ATank links again: **26 B
+  free** at its default host and **10 B** at the eagle host, where it had been 51 and 70
+  over. That is ATank's own "leg G" plus the settle below (+2 B).
+  `NmiLeafGuard` is `NmiGuard` for a body of a few stores. It masks unconditionally and
+  restores only when no counted guard encloses it, so it is safe inside one and keeps no
+  count; a program that never opens an `NmiGuard` has the depth test folded away.
+  **The mask is stored twice, and the second store is the fix.** A DLI's NMI is asserted
+  on cycle 8, a disabling NMIEN write must land by cycle 8, and the CPU enters the handler
+  at the first instruction boundary from cycle 10 (Altirra Hardware Reference Manual,
+  4.8). A mask that lands one cycle late therefore lets the NMI in one instruction after
+  the store. Out of line, the vector is already in the registers, so that instruction was
+  the first VDSLST store: the hybrid again. The original fix inlined the guard, and in its
+  probe the compiler happened to put a load in that slot. Rebuilt against the re-timed
+  probe, `ebaf122` itself tears **77** times on Altirra and **110** on Fujisan, every one at
+  the call site whose mask store is followed directly by a vector store and none at the
+  site that kept a load between them. The second store is that instruction.
+  Tear probe, 180 real frames per leg, Altirra / Fujisan: no guard **471 / 477**; leaf guard
+  without the settle **258 / 289**; the same masking only the DLI **269 / 248**; `ebaf122`
+  **77 / 110**; **leaf guard with the settle 0 / 0**, with 3,239 / 3,211 dispatches in the
+  same runs.
+  The probe was also misreading its own run. It is timed by VCOUNT now, not the OS jiffy
+  clock. Called from the main thread, a guard that masks every NMI can swallow the VBI, and
+  a lost VBI is a lost jiffy, so a jiffy-timed run stretched over extra frames and counted
+  extra DLIs — ATank's unexplained ~2.5x. Jiffies are still reported: the unguarded and
+  DLI-only legs see 180 of 180, the full-mask legs 119–172. This does not arise in the
+  engine, whose callers already run inside the VBI.
+  Mutation-proven, 22/22 caught: guard removed / closes before the pair / spans only the low
+  byte / high byte never written / depth gate removed / mask writes the shadow / restore
+  never happens / restore gate inverted / leaf bumps the count / mask leaves the DLI armed /
+  settle removed / settle moved inside the pair; general fill removed / bound off by one /
+  filled with zero / started past the count; one-slot entry 0 or 1 dropped / gate inverted /
+  filled with zero / gate too wide; clamp removed. The structural oracle now decodes 6502
+  instructions from the entry point and adds three rules: the mask store is unconditional,
+  its value clears the DLI bit, and at least one instruction separates it from the first
+  vector store. No simulator can see the settle, so that last rule is what keeps it.
+  **Not yet changed: `NmiGuard` has the same latency hole.** Its VBXE critical sections can
+  let a VBI that was already committed run one instruction into the section. That fix
+  needs VBXE validation, so it is left for a separate change.
 - **The realtime lane discarded its transport's verdict too.** `RealtimeLane::poll()` ran
   flush and drain and then returned `Ok` unconditionally, exactly as the session lane did,
   so a terminal transport status never reached the caller. Nothing in that lane reports

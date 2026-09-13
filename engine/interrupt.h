@@ -250,9 +250,24 @@ public:
         // because next_*[i-1] named it, and only live slots name a handler, so
         // i <= total_count_ <= MaxRasterHooks -- which is why next_* carries one
         // entry more than the chain can hold.
-        for (u8 i = total_count_; i <= MaxRasterHooks; ++i) {
-            next_lo_[i] = lo(terminal);
-            next_hi_[i] = hi(terminal);
+        //
+        // A one-slot chain gets the same writes as straight-line stores, gated like
+        // sort_slots and for the same reason: the optimiser cannot bound a trip count
+        // that starts from the runtime counter, so the general loop costs a real loop
+        // to write at most four constant bytes. The reachable indices are 0 and 1, and
+        // entry 0 is unused only when the chain is empty.
+        if constexpr (MaxRasterHooks == 1) {
+            if (total_count_ == 0) {
+                next_lo_[0] = lo(terminal);
+                next_hi_[0] = hi(terminal);
+            }
+            next_lo_[1] = lo(terminal);
+            next_hi_[1] = hi(terminal);
+        } else {
+            for (u8 i = total_count_; i <= MaxRasterHooks; ++i) {
+                next_lo_[i] = lo(terminal);
+                next_hi_[i] = hi(terminal);
+            }
         }
 
         // The backend's raster vector is pointed here by the frame service; current_ starts at 0.

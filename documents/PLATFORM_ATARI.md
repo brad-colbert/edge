@@ -761,8 +761,16 @@ The same probe binaries run under **Fujisan** with no change, via
 Altirra runner produced:
 
 ```bash
-scripts/fujisan_probe.sh build/raster_vector_tear_altirra_probe.xex
+scripts/fujisan_probe.sh build/raster_vector_tear_altirra_probe.xex 20 19
 ```
+
+The two numbers are that probe's dump length and its done-marker offset (`$0613`, written
+last). Without them the script polls offset 8, which in this probe is stub A's low address
+byte — `$00` by construction — so it waits out its full 30 s before reading.
+
+**Fujisan and `netsiohub` cannot run at once** — both bind UDP 9997, and Fujisan with the
+bridge up never boots. Stop the bridge first and restart it afterwards. On quit Fujisan also
+`pkill -9`s the external FujiNet-PC, which its restart loop brings back.
 
 It prints the captured bytes and keeps the last capture at `/tmp/fujisan_probe_last.bin`.
 
@@ -791,6 +799,39 @@ It prints the captured bytes and keeps the last capture at `/tmp/fujisan_probe_l
 - **Never `pkill -f fujisan`** from a shell whose own command line contains "fujisan" — the
   same trap the Altirra runner documents. Kill by PID. If Fujisan is already running the
   script reuses its port and leaves that instance alone.
+
+## Reading the raster-vector tear probe
+
+`raster_vector_tear_probe` hammers `Hal::set_raster_vector` against ~24 DLIs a frame with
+both hybrid vectors parked on counting stubs, so a torn write is counted instead of jumped
+through. Read it as an A/B across builds: zero tears guarded, hundreds with the guard
+removed (the second half proves the window is being exercised).
+
+| offset | field | offset | field |
+|---|---|---|---|
+| `$0600` | dispatches through A | `$0608` | address of A |
+| `$0602` | dispatches through B | `$060A` | address of B |
+| `$0604` | tears at H1 = lo(B):hi(A) | `$060C` | loop iterations |
+| `$0606` | tears at H2 = lo(A):hi(B) | `$060E` | jiffies seen / `$060F` NMIEN shadow |
+| `$0610` | real frames (VCOUNT) | `$0613` | done marker `$A5` |
+
+Two things that read wrong if you don't know them:
+
+- **The run is timed by VCOUNT, and jiffies below 180 are expected on a full-mask leg.** A
+  guard that masks every NMI, called from the main thread, can swallow the VBI (ANTIC samples
+  NMIEN once at line 248). A lost VBI is a lost RTCLOK tick. The probe was once jiffy-timed,
+  which stretched guarded runs over extra frames and reported ~2.5x more dispatches than the
+  DLIs 180 frames hold. Real frames minus jiffies is the VBI count swallowed; a DLI-only mask
+  leg sees 180 of 180. Engine callers run inside the VBI, where this cannot happen.
+- **A tear count names the call site.** H2 counts torn writes of A (A's low byte over B's
+  high byte), H1 torn writes of B. A guard that tears at only one of them is usually one whose
+  codegen differs between the two sites. That is how the missing mask settle was found:
+  `ebaf122` tore only at the site where the mask store was directly followed by a vector
+  store (see `NmiLeafGuard` in `engine/platform/atari/nmi.h`).
+
+Measured 2026-09-13, 180 real frames, tears (Altirra / Fujisan): no guard 471 / 477; leaf
+guard without settle 258 / 289; DLI-only mask, no settle 269 / 248; `ebaf122` 77 / 110; leaf
+guard with settle **0 / 0**.
 
 ## Netstream Mode B emulator validation
 

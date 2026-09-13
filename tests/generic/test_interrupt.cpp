@@ -321,6 +321,44 @@ static void test_next_table_shrink_clears_stale() {
     CHECK(is_terminal(im, 2));
 }
 
+// ── The one-slot chain takes its own fill ─────────────────────────────
+//
+// A manager that can hold a single slot swaps the fill loop for straight-line stores
+// (the size of the loop, not its behaviour, is the reason). Those stores must
+// reproduce the loop's writes exactly for both chains a one-slot manager can build,
+// empty and one live slot. The index set is {0, 1} -- the lone slot and the spare
+// past it. (The one-to-empty transition is not a separate case: every entry of a
+// one-slot table is the terminal after any build, so it cannot discriminate.)
+using IM1 = engine::InterruptManager<MockPlatform, 1, 1>;
+
+static bool is_terminal1(const IM1& im, u8 i) {
+    return im.next_lo(i) == (MockHal::TERMINAL & 0xFF) &&
+           im.next_hi(i) == (MockHal::TERMINAL >> 8);
+}
+
+static void test_one_slot_fill() {
+    // Empty, on a fresh manager: nothing else wrote entry 0, so the fill must.
+    {
+        IM1 im;
+        im.prepare_chain();
+        CHECK(IM1::capacity() == 1);
+        CHECK(is_terminal1(im, 0));
+        CHECK(is_terminal1(im, 1));
+    }
+    // One live slot: entry 0 is its onward link, entry 1 the stale index a raw tail
+    // reads when it fires before the chain was re-armed.
+    {
+        IM1 im;
+        im.add_raw_raster_hook(50, h_a);
+        im.prepare_chain();
+        CHECK(im.raster_hook_count() == 1);
+        CHECK(im.first_handler_addr() == faddr(h_a));
+        CHECK(is_terminal1(im, 0));
+        CHECK((im.next_lo(1) | im.next_hi(1)) != 0);     // NOT address zero
+        CHECK(is_terminal1(im, 1));
+    }
+}
+
 // next_raster_addr() — the portable mirror of the raw tail. In range it walks the
 // chain; at or past the live count it yields the terminal and the index stops
 // climbing, so a hook that keeps firing can never walk off the table.
@@ -357,6 +395,7 @@ int main() {
     test_next_table_empty_chain();
     test_next_table_full_capacity_spare();
     test_next_table_shrink_clears_stale();
+    test_one_slot_fill();
     test_next_raster_addr_clamps();
 
     if (g_failures == 0) {

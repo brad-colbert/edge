@@ -291,14 +291,19 @@ struct Hal {
     // zero page. The window is the few cycles between the two `sta abs` and this runs
     // twice a frame, so it lands on the order of once a minute of display time.
     //
-    // NmiGuard (nmi.h) is the engine's primitive for exactly this hazard: the NMI
-    // simply cannot fire inside its scope. Both os::VDSLST and reg::NMIEN are
-    // volatile, so neither store may be hoisted or sunk out of the guarded region.
-    // Masking the VBI too costs nothing here -- every caller (prepare_chain and
-    // rearm_delivery, from the frame service; shutdown, from the main thread on the
-    // way out) already runs with this frame's VBI taken.
-    static void set_raster_vector(uint16_t a) {
-        NmiGuard g;
+    // The mask is NmiLeafGuard (nmi.h): the NMI cannot fire inside its scope, and
+    // under an enclosing NmiGuard it leaves the restore to the outer scope. Both
+    // os::VDSLST and reg::NMIEN are volatile, so neither store may be hoisted or sunk
+    // out of the guarded region. Masking the VBI too costs nothing here -- every
+    // caller (prepare_chain and rearm_delivery, from the frame service; shutdown, from
+    // the main thread on the way out) already runs with this frame's VBI taken.
+    //
+    // Out of line and leaf-guarded for size (ATank, 2026-09-12): the counted guard
+    // inlined at all three call sites cost 59 bytes a client did not have. Neither
+    // choice touches the interrupt path -- this runs from the frame service and
+    // shutdown, never from inside a DLI.
+    [[gnu::noinline]] static void set_raster_vector(uint16_t a) {
+        NmiLeafGuard g;
         os::VDSLST[0] = static_cast<uint8_t>(a & 0xFF);
         os::VDSLST[1] = static_cast<uint8_t>(a >> 8);
     }

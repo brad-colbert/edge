@@ -863,6 +863,22 @@ entry is impossible by construction — a raw handler runs at
 index `i` only because `next_*[i-1]` named it — which is why
 `next_*` carries exactly one entry more than the chain can hold.
 
+**Addendum (the guarded vector write, sized and settled, 2026-09-13):**
+The VDSLST pair write stays out of line, not inlined into
+`prepare_chain` and `rearm_delivery`. Both callers are frame-service
+code and never run inside a DLI, so the `jsr` is not on the path this
+ADR protects, and inlining a guard at every caller cost a client its
+link (ATank: 59 B). The write takes `NmiLeafGuard`, not `NmiGuard`,
+because it is a leaf: two stores that open no guard and call nothing.
+The leaf guard stores its mask twice. The second store settles the
+mask against a DLI that ANTIC asserted before the first store
+landed: that NMI is taken one instruction after a late mask store,
+which without the settle is inside the pair. No simulator can see
+this, so a structural oracle in `test_atari_interrupt` requires it.
+The one-slot terminal fill is specialised under the same
+`MaxRasterHooks` gate as the sort, for size alone: identical writes
+and invariant.
+
 ---
 
 ## ADR-020: Non-Capturing Lambdas Only for C++ Raster-Hook Handlers

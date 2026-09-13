@@ -52,6 +52,42 @@ struct NmiGuard {
     NmiGuard& operator=(const NmiGuard&) = delete;
 };
 
+// The same critical section for a LEAF body -- a few stores that open no guard of
+// their own and call nothing that does. Masking is unconditional (a store of zero
+// under an enclosing guard changes nothing) and only the restore is gated, on the
+// enclosing depth rather than on a count of its own: inside an NmiGuard it leaves
+// NMI masked for the outer scope to restore, outside one it restores the shadow.
+// No counter is kept because nothing can observe one -- no guard nests inside a
+// leaf body, and no NMI can run inside it to open one.
+//
+// It exists for size, not speed: it drops NmiGuard's counter bookkeeping, which
+// matters where a single guarded write is the only guarded code a program links
+// (Hal::set_raster_vector). Anything larger than a leaf takes NmiGuard.
+//
+// The mask is stored TWICE, and the second store is not redundant. ANTIC asserts a
+// DLI's NMI on cycle 8 of the line, a disabling NMIEN write must land by cycle 8 to
+// withdraw it, and the CPU enters the handler at the first instruction boundary from
+// cycle 10 on (Altirra Hardware Reference Manual, 4.8). A mask store that lands on
+// cycle 9 is therefore too late for an NMI that is already on its way, and that NMI
+// is taken one instruction AFTER the store -- which, with no settle, is the first
+// store of the body. Measured with the raster-vector tear probe: a leaf guard whose
+// mask store was followed directly by the first VDSLST store tore 258 times in 180
+// frames on Altirra. The second store is that one instruction; the NMI lands on
+// the boundary after it, with the body not yet begun. Four cycles, where one
+// instruction of any length is the requirement, for margin. It is volatile, so the
+// optimiser can neither drop it nor move it past the body.
+struct NmiLeafGuard {
+    NmiLeafGuard() noexcept {
+        *reg::NMIEN = 0x00;
+        *reg::NMIEN = 0x00;   // settle: a pending NMI is taken here, not in the body
+    }
+    ~NmiLeafGuard() noexcept {
+        if (g_nmi_guard_depth == 0) *reg::NMIEN = g_nmien_shadow;
+    }
+    NmiLeafGuard(const NmiLeafGuard&) = delete;
+    NmiLeafGuard& operator=(const NmiLeafGuard&) = delete;
+};
+
 } // namespace atari
 
 #endif // ENGINE_PLATFORM_ATARI_NMI_H
