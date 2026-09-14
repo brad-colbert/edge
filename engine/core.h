@@ -21,6 +21,7 @@
 // Depends on the subsystem headers and the Platform template parameter only
 // (Dependency Rule 2) — never a platform header by name.
 
+#include "attributes.h"
 #include "types.h"
 
 #include "config/capabilities.h"
@@ -95,6 +96,64 @@ struct uses_missiles<C, void_t<decltype(C::uses_missiles)>> {
     static constexpr bool value = C::uses_missiles;
 };
 
+// defer_initial_screen: whether Core::init() brings up InitialScreen itself.
+// Default false — init() builds the initial screen, which is what most games want.
+//
+// A game that has load-time content living where the engine would write must set
+// this true. The case that motivated it: the display-program arena is game-owned
+// memory, but its FIRST write is engine-timed — init() calls set_screen, which
+// builds into the arena before any game code runs. A consumer whose splash image
+// is loaded into that same memory by the loader loses it. With this set, init()
+// does everything except build the initial screen, and the game calls
+// Game::set_screen<S>() itself once its load-time content is spent.
+//
+// The cost of deferring: the frame service is installed and running before any
+// screen exists, so the display shows whatever the consumer put there until that
+// first set_screen. That is precisely the point for a load-time splash, but it
+// means the consumer owns the display until then.
+template <typename C, typename = void>
+struct defer_initial_screen { static constexpr bool value = false; };
+template <typename C>
+struct defer_initial_screen<C, void_t<decltype(C::defer_initial_screen)>> {
+    static constexpr bool value = C::defer_initial_screen;
+};
+
+// sprite_memory: a game may supply the hardware sprite-graphics block itself,
+// instead of the engine reserving it in engine-private storage. The contract:
+//
+//   static u8* sprite_memory();                    // base address
+//   static constexpr u16 sprite_memory_bytes;      // usable size
+//
+// The engine still writes the block and still points the display hardware at it;
+// what changes is who OWNS it. Ownership is the point: the block carries an
+// alignment requirement and a head region the display hardware never fetches
+// (Core::sprite_memory_head_bytes), and a game that places the block itself can
+// put that head region — and the block's lifetime — to its own use. Both were
+// unreachable while the block was engine-private.
+//
+// The game inherits the alignment requirement by taking ownership; the engine
+// static_asserts the size but cannot check an address it does not choose.
+template <typename C, typename = void>
+struct has_sprite_arena { static constexpr bool value = false; };
+template <typename C>
+struct has_sprite_arena<C, void_t<decltype(C::sprite_memory()),
+                                  decltype(C::sprite_memory_bytes)>> {
+    static constexpr bool value = true;
+};
+
+// uses_hw_collisions: whether the game reads the hardware collision registers via
+// Core::sprite_collisions(). Default true. A game that resolves overlaps itself
+// (software AABB, tile lookup) can set `uses_hw_collisions = false`; the frame
+// service then skips latching and clearing the collision banks every frame.
+// sprite_collisions() keeps returning its state — all zeroes — so the query
+// compiles either way.
+template <typename C, typename = void>
+struct uses_hw_collisions { static constexpr bool value = true; };
+template <typename C>
+struct uses_hw_collisions<C, void_t<decltype(C::uses_hw_collisions)>> {
+    static constexpr bool value = C::uses_hw_collisions;
+};
+
 // sprite_binding: GameConfig::sprite_binding if present, else Multiplexed (the
 // per-frame Y-sort multiplexer). Direct pins logical slot i to hardware player i
 // for the whole frame (requires max_sprites <= 4); see SpriteBinding in sprites.h.
@@ -111,6 +170,16 @@ struct ports { static constexpr u8 value = 2; };
 template <typename P>
 struct ports<P, void_t<decltype(P::capabilities::joystick_ports)>> {
     static constexpr u8 value = P::capabilities::joystick_ports;
+};
+
+// Bytes at the start of the sprite area the display hardware never fetches, if
+// the platform declares such a region; 0 otherwise. Keeps the query total so a
+// backend without the concept still compiles.
+template <typename P, typename = void>
+struct sprite_head_bytes { static constexpr u16 value = 0; };
+template <typename P>
+struct sprite_head_bytes<P, void_t<decltype(P::hal::sprite_area_head_bytes)>> {
+    static constexpr u16 value = P::hal::sprite_area_head_bytes;
 };
 
 template <typename P, typename C, bool Enabled>
@@ -158,11 +227,36 @@ public:
     // none (uses_missiles=false), the buffer is dropped to free RAM. Non-blitter
     // backends always need it (hardware sprites live here).
     static constexpr bool kUsesMissiles  = cdetail::uses_missiles<GameConfig>::value;
+    static constexpr bool kUsesHwCollisions =
+        cdetail::uses_hw_collisions<GameConfig>::value;
+    static constexpr bool kDeferInitialScreen =
+        cdetail::defer_initial_screen<GameConfig>::value;
     static constexpr bool kNeedSpriteMem =
         !engine::caps_of_t<Platform>::has_blitter || kUsesMissiles;
+    static constexpr bool kUsesSpriteArena =
+        cdetail::has_sprite_arena<GameConfig>::value;
     static constexpr u16 kSpriteMemBytes =
         kNeedSpriteMem ? Platform::hal::sprite_area_bytes : 0;
+    // Engine-owned storage only when the game did not supply the block.
+    static constexpr u16 kOwnSpriteMemBytes = kUsesSpriteArena ? 0 : kSpriteMemBytes;
     static constexpr u16 kCharsetBytes   = 1024;   // largest charset (Charset1K)
+
+    // Sprite-memory placement queries, for a game supplying its own block.
+    //
+    // sprite_memory_bytes_required: how large the block must be.
+    // sprite_memory_alignment:      the alignment the block must satisfy.
+    // sprite_memory_head_bytes:     bytes at the START of the block that the
+    //   display hardware never fetches. A game that owns the block may use this
+    //   head region as general storage. It is zero on a platform whose sprite
+    //   area has no such dead region, so a game must query rather than assume.
+    //
+    // CAVEAT the game inherits: this storage is zeroed at program start like any
+    // other, and the engine writes the live part of the block every frame — only
+    // the head region is the game's to keep.
+    static constexpr u16 sprite_memory_bytes_required = kSpriteMemBytes;
+    static constexpr u16 sprite_memory_alignment      = 2048;
+    static constexpr u16 sprite_memory_head_bytes =
+        cdetail::sprite_head_bytes<Platform>::value;
 
     // Subsystem types.
     using Screen    = ScreenManager<Platform, GameConfig>;
@@ -209,7 +303,7 @@ public:
     // base to it, then install the frame service. The no-tileset form leaves the
     // charset base at its power-on default.
     template <typename Tileset>
-    static void init(const Tileset& cs) {
+    EDGE_INIT_FN(init) static void init(const Tileset& cs) {
         using caps = engine::caps_of_t<Platform>;
         if constexpr (caps::has_blitter) {
             // Overlay bring-up (HAL sets up its memory window, display list, and
@@ -226,7 +320,7 @@ public:
         // (the screen manager preserves the sprite-DMA bits — see the HAL note). The
         // empty player strips on a blitter backend simply draw nothing.
         setup_sprites();
-        set_screen<InitialScreen>([] {});
+        if constexpr (!kDeferInitialScreen) set_screen<InitialScreen>([] {});
         // The character-set buffer is only used by the baseline tile path; the
         // blitter backend's overlay-font upload to VRAM lands with the 4b text path.
         if constexpr (!caps::has_blitter) {
@@ -237,7 +331,7 @@ public:
         sprites.arm_multiplex_hook();  // bind the raw zone-boundary raster hook (baseline)
         Platform::hal::install_frame_isr(&frame_service);
     }
-    static void init() {
+    EDGE_INIT_FN(init) static void init() {
         using caps = engine::caps_of_t<Platform>;
         if constexpr (caps::has_blitter) {
             // Pure-overlay layouts no longer need a manual playfield-DMA disable:
@@ -247,7 +341,7 @@ public:
         // Arm hardware-sprite base + DMA on every backend (hardware sprites on
         // baseline; the hardware missiles on a blitter backend — see init(cs) above).
         setup_sprites();
-        set_screen<InitialScreen>([] {});
+        if constexpr (!kDeferInitialScreen) set_screen<InitialScreen>([] {});
         interrupts.arm_dispatch();
         sprites.arm_multiplex_hook();  // bind the raw zone-boundary raster hook (baseline)
         Platform::hal::install_frame_isr(&frame_service);
@@ -499,7 +593,7 @@ public:
             // finished, so it returns at once. Single-buffer present is a no-op (it
             // composes the visible page in place, dirty-rect).
             Platform::hal::overlay_present();
-            sprites.commit(sprite_mem_);
+            sprites.commit(sprite_mem());
             Platform::hal::overlay_submit();
 
             // 4. Latch overlay collisions (overlay↔playfield/sprite and overlay↔overlay).
@@ -509,14 +603,19 @@ public:
             }
         } else {
             // Baseline path: write hardware-sprite memory, then latch + clear collisions.
-            sprites.commit(sprite_mem_);
-            for (u8 i = 0; i < 4; ++i) {
-                collisions_.s_bg[i] = Platform::hal::coll_player_playfield(i);
-                collisions_.s_s[i]  = Platform::hal::coll_player_player(i);
-                collisions_.p_bg[i] = Platform::hal::coll_missile_playfield(i);
-                collisions_.p_s[i]  = Platform::hal::coll_missile_player(i);
+            // The latch is skipped entirely for a game that resolves overlaps itself
+            // (GameConfig::uses_hw_collisions = false) — it is 16 register reads plus
+            // the clear, every frame, feeding a query that game never makes.
+            sprites.commit(sprite_mem());
+            if constexpr (kUsesHwCollisions) {
+                for (u8 i = 0; i < 4; ++i) {
+                    collisions_.s_bg[i] = Platform::hal::coll_player_playfield(i);
+                    collisions_.s_s[i]  = Platform::hal::coll_player_player(i);
+                    collisions_.p_bg[i] = Platform::hal::coll_missile_playfield(i);
+                    collisions_.p_s[i]  = Platform::hal::coll_missile_player(i);
+                }
+                Platform::hal::clear_collisions();
             }
-            Platform::hal::clear_collisions();
         }
 
         // 5. Recompute multiplex zones for the next commit (harmless on a blitter backend,
@@ -588,7 +687,7 @@ public:
 private:
     static void setup_sprites() {
         if constexpr (kNeedSpriteMem) {
-            Platform::hal::set_sprite_base(page_of(sprite_mem_));
+            Platform::hal::set_sprite_base(page_of(sprite_mem()));
             // Pass the sprite manager's vertical resolution so the HAL sets single-line
             // sprite DMA to match the layout sprites.commit() writes into sprite_mem_.
             Platform::hal::sprite_dma_enable(
@@ -597,6 +696,19 @@ private:
         // else: no hardware missiles — leave hardware-sprite DMA off so nothing
         // fetches the (absent) buffer; the blitter composes everything itself.
     }
+    // The hardware sprite-graphics block: the game's if it supplied one, else the
+    // engine's own storage.
+    static u8* sprite_mem() {
+        if constexpr (kUsesSpriteArena) {
+            static_assert(GameConfig::sprite_memory_bytes >= kSpriteMemBytes,
+                          "GameConfig::sprite_memory is smaller than the display "
+                          "hardware's sprite area — size it from "
+                          "Core::sprite_memory_bytes_required");
+            return GameConfig::sprite_memory();
+        } else {
+            return sprite_mem_;
+        }
+    }
     static u8 page_of(const void* p) {
         return static_cast<u8>(
             static_cast<u16>(reinterpret_cast<uintptr_t>(p)) >> 8);
@@ -604,7 +716,7 @@ private:
 
     // Hardware-sprite graphics memory. Single-line resolution wants 2K alignment
     // so the high byte alone selects the region (the sprite base register).
-    alignas(2048) static inline u8 sprite_mem_[kSpriteMemBytes] = {};
+    alignas(2048) static inline u8 sprite_mem_[kOwnSpriteMemBytes] = {};
     // Char-set destination (page-aligned so the charset base is just the high byte).
     alignas(256)  static inline u8 charset_buffer_[kCharsetBytes] = {};
 

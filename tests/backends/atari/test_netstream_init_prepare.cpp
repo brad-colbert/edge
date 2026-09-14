@@ -31,6 +31,12 @@ extern "C" {
     // Deterministic, parameterless hooks (carry -> uint8_t: 0 = success, 1 = failure).
     uint8_t ns_test_select_baud_staged(void);
     uint8_t ns_test_init_prepare_no_detect_staged(void);
+
+    // Init "why" reporting. _ns_init_netstream drives SIOV in general, but its
+    // hardwareActivated guard returns before the DCB fill, so that arm is sim-safe.
+    extern uint8_t hardwareActivated;
+    uint8_t _ns_init_netstream(void);
+    uint8_t _ns_get_init_status(void);
 }
 
 static unsigned g_failures = 0;
@@ -219,6 +225,16 @@ int main() {
     stage_nominal(9600);
     nsVideoStd = VIDEO_NTSC;
     CHECK(ns_test_init_prepare_no_detect_staged() == 1);
+
+    // ----- init status: the guard path reports WHY, not just "failed" -----
+    // _ns_init_netstream returns at the hardwareActivated guard before touching the DCB
+    // or SIOV, so this arm is sim-safe. The SIOV arms ($01 / raw DSTATS) are Altirra-only
+    // and are covered by netstream_datapath_altirra_probe ($0653).
+    CHECK(_ns_get_init_status() == 0x00);        // nothing attempted yet
+    hardwareActivated = 1;                       // pretend a stream is already live
+    CHECK(_ns_init_netstream() == 1);            // fails closed...
+    CHECK(_ns_get_init_status() == 0x02);        // ...and says it was the guard
+    hardwareActivated = 0;
 
     if (g_failures == 0) {
         printf("\nALL TESTS PASSED (Netstream init-prepare 9Q.1)\n");

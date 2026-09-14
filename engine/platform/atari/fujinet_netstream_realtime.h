@@ -36,6 +36,7 @@ namespace fujinet_netstream {
 
 using engine::u8;
 using engine::u16;
+using engine::i16;   // NetError::detail
 using engine::net::NetError;
 using engine::net::NetStatus;
 
@@ -91,6 +92,10 @@ static constexpr u16 to_netstream_port_arg(u16 remote_port) {
 // immediately after begin corrupts the first ~5-9 bytes (the firmware reports the new peer
 // baudrate ~475 ms after the baud switch); ~30 frames (~0.5 s NTSC) makes the stream byte-perfect.
 inline constexpr u8 kNetstreamSettleFrames = 30;
+// OS frames to hold COMMAND asserted in release_device() so the device's service
+// loop observes it. Its check runs once per bus iteration; two frames is a wide
+// margin. UNVERIFIED ON HARDWARE — see the close-path note in the changelog.
+inline constexpr u8 kDeviceReleaseFrames = 2;
 
 // ── Real backend ops: the 9Q.2 ABI. Linked only where handler.S/abi.s are linked ────────
 // (the Atari .xex / Altirra probe). ODR-used only when NetstreamRealtimeAdapterT<RealNetstreamOps>
@@ -100,8 +105,37 @@ struct RealNetstreamOps {
     static u8 init(const char* host, u8 flags, u16 baud, u16 port) {
         return edge_ns_init_netstream(host, flags, baud, port);
     }
+    // Why the last init returned as it did (raw DSTATS, or a low sentinel for the
+    // failures that never reach SIOV). init() only reports pass/fail, which is not
+    // enough to tell a bus fault from a bad argument.
+    static u8 init_status() { return _ns_get_init_status(); }
     static void begin() { _edge_ns_begin_stream(); }
     static void end()   { _edge_ns_end_stream(); }
+
+    // Take the DEVICE out of stream mode, before the client-side teardown drops
+    // the motor line.
+    //
+    // The device leaves stream mode when it sees the SIO COMMAND line asserted —
+    // but it only looks while the MOTOR line is still asserted (its service block
+    // is gated on motor, and the command check sits inside that gate). end()
+    // deasserts motor, so once it has run the device can never observe the exit
+    // and stays streaming with its baud still at the stream rate, which is what
+    // makes the transport unusable for the other lane afterwards.
+    //
+    // So: assert COMMAND while motor is still up, hold it long enough for the
+    // device's service loop to notice, then release. Values match the OS's
+    // command-asserted / command-idle PBCTL values.
+    static void release_device() {
+        volatile u8* const pbctl  = (volatile u8*)0xD303;
+        volatile u8* const rtclok = (volatile u8*)0x0014;
+        *pbctl = 0x34;                       // COMMAND asserted
+        u8 last = *rtclok, frames = 0;
+        while (frames < kDeviceReleaseFrames) {
+            const u8 now = *rtclok;
+            if (now != last) { last = now; ++frames; }
+        }
+        *pbctl = 0x3C;                       // COMMAND released
+    }
     static u8   status(){ return _edge_ns_get_status(); }
     // Wait kNetstreamSettleFrames OS frames (RTCLOK low byte $14) for the external TX clock to
     // renegotiate after begin, before the first transmit. Atari-specific; only compiled into
@@ -155,7 +189,15 @@ struct NetstreamRealtimeAdapterT {
                                 to_netstream_port_arg(remote_port));
         if (rc != 0) {
             s.active = false;  // fail closed; nsFinal* policy handled in the backend
-            s.last_error = NetError{NetStatus::TransportError, 0};
+            // Carry the backend's reason out in `detail` rather than a bare 0: a silent
+            // "open failed" is indistinguishable between a bad host, a NAK and a
+            // corrupted data frame, and the caller has no other way to tell them apart.
+            // init_status() is a REQUIRED part of the Ops policy, not a detected one: a
+            // `requires`-guarded call would compile either way, so losing the backend
+            // getter would silently go back to reporting detail = 0. The u8 is
+            // zero-extended, so a raw DSTATS stays positive ($8F -> 143).
+            s.last_error = NetError{NetStatus::TransportError,
+                                    static_cast<i16>(Ops::init_status())};
             return NetStatus::TransportError;
         }
 
@@ -178,6 +220,9 @@ struct NetstreamRealtimeAdapterT {
     static void realtime_close() {
         State& s = state();
         if (s.active) {
+            // Order matters: the device can only see the exit while the motor line
+            // is still asserted, and end() is what drops it.
+            if constexpr (requires { Ops::release_device(); }) Ops::release_device();
             Ops::end();
             s.active = false;
         }

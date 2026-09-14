@@ -754,6 +754,85 @@ Example Mode A output for the adapter probe (page 6 `$0600..$064F`):
 
 The script paths assume Altirra 4.50 at the location in `$ALTIRRA_DIR`; adjust for your install.
 
+## Fujisan headless probe runner
+
+The same probe binaries run under **Fujisan** with no change, via
+`scripts/fujisan_probe.sh`. Use it as the primary runner, or to cross-check a result the
+Altirra runner produced:
+
+```bash
+scripts/fujisan_probe.sh build/raster_vector_tear_altirra_probe.xex 20 19
+```
+
+The two numbers are that probe's dump length and its done-marker offset (`$0613`, written
+last). Without them the script polls offset 8, which in this probe is stub A's low address
+byte — `$00` by construction — so it waits out its full 30 s before reading.
+
+**Fujisan and `netsiohub` cannot run at once** — both bind UDP 9997, and Fujisan with the
+bridge up never boots. Stop the bridge first and restart it afterwards. On quit Fujisan also
+`pkill -9`s the external FujiNet-PC, which its restart loop brings back.
+
+It prints the captured bytes and keeps the last capture at `/tmp/fujisan_probe_last.bin`.
+
+### How it works (each piece is load-bearing)
+
+- **Fujisan ignores atari800 command-line options.** Its binary embeds atari800 and so
+  contains strings like `-Hpath`, `-run` and `-hreadwrite`, but the Qt front end never
+  parses them: it boots from its saved profile (`~/.config/8bitrelics/Fujisan.conf`) and
+  the `.xex` on the command line is simply not loaded. Do not build a runner on them.
+- **The automation channel is a JSON control port on `localhost:6510`.** One JSON object
+  per line, `{"command":"<category>.<action>","params":{…}}`; the server announces its
+  capabilities on connect (`media`, `system`, `input`, `debug`, `config`, `status`,
+  `screen`). The three that matter here:
+  `media.load_xex` (`params.path`), `system.cold_boot`, and `debug.read_memory`
+  (`params.address` decimal, `params.length`). `screen.capture` writes a PCX — into the
+  **emulator process's working directory**, ignoring any path parameter, so launch Fujisan
+  from a scratch directory if you want the captures to land there.
+- **No H: self-dump is needed.** `debug.read_memory` reads emulated RAM directly, so the
+  script reads the probe's page-6 snapshot out of `$0600` and never touches the H: device.
+  The probe still carries its `edge_host_dump()` call, which is what the Altirra runner
+  needs — one probe binary, both emulators.
+- **Cold boot before each load.** Without it, page 6 still holds the previous run's result
+  and a stale snapshot reads as a fresh pass; the previous probe's spin loop is also still
+  running. The script polls a caller-nominated "done" offset that the probe writes last, so
+  it never reads a half-finished snapshot.
+- **Never `pkill -f fujisan`** from a shell whose own command line contains "fujisan" — the
+  same trap the Altirra runner documents. Kill by PID. If Fujisan is already running the
+  script reuses its port and leaves that instance alone.
+
+## Reading the raster-vector tear probe
+
+`raster_vector_tear_probe` hammers `Hal::set_raster_vector` against ~24 DLIs a frame with
+both hybrid vectors parked on counting stubs, so a torn write is counted instead of jumped
+through. Read it as an A/B across builds: zero tears guarded, hundreds with the guard
+removed (the second half proves the window is being exercised).
+
+| offset | field | offset | field |
+|---|---|---|---|
+| `$0600` | dispatches through A | `$0608` | address of A |
+| `$0602` | dispatches through B | `$060A` | address of B |
+| `$0604` | tears at H1 = lo(B):hi(A) | `$060C` | loop iterations |
+| `$0606` | tears at H2 = lo(A):hi(B) | `$060E` | jiffies seen / `$060F` NMIEN shadow |
+| `$0610` | real frames (VCOUNT) | `$0613` | done marker `$A5` |
+
+Two things that read wrong if you don't know them:
+
+- **The run is timed by VCOUNT, and jiffies below 180 are expected on a full-mask leg.** A
+  guard that masks every NMI, called from the main thread, can swallow the VBI (ANTIC samples
+  NMIEN once at line 248). A lost VBI is a lost RTCLOK tick. The probe was once jiffy-timed,
+  which stretched guarded runs over extra frames and reported ~2.5x more dispatches than the
+  DLIs 180 frames hold. Real frames minus jiffies is the VBI count swallowed; a DLI-only mask
+  leg sees 180 of 180. Engine callers run inside the VBI, where this cannot happen.
+- **A tear count names the call site.** H2 counts torn writes of A (A's low byte over B's
+  high byte), H1 torn writes of B. A guard that tears at only one of them is usually one whose
+  codegen differs between the two sites. That is how the missing mask settle was found:
+  `ebaf122` tore only at the site where the mask store was directly followed by a vector
+  store (see `NmiLeafGuard` in `engine/platform/atari/nmi.h`).
+
+Measured 2026-09-13, 180 real frames, tears (Altirra / Fujisan): no guard 471 / 477; leaf
+guard without settle 258 / 289; DLI-only mask, no settle 269 / 248; `ebaf122` 77 / 110; leaf
+guard with settle **0 / 0**.
+
 ## Netstream Mode B emulator validation
 
 The FujiNet **Netstream** realtime data path is validated end-to-end against a real FujiNet
@@ -794,6 +873,37 @@ fujinet-pc log shows `STREAM-OUT: A0..AF` and `STREAM-IN: 50..5F`.
 begin (`RealNetstreamOps::settle()`) so the external clock renegotiates before the first
 transmit — without it the first ~5–9 stream bytes corrupt. `netstream_txirq_diag_probe` (built
 with `EDGE_NETSTREAM_TEST_HOOKS`) dumps the serial-IRQ counters if the TX path regresses.
+
+**HSIO must be disabled when a fujinet-lib session precedes the netstream open**
+(`hsioindex=-1` in fujinet-pc's `fnconfig.ini` — which is the firmware's own compiled
+default). This only bites in the two-lane order used by `demo/tank_dual_net`; the
+netstream-only demos and probes never trigger it.
+
+The failure is silent and looks nothing like a speed problem. fujinet-lib polls the **N:**
+device for the high-speed index (`CF: 71 3f`) while opening its TCP session, which arms
+`hsio_pending` in Altirra's `netsio.atdevice`. Altirra then switches both directions
+locally and *deliberately does not tell the firmware* ("would cause data corruption"), so
+Phase 1 works only because Altirra is translating. By the time the netstream `$F0` ENABLE
+goes out, `hsio_pending` has been consumed, so that clock change takes the other branch and
+**does** post the peer baud — telling a firmware still at 19200 that the Atari is at 68836
+(POKEY divisor 6). NetSIO then XOR-corrupts every byte of the 64-byte payload on purpose
+(`lib/bus/sio/NetSIO.cpp`, the ±10% `_baud_peer` vs `_baud` window), so the checksum fails
+and the firmware logs `ERROR!` five times with no hint that baud was involved. The command
+frame survives because the speed change is announced after it, so it still gets `ACK+!`.
+
+Setting a *valid* index does not help — any index still lets fujinet-lib negotiate HSIO,
+and the firmware never toggles its own bus speed for a Fuji-device transaction (unlike the
+disk device's `$3F`, which calls `toggleBaudrate()`). Nor can the link self-heal: the
+firmware's auto-baud-toggle counts only *command*-frame checksum failures, and each retry's
+command frame is valid, which resets the counter. With `hsioindex=-1` the `$3F` reply is
+`40` ("no high speed"), so the negotiation never starts and the Atari stays at 19200. The
+cost is a slower Phase-1 asset download.
+
+Diagnosing it: `Game::net.realtime.last_error().detail` now carries the reason — the raw
+SIO `DSTATS` (`$8F` checksum, `$8A` timeout, `$8B` NAK, `$90` device error), or `$02`
+(init while already streaming) / `$03` (bad host or baud absent from `BaudTable`) for the
+failures that never reach SIOV. `netstream_datapath_altirra_probe` reports the same byte at
+`$0653`.
 
 ## Current Limits
 

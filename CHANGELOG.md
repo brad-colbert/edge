@@ -11,6 +11,221 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
 
 ## [Unreleased]
 
+### Added
+- **The realtime lane now reports *why* an open failed.** `Ops::init` reduced every
+  failure to a single "1", and the adapter discarded even that — `last_error()` came back
+  as `TransportError` with `detail = 0` for a bad hostname, a bus NAK and a corrupted data
+  frame alike, so `demo/tank_dual_net`'s red "NO NET" border carried no information and a
+  real transport fault could only be identified by reading the firmware's own log. The
+  handler now keeps the SIO `DSTATS` byte it already re-reads (`nsInitStatus`, one byte of
+  `.bss`) and exposes it as `_ns_get_init_status()`, which the adapter puts in
+  `NetError::detail`: `$01` success, `$8A` timeout, `$8B` NAK, `$8F` checksum, `$90` device
+  error, plus `$02` (init while already streaming) and `$03` (bad host / baud absent from
+  `BaudTable`) for the two failures that return before SIOV. Real DSTATS failure codes are
+  all `>= $8A`, so the low sentinels cannot collide. `netstream_datapath_altirra_probe`
+  dumps the byte at `$0653`. Costs one byte of handler `.bss` (359 -> 360).
+
+  `init_status()` is a **required** member of the `Ops` policy, not one the adapter detects.
+  Probing for it (`if constexpr (requires ...)`) compiles either way, so dropping or renaming
+  the backend getter would have silently gone back to reporting `detail = 0` with every test
+  still green; it is now a compile error instead. The byte is zero-extended into the signed
+  `NetError::detail`, so a raw DSTATS stays positive (`$90` -> 144, not -112).
+
+  Covered under mos-sim: the guard arm returns before the DCB fill, so
+  `test_netstream_init_prepare` drives the real `_ns_init_netstream`, and
+  `test_netstream_adapter_lifecycle` asserts the adapter propagates the backend's byte
+  (a second failure with a different reason, to separate propagation from a constant),
+  zero-extends it, and clears it on a successful open. The SIOV arms stay Altirra-only.
+  Both halves are mutation-proven: dropping the handler's status write, swapping the two
+  sentinels, dropping the adapter's propagation, reporting a constant, and sign-extending
+  each fail the intended arm.
+
+### Fixed
+- **The raster vector was written non-atomically against its own interrupt.**
+  `Hal::set_raster_vector` (`engine/platform/atari/hal.h`) wrote VDSLST as two bare
+  stores. VDSLST is read by ANTIC to enter a DLI, which is an unmaskable NMI, so a DLI
+  landing between the stores took a *hybrid* address — the low byte of one vector with
+  the high byte of the other, a value neither writer can produce — and jumped to it.
+  Reported by ATank with the evidence read out of a wedged machine: VDSLST = `$4574` =
+  `lo(edge_dli_terminal $4474) : hi(the game's raw hook $452B)`. The NMI entered an
+  ordinary compiled function mid-body with no prologue; its `rts` popped two of the
+  NMI's three pushed bytes as a return address, and the skipped setup ran a row loop
+  against the interrupted thread's zero page (verified byte-for-byte, 24 of 24 rows).
+  Fatal roughly once a minute of display time, and it looked like anything but an
+  engine fault. The write is now bracketed in `NmiGuard`, the primitive added for
+  exactly this hazard; both VDSLST and NMIEN are volatile, so neither store can be
+  moved out of the guarded region. Masking the VBI as well costs nothing — every
+  caller already runs with this frame's VBI taken.
+  **This was never ATank-specific**: the sprite multiplexer's zone-boundary hook is raw
+  by construction (ADR-019), so the exposure was the engine's own default path above
+  four sprites.
+  A/B-proven on **both emulators** with a probe that places the two legal vectors and
+  *both* of their hybrids on stubs of its own, so a tear lands on a counter instead of
+  on whatever code the hybrid address hits
+  (`tests/backends/atari/raster_vector_tear_altirra_probe.cpp`, target
+  `raster_vector_tear_probe`). Over 180 frames of hammering: unguarded **711 tears**
+  (Altirra) / **756** (Fujisan); guarded **0 and 0**. *Superseded — see the next-but-one
+  entry:* the 11.6k and 12.6k dispatches first reported alongside were more than the
+  4,320 DLIs those runs could hold, and the zero depended on how the loop compiled.
+- **The raw chain tail could install a zero vector** — the address-zero variant of the
+  same defect. `prepare_chain` filled `next_lo_`/`next_hi_` only for live slots, so on a
+  one-hook chain `next_[1]` was `0`. The C++ dispatcher re-syncs an out-of-range
+  `current_` at its head, but a raw handler is entered directly and indexes
+  `next_*[current_]` unchecked — and `current_` is one past the end whenever a raster
+  interrupt fires before the frame service has re-armed the chain. The tail then wrote
+  the vector as zero and the next interrupt jumped to address zero. Every unused entry
+  is now the terminal, including the spare one past capacity, so any reachable index is
+  harmless: the chain ends early for that frame instead of running off.
+  `next_raster_addr()`, the portable mirror of that tail, carries the same clamp.
+  Bounds-checking the tail itself was rejected — see the ADR-019 addendum. Costs nothing
+  at interrupt time, and nothing measurable in size (`atari_hw_test` is 9,341 B either
+  way).
+- **The raster-vector guard now fits its client, and closes an interrupt-latency hole the
+  first fix only missed by luck.** ATank measured the fix above at +133 B of
+  `.text+.rodata` against the 82 it had (the counted `NmiGuard` inlined at three call sites
+  was 59 of it, the terminal-fill loop 74), so the client stopped linking. Now
+  `Hal::set_raster_vector` is out of line behind a new `NmiLeafGuard`
+  (`engine/platform/atari/nmi.h`), and a one-slot chain's fill is straight-line stores
+  behind the same `if constexpr` gate `sort_slots` already has. ATank links again: **26 B
+  free** at its default host and **10 B** at the eagle host, where it had been 51 and 70
+  over. That is ATank's own "leg G" plus the settle below (+2 B).
+  `NmiLeafGuard` is `NmiGuard` for a body of a few stores. It masks unconditionally and
+  restores only when no counted guard encloses it, so it is safe inside one and keeps no
+  count; a program that never opens an `NmiGuard` has the depth test folded away.
+  **The mask is stored twice, and the second store is the fix.** A DLI's NMI is asserted
+  on cycle 8, a disabling NMIEN write must land by cycle 8, and the CPU enters the handler
+  at the first instruction boundary from cycle 10 (Altirra Hardware Reference Manual,
+  4.8). A mask that lands one cycle late therefore lets the NMI in one instruction after
+  the store. Out of line, the vector is already in the registers, so that instruction was
+  the first VDSLST store: the hybrid again. The original fix inlined the guard, and in its
+  probe the compiler happened to put a load in that slot. Rebuilt against the re-timed
+  probe, `ebaf122` itself tears **77** times on Altirra and **110** on Fujisan, every one at
+  the call site whose mask store is followed directly by a vector store and none at the
+  site that kept a load between them. The second store is that instruction.
+  Tear probe, 180 real frames per leg, Altirra / Fujisan: no guard **471 / 477**; leaf guard
+  without the settle **258 / 289**; the same masking only the DLI **269 / 248**; `ebaf122`
+  **77 / 110**; **leaf guard with the settle 0 / 0**, with 3,239 / 3,211 dispatches in the
+  same runs.
+  The probe was also misreading its own run. It is timed by VCOUNT now, not the OS jiffy
+  clock. Called from the main thread, a guard that masks every NMI can swallow the VBI, and
+  a lost VBI is a lost jiffy, so a jiffy-timed run stretched over extra frames and counted
+  extra DLIs — ATank's unexplained ~2.5x. Jiffies are still reported: the unguarded and
+  DLI-only legs see 180 of 180, the full-mask legs 119–172. This does not arise in the
+  engine, whose callers already run inside the VBI.
+  Mutation-proven, 22/22 caught: guard removed / closes before the pair / spans only the low
+  byte / high byte never written / depth gate removed / mask writes the shadow / restore
+  never happens / restore gate inverted / leaf bumps the count / mask leaves the DLI armed /
+  settle removed / settle moved inside the pair; general fill removed / bound off by one /
+  filled with zero / started past the count; one-slot entry 0 or 1 dropped / gate inverted /
+  filled with zero / gate too wide; clamp removed. The structural oracle now decodes 6502
+  instructions from the entry point and adds three rules: the mask store is unconditional,
+  its value clears the DLI bit, and at least one instruction separates it from the first
+  vector store. No simulator can see the settle, so that last rule is what keeps it.
+  **Not yet changed: `NmiGuard` has the same latency hole.** Its VBXE critical sections can
+  let a VBI that was already committed run one instruction into the section. That fix
+  needs VBXE validation, so it is left for a separate change.
+- **The realtime lane discarded its transport's verdict too.** `RealtimeLane::poll()` ran
+  flush and drain and then returned `Ok` unconditionally, exactly as the session lane did,
+  so a terminal transport status never reached the caller. Nothing in that lane reports
+  `Closed` today, which is why it went unnoticed — the defect is that the verdict is
+  *discarded*, not that closure specifically is missed. Both halves now report how they
+  ended and `poll()` propagates; a `Closed` also deactivates the lane. The session lane's
+  TX half got the same treatment (only its RX half was fixed previously).
+- **`realtime_close()` left the DEVICE in stream mode** — the NETSTREAM-disable gap. The
+  device leaves stream mode when it sees the SIO COMMAND line asserted, but it only looks
+  while the MOTOR line is still asserted: its service block is gated on motor, and the
+  command check sits inside that gate. The client-side teardown deasserts motor, so once
+  it had run the device could never observe the exit and stayed streaming with its baud
+  still at the stream rate — which is what made the transport unusable for the session
+  lane afterwards. `realtime_close()` now asserts COMMAND while motor is still up, holds
+  it for the device's service loop to notice, then proceeds with teardown. Ordering is the
+  fix and is pinned by test.
+  **Not yet verified on real hardware**: the hold duration (`kDeviceReleaseFrames`) is
+  chosen with margin from the device's loop structure, not measured on a device.
+
+### Added
+- **`scripts/fujisan_probe.sh`** — a Fujisan runner for the Atari `.xex` probes, the
+  counterpart of `scripts/altirra_probe.sh`. Fujisan embeds atari800 but its Qt front end
+  ignores atari800's command-line options entirely (it boots from its saved profile), so
+  the runner drives its JSON control port on `localhost:6510` instead: `system.cold_boot`,
+  `media.load_xex`, then `debug.read_memory` to read the probe's page-6 snapshot straight
+  out of emulated RAM — no H: self-dump needed on this path. Probes are unchanged and run
+  under both emulators. Documented in
+  [documents/PLATFORM_ATARI.md](documents/PLATFORM_ATARI.md).
+- **Per-function init subsections.** Each `EDGE_INIT` function now lands in its own
+  `.edge_init.<name>` subsection, so a consumer whose free memory is fragmented can
+  distribute init code across several holes instead of needing one contiguous region.
+  A single `*(.edge_init .edge_init.*)` rule reproduces the previous behaviour exactly.
+  Splitting is free: the four subsections total 1,080 B on the dual-net demo, the same
+  as the single section (`build` 414, `init` 384, `bind_scroll_map` 170, `set_screen` 112).
+  The names are a placement contract and are documented in
+  [docs/API_DESIGN.md](docs/API_DESIGN.md).
+- **Game-owned sprite memory** (`GameConfig::sprite_memory()` / `sprite_memory_bytes`),
+  generalizing the display-program arena to the hardware sprite-graphics block. The
+  engine still writes the block and points the display hardware at it; the game owns
+  the address, the alignment, and — via the new `Core::sprite_memory_head_bytes` query —
+  the head region the display hardware never fetches, which was unreachable while the
+  block was engine-private. `Core::sprite_memory_bytes_required` and
+  `sprite_memory_alignment` complete the placement contract; the head-bytes query is
+  platform-driven and answers 0 where no such region exists.
+- **Init-only named sections (`EDGE_INIT`)** — setup-phase engine code (`Core::init`,
+  `set_screen`, `bind_scroll_map`, the backend display-program builder) can be emitted
+  into a consumer-named section that the link step places over memory the game later
+  reclaims. Opt in with `-DEDGE_INIT_SECTION=\".edge_init\"` plus a rule in the link
+  script. Measured on `atari_tank_dual_net_demo` at `-Os`: `.text` 12,448 → 11,603 with
+  `.edge_init` at 1,080 B — a **845 B** resident saving.
+  Without the define `EDGE_INIT` expands to *nothing*, deliberately not to `EDGE_COLD`:
+  these are single-call-site functions where the required `noinline` costs more than
+  out-of-lining saves (measured +235 B), so a consumer who has not arranged placement
+  pays zero. The validity contract (setup code dies when the consumer reuses the memory
+  under it) and the `-Tlink.ld` augment-don't-replace gotcha are documented in
+  [docs/API_DESIGN.md](docs/API_DESIGN.md).
+- **`GameConfig::defer_initial_screen`** (default `false`) — `Core::init()` otherwise
+  builds `InitialScreen` itself, making the first write to the game-owned display-program
+  arena engine-timed and clobbering any load-time content there (a loader-placed splash).
+  Setting it true defers that first build to the game's own `set_screen`.
+- **Game-owned display-program arena** — `GameConfig::display_program_arena()` /
+  `display_program_arena_bytes` let a game supply one block for every screen's display
+  program instead of each screen holding a private engine-owned static, so the block can
+  join an epoch union and be reused. Size it with
+  `engine::display_program_bytes<Platform, Screens>` (largest screen in the set; takes the
+  ScreenSet rather than the GameConfig, which would be circular). Measured: `.bss`
+  unchanged, with 273 B moving from engine-private to game-owned.
+
+- **Pay-for-what-you-use capacity traits on `GameConfig`**, answering ATank's size-diet
+  request. All optional, all defaulting to prior behaviour — an existing `GameConfig`
+  compiles to a byte-identical image.
+  - `uses_hw_collisions` (default `true`): a game that resolves overlaps itself stops
+    paying for the frame service's per-frame collision latch (16 register reads plus the
+    clear). `sprite_collisions()` still compiles when gated off, reporting zeroes.
+  - `session_rx_bytes` / `session_tx_bytes` / `session_max_message` (defaults 256/256/128):
+    the session lane's buffers are sized per direction, so a narrow protocol stops
+    carrying storage for a wide one. Measured −496 B `.bss` at 64/32/48.
+  - `net_lanes` (`Realtime` | `Session` | `Both`, default `Both`): declares which transport
+    lanes a binary wants storage and code for, for transports where the lanes are mutually
+    exclusive. Narrows only — selecting a lane the platform does not offer still yields no
+    lane.
+
+### Changed
+- **`max_raster_hooks` / `max_frame_hooks` are now specialization triggers, not just array
+  bounds.** They already sized the hook tables; they never specialized the code walking
+  them, so a game declaring 1/0 kept paying for 12/4 dispatch. A chain that can hold at
+  most one slot is sorted by construction — an invariant the optimiser cannot recover from
+  the runtime counter — so the insertion sort is now discarded at compile time, as is the
+  frame-hook dispatch loop at zero capacity. Measured on `atari_tank_dual_net_demo` at
+  `-Os`: declaring 1/0 returns **517 B** of `.text+.rodata` and 113 B of `.data`, where
+  before it returned 69 B. With `uses_hw_collisions = false` the package measures **616 B**.
+  See [docs/PROPOSAL_size_diet.md](docs/PROPOSAL_size_diet.md) for the full ablation.
+- **`docs/API_DESIGN.md` corrected**: it claimed `MaxRasterHooks`/`MaxFrameHooks` were
+  "template parameters on the InterruptManager, not GameConfig fields". `Core` has sourced
+  them from `GameConfig` for some time, and they are now load-bearing for image size.
+
+### Fixed
+- **`set_screen` built the display program before disabling display DMA.** Harmless with
+  per-screen statics (the outgoing program is a different object), but with a shared
+  game-owned arena the build rewrites the bytes the display hardware is still executing.
+  The blank now precedes the build.
+
 ## [0.10.0] - 2026-08-14
 
 ### Added

@@ -91,6 +91,29 @@ inline u16 pack_fujinet_detail(u8 fn_network_error,
                             static_cast<u16>(fn_device_error));
 }
 
+// ── Read classification ───────────────────────────────────────────────
+//
+// What a non-blocking read of `result` bytes MEANS, given the transport's
+// connection flag.
+//
+// A read returning zero is ambiguous on its own: on a live connection it means
+// "nothing arrived yet"; on a dead one it means "the peer is gone". Only the
+// connection flag separates them, which is why it belongs in this decision
+// rather than sitting beside it as a diagnostic. Mapping zero to WouldBlock
+// unconditionally makes a closed connection indistinguishable from an idle one —
+// the drain stops as if it had caught up, the adapter stays connected, and a
+// consumer whose only disconnect test is session_connected() spins forever.
+//
+// Kept outside the fujinet-lib gate, and pure, so the mapping can be tested
+// without the library or a device.
+enum class ReadClass : u8 { Data, Idle, Closed, Error };
+
+constexpr ReadClass classify_read(i16 result, u8 conn) {
+    if (result > 0) return ReadClass::Data;
+    if (result < 0) return ReadClass::Error;
+    return (conn != 0) ? ReadClass::Idle : ReadClass::Closed;
+}
+
 struct FujinetLibSessionAdapter {
     static constexpr u16 device_spec_capacity() { return kTcpDeviceSpecCapacity; }
 
@@ -316,12 +339,23 @@ struct FujinetLibSessionAdapter {
             s.last_bw = fn_network_bw;
             s.last_conn = fn_network_conn;
 
-            if (result > 0) {
+            const ReadClass rc = classify_read(result, s.last_conn);
+            if (rc == ReadClass::Data) {
                 s.rx_stage_len = static_cast<u16>(result);
-            } else if (result == 0) {
+            } else if (rc == ReadClass::Idle) {
                 s.last_error.status = NetStatus::WouldBlock;
                 s.last_error.detail = 0;
                 return NetStatus::WouldBlock;
+            } else if (rc == ReadClass::Closed) {
+                // Zero bytes with the connection flag down is EOF, not idleness.
+                // Drop the adapter's connected flag here so session_connected()
+                // and session_poll() agree with what the transport just reported —
+                // otherwise the consumer's only disconnect test never fires.
+                s.connected = false;
+                s.last_error.status = NetStatus::Closed;
+                s.last_error.detail = pack_fujinet_detail(s.last_fn_error,
+                                                          s.last_device_error, 0);
+                return NetStatus::Closed;
             } else {
                 u8 err_code = -static_cast<i8>(result);
                 s.last_error.status = map_fn_error(err_code);

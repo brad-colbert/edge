@@ -1758,17 +1758,202 @@ keeping overhead to ~20-30 cycles.
 ### Interrupt Manager Configuration
 
 MaxRasterHooks and MaxFrameHooks are template parameters on the
-InterruptManager, not GameConfig fields:
+InterruptManager, and `Core` sources them from GameConfig:
 
 ```cpp
-// Engine default: 12 raster-hook slots, 4 frame hooks
-// Override if your game needs more or fewer:
+struct GameConfig {
+    static constexpr uint8_t max_raster_hooks = 1;   // engine default 12
+    static constexpr uint8_t max_frame_hooks  = 0;   // engine default 4
+};
+```
+
+To instantiate the manager directly (tests, bespoke wiring) the
+parameters are still positional:
+
+```cpp
 using MyInterrupts = engine::InterruptManager<Platform, 16, 2>;
 ```
 
 Memory cost: `MaxRasterHooks * 8 + MaxFrameHooks * 2 + 44` bytes RAM
 plus 2 bytes of zero page. For defaults (12 raster hooks, 4 frame hooks):
 approximately 152 bytes RAM.
+
+These capacities are *specialization triggers*, not just array bounds.
+Declaring `max_raster_hooks = 1` discards the chain's insertion sort
+outright — a one-slot chain is sorted by construction, an invariant the
+optimiser cannot recover from the runtime counter. Declaring
+`max_frame_hooks = 0` discards the frame-hook dispatch loop. Neither is
+a micro-optimisation: on a real image the pair measures ~517 bytes of
+code (docs/PROPOSAL_size_diet.md).
+
+### Init-Only Named Sections
+
+Setup-phase engine code — `Core::init`, `set_screen`, `bind_scroll_map`, and the
+backend display-program builder — can be emitted into a named section that the
+consumer's link step places wherever it likes, typically over memory the game
+reclaims as data once setup is done. On a platform whose image cannot discard
+code, relocating it is the only way to get those bytes out of the resident
+budget.
+
+Opt in with the section name and add a rule for it to the link script:
+
+```
+-DEDGE_INIT_SECTION=\".edge_init\"
+```
+
+Without the define, `EDGE_INIT` expands to **nothing** — not to `EDGE_COLD`.
+These are mostly single-call-site functions where the `noinline` a named section
+requires costs more than out-of-lining saves; defaulting them to `EDGE_COLD`
+measured **+235 bytes**. A consumer who has not arranged placement pays zero.
+
+Measured on `atari_tank_dual_net_demo` at `-Os`: `.text` 12,448 → 11,603, with
+`.edge_init` carrying **1,080 bytes**. The resident saving is **845 bytes**; the
+difference is the `noinline` cost, paid once, inside the relocatable section.
+
+**The contract, which the engine cannot enforce:** code in the init section is
+valid until the consumer reuses the memory under it. Reclaiming that memory and
+then re-entering setup — most obviously another `set_screen` — jumps into
+whatever now occupies those addresses. A one-way splash→play transition is the
+safe shape; a game that returns to a menu screen later is not.
+
+**Toolchain note.** The engine's compiler driver passes `-Tlink.ld` itself. A
+consumer link script that *replaces* the default script is therefore silently
+overridden; the working approach is to **augment** the existing script with a
+rule for the init section rather than substitute a new one.
+
+### Distributing Init Code Across Fragmented Memory
+
+Each `EDGE_INIT` function is emitted into its **own** subsection, so a consumer
+whose free memory is several holes — none big enough for the whole init section —
+can place the pieces separately. The subsection names are a placement contract;
+renaming one breaks any script that names it:
+
+| subsection | contents |
+|---|---|
+| `.edge_init.init` | `Core::init` (both overloads) |
+| `.edge_init.set_screen` | `ScreenManager::set_screen` |
+| `.edge_init.bind_scroll_map` | `ScreenManager::bind_scroll_map` |
+| `.edge_init.build` | backend display-program builder |
+
+One contiguous region — identical to the old single-section behaviour:
+
+```
+*(.edge_init .edge_init.*)
+```
+
+Fragmented holes — a rule per hole:
+
+```
+hole_a : { *(.edge_init.build) *(.edge_init.set_screen) }
+hole_b : { *(.edge_init.init) }
+hole_c : { *(.edge_init.bind_scroll_map) }
+```
+
+Splitting costs nothing: measured on `atari_tank_dual_net_demo`, the four
+subsections total 1,080 B, exactly the single-section figure (`build` 414,
+`init` 384, `bind_scroll_map` 170, `set_screen` 112).
+
+### Game-Owned Sprite Memory
+
+The hardware sprite-graphics block can be supplied by the game rather than
+reserved in engine-private storage, on the same pattern as the display-program
+arena:
+
+```cpp
+alignas(Game::sprite_memory_alignment)
+static u8 g_pm_block[Game::sprite_memory_bytes_required];
+
+struct GameConfig {
+    static u8* sprite_memory() { return g_pm_block; }
+    static constexpr u16 sprite_memory_bytes = sizeof(g_pm_block);
+};
+```
+
+The engine still writes the block and still points the display hardware at it —
+what changes is who owns it, and ownership is the point. Query the layout rather
+than assuming it:
+
+| query | meaning |
+|---|---|
+| `Game::sprite_memory_bytes_required` | how large the block must be |
+| `Game::sprite_memory_alignment` | alignment the block must satisfy |
+| `Game::sprite_memory_head_bytes` | bytes at the **start** the display hardware never fetches |
+
+`sprite_memory_head_bytes` is the reclaimable region: on a platform whose sprite
+DMA begins partway into the block, everything below that point is dead space the
+engine would otherwise reserve for nothing, and a game that places the block
+itself can use it as general storage. It is **0** on a platform with no such
+region, so query it rather than hardcoding a value.
+
+Two caveats the game inherits with ownership: the block is zeroed at program
+start like any other storage, and the engine writes the live part of it every
+frame — only the head region is the game's to keep. The engine `static_assert`s
+the size but cannot check an address it does not choose.
+
+### Deferring the Initial Screen
+
+`Core::init()` brings up `InitialScreen` itself, which means the first write to
+the display-program arena is **engine-timed** — it happens inside `init()`,
+before any game code runs. A consumer whose loader places content in that same
+memory (a load-time splash image, say) loses it.
+
+```cpp
+struct GameConfig {
+    static constexpr bool defer_initial_screen = true;   // default false
+};
+```
+
+`init()` then does everything except build the initial screen, and the game
+calls `Game::set_screen<S>()` when its load-time content is spent. The frame
+service is installed and running before any screen exists, so the consumer owns
+the display until that first `set_screen` — which is the point for a load-time
+splash, but it is the consumer's display to manage until then.
+
+### Pay-for-What-You-Use Capacity
+
+Every field below is optional and defaults to current behaviour, so an
+existing GameConfig is unaffected by their existence. Each one exists
+because unused capacity was costing bytes a game could not reclaim.
+
+```cpp
+struct GameConfig {
+    // ── Interrupt capacity ──
+    static constexpr uint8_t max_raster_hooks = 1;      // default 12
+    static constexpr uint8_t max_frame_hooks  = 0;      // default 4
+
+    // ── Collision model ──
+    // false: the game resolves overlaps itself (software AABB, tile
+    // lookup) and the frame service stops latching + clearing the
+    // hardware collision banks every frame. sprite_collisions() still
+    // compiles; it reports all zeroes.
+    static constexpr bool uses_hw_collisions = false;   // default true
+
+    // ── Session lane capacity, per direction ──
+    static constexpr uint16_t session_rx_bytes    = 64;  // default 256
+    static constexpr uint16_t session_tx_bytes    = 32;  // default 256
+    static constexpr uint16_t session_max_message = 48;  // default 128
+
+    // ── Setup sequencing ──
+    // true: init() does not build the initial screen; the game calls
+    // set_screen<S>() itself once any load-time content living in engine-
+    // written memory (e.g. the display-program arena) is spent.
+    static constexpr bool defer_initial_screen = true;  // default false
+
+    // ── Transport lanes ──
+    // Which lanes this binary wants storage and code for. Narrows only:
+    // selecting a lane the platform's capability profile does not offer
+    // still yields no lane.
+    static constexpr engine::net::NetLanes net_lanes =
+        engine::net::NetLanes::Realtime;                // default Both
+};
+```
+
+`net_lanes` matters on transports where the lanes are mutually exclusive
+(one lane taking the serial vectors the other needs). A game that runs
+them in sequence rather than concurrently, and that can build a separate
+binary per phase, names the single lane each binary needs and lets the
+linker drop the other. A game shipping one binary that uses both lanes
+leaves the field unset.
 
 ### Frame Hooks
 

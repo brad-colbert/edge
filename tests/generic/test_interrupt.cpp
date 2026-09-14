@@ -250,6 +250,138 @@ static void test_frame_hooks() {
     CHECK(im.frame_hook_count() == 1);
 }
 
+// ── Unused next_ entries hold the terminal, never zero ────────────────
+//
+// The backend's chain tail is shared by RAW handlers, and a raw handler — unlike the
+// C++ dispatcher, which resyncs an out-of-range index at its head — is entered by the
+// hardware directly and indexes next_*[current_] with no check. current_ sits one past
+// the end whenever a raster interrupt fires before the frame service re-armed the
+// chain. Left zero, that entry made the tail install 0000 and the next interrupt
+// jumped to address zero (observed on ATank, 2026-08-30, with next_[1] == 0 read out
+// of the wedged machine). Every entry the chain does not use must be the terminal.
+
+static bool is_terminal(const IM& im, u8 i) {
+    return im.next_lo(i) == (MockHal::TERMINAL & 0xFF) &&
+           im.next_hi(i) == (MockHal::TERMINAL >> 8);
+}
+
+// The one-hook chain — the exact shape that sent the walk to address zero.
+static void test_next_table_one_hook_is_not_zero() {
+    IM im;
+    im.add_raster_hook(50, h_a);
+    im.prepare_chain();
+
+    CHECK(is_terminal(im, 0));                              // the only live slot
+    CHECK((im.next_lo(1) | im.next_hi(1)) != 0);            // NOT address zero
+    CHECK(is_terminal(im, 1));                              // the tail's stale index
+    // ...and so is every remaining entry, up to and INCLUDING the spare one past
+    // capacity, which is the highest index a raw tail can reach.
+    for (u8 i = 1; i <= IM::capacity(); ++i) CHECK(is_terminal(im, i));
+}
+
+// No hooks at all: nothing is live, so index 0 is a terminal too.
+static void test_next_table_empty_chain() {
+    IM im;
+    im.prepare_chain();
+    for (u8 i = 0; i <= IM::capacity(); ++i) CHECK(is_terminal(im, i));
+}
+
+// A chain filled to capacity still terminal-fills the spare entry past the last slot
+// — the case a `< MaxRasterHooks` bound would leave at zero.
+static void test_next_table_full_capacity_spare() {
+    IM im;
+    for (u8 i = 0; i < IM::capacity(); ++i)
+        im.add_raster_hook(static_cast<u8>(10 + i * 4), h_a);
+    im.prepare_chain();
+
+    CHECK(im.raster_hook_count() == IM::capacity());
+    CHECK(is_terminal(im, static_cast<u8>(IM::capacity() - 1)));  // last live slot
+    CHECK(is_terminal(im, IM::capacity()));                       // the spare
+}
+
+// A SHRINKING chain must not leave the previous build's live entries behind. A stale
+// dispatcher address at a reachable index is the same defect wearing a plausible
+// value instead of zero.
+static void test_next_table_shrink_clears_stale() {
+    IM im;
+    im.add_raster_hook(10, h_a);
+    im.add_raster_hook(20, h_b);
+    im.add_raster_hook(30, h_c);
+    im.prepare_chain();
+    CHECK(im.next_lo(0) == (MockHal::DISPATCH & 0xFF));   // slots 0,1 chain onward
+    CHECK(im.next_lo(1) == (MockHal::DISPATCH & 0xFF));
+
+    im.remove_raster_hook(20);
+    im.remove_raster_hook(30);
+    im.prepare_chain();
+
+    CHECK(im.raster_hook_count() == 1);
+    CHECK(is_terminal(im, 0));
+    CHECK(is_terminal(im, 1));                            // was DISPATCH
+    CHECK(is_terminal(im, 2));
+}
+
+// ── The one-slot chain takes its own fill ─────────────────────────────
+//
+// A manager that can hold a single slot swaps the fill loop for straight-line stores
+// (the size of the loop, not its behaviour, is the reason). Those stores must
+// reproduce the loop's writes exactly for both chains a one-slot manager can build,
+// empty and one live slot. The index set is {0, 1} -- the lone slot and the spare
+// past it. (The one-to-empty transition is not a separate case: every entry of a
+// one-slot table is the terminal after any build, so it cannot discriminate.)
+using IM1 = engine::InterruptManager<MockPlatform, 1, 1>;
+
+static bool is_terminal1(const IM1& im, u8 i) {
+    return im.next_lo(i) == (MockHal::TERMINAL & 0xFF) &&
+           im.next_hi(i) == (MockHal::TERMINAL >> 8);
+}
+
+static void test_one_slot_fill() {
+    // Empty, on a fresh manager: nothing else wrote entry 0, so the fill must.
+    {
+        IM1 im;
+        im.prepare_chain();
+        CHECK(IM1::capacity() == 1);
+        CHECK(is_terminal1(im, 0));
+        CHECK(is_terminal1(im, 1));
+    }
+    // One live slot: entry 0 is its onward link, entry 1 the stale index a raw tail
+    // reads when it fires before the chain was re-armed.
+    {
+        IM1 im;
+        im.add_raw_raster_hook(50, h_a);
+        im.prepare_chain();
+        CHECK(im.raster_hook_count() == 1);
+        CHECK(im.first_handler_addr() == faddr(h_a));
+        CHECK(is_terminal1(im, 0));
+        CHECK((im.next_lo(1) | im.next_hi(1)) != 0);     // NOT address zero
+        CHECK(is_terminal1(im, 1));
+    }
+}
+
+// next_raster_addr() — the portable mirror of the raw tail. In range it walks the
+// chain; at or past the live count it yields the terminal and the index stops
+// climbing, so a hook that keeps firing can never walk off the table.
+static void test_next_raster_addr_clamps() {
+    IM im;
+    im.add_raster_hook(10, h_a);        // C++
+    im.add_raw_raster_hook(20, h_b);    // raw
+    im.prepare_chain();
+    CHECK(im.chain_index() == 0);
+
+    CHECK(im.next_raster_addr() == faddr(h_b));         // slot 0 -> the raw slot 1
+    CHECK(im.next_raster_addr() == MockHal::TERMINAL);  // slot 1 -> end of chain
+
+    // Now out of range: the first such call parks the index one past the live count,
+    // and every call after it reads the same terminal entry and leaves it there.
+    CHECK(im.next_raster_addr() == MockHal::TERMINAL);
+    const u8 saturated = im.chain_index();
+    for (u8 k = 0; k < 8; ++k) {
+        CHECK(im.next_raster_addr() == MockHal::TERMINAL);
+        CHECK(im.chain_index() == saturated);           // index no longer climbs
+    }
+}
+
 int main() {
     test_sort_and_tables();
     test_raw_next_entry();
@@ -259,6 +391,12 @@ int main() {
     test_prepare_chain_arms();
     test_arm_dispatch();
     test_frame_hooks();
+    test_next_table_one_hook_is_not_zero();
+    test_next_table_empty_chain();
+    test_next_table_full_capacity_spare();
+    test_next_table_shrink_clears_stale();
+    test_one_slot_fill();
+    test_next_raster_addr_clamps();
 
     if (g_failures == 0) {
         printf("ALL TESTS PASSED\n");

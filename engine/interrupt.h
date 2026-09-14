@@ -188,8 +188,13 @@ public:
     // Invoke every registered frame hook in registration order. The engine's frame
     // service (engine/core.h) calls this as the final step of the per-frame
     // sequence (ARCHITECTURE.md "Data Flow Per Frame" — user frame hooks).
+    //
+    // A game that declares MaxFrameHooks == 0 pays nothing: the dispatch loop is
+    // discarded at compile time rather than executing zero iterations, so neither
+    // the loop nor the indirect call survives in the frame service.
     void run_frame_hooks() const {
-        for (u8 i = 0; i < hook_count_; ++i) hooks_[i]();
+        if constexpr (MaxFrameHooks == 0) return;
+        else for (u8 i = 0; i < hook_count_; ++i) hooks_[i]();
     }
 
     // ── Chain construction ──
@@ -205,7 +210,11 @@ public:
         // stale DLI bits and disable raster.
         if (total_count_ == 0 && last_prepared_count_ == 0) return;
         last_prepared_count_ = total_count_;
-        sort_slots();
+        // A chain that can hold at most one slot is sorted by construction. The
+        // bound is a compile-time invariant (total_count_ <= MaxRasterHooks) the
+        // optimiser cannot recover from the runtime counter, so state it here: on a
+        // single-hook game this discards the whole insertion sort.
+        if constexpr (MaxRasterHooks > 1) sort_slots();
 
         const u16 dispatcher = Platform::hal::raster_dispatch_addr();
         const u16 terminal   = Platform::hal::raster_terminal_addr();
@@ -223,6 +232,42 @@ public:
             next_hi_[i] = hi(nxt);
 
             lines[i] = chain_[i].scanline;
+        }
+
+        // Terminal-fill every entry the live chain does not use, INCLUDING the spare
+        // one past capacity. The backend's chain tail is shared by RAW handlers, and
+        // a raw handler -- unlike the C++ dispatcher, which resyncs an out-of-range
+        // index at its head -- is entered by the hardware directly and indexes
+        // next_*[current_] with no check at all. current_ is one past the end
+        // whenever a raster interrupt fires before the frame service has re-armed the
+        // chain (a service that overruns into the visible region past an early hook's
+        // scanline). Left zero, that entry made the tail install a zero as the next
+        // vector and the following raster interrupt jumped to address zero. Filling
+        // with the terminal makes every reachable index harmless: the chain ends
+        // early for that one frame instead of running off.
+        //
+        // The bound is exact, not defensive. A raw handler is reached at index i only
+        // because next_*[i-1] named it, and only live slots name a handler, so
+        // i <= total_count_ <= MaxRasterHooks -- which is why next_* carries one
+        // entry more than the chain can hold.
+        //
+        // A one-slot chain gets the same writes as straight-line stores, gated like
+        // sort_slots and for the same reason: the optimiser cannot bound a trip count
+        // that starts from the runtime counter, so the general loop costs a real loop
+        // to write at most four constant bytes. The reachable indices are 0 and 1, and
+        // entry 0 is unused only when the chain is empty.
+        if constexpr (MaxRasterHooks == 1) {
+            if (total_count_ == 0) {
+                next_lo_[0] = lo(terminal);
+                next_hi_[0] = hi(terminal);
+            }
+            next_lo_[1] = lo(terminal);
+            next_hi_[1] = hi(terminal);
+        } else {
+            for (u8 i = total_count_; i <= MaxRasterHooks; ++i) {
+                next_lo_[i] = lo(terminal);
+                next_hi_[i] = hi(terminal);
+            }
         }
 
         // The backend's raster vector is pointed here by the frame service; current_ starts at 0.
@@ -274,11 +319,17 @@ public:
 
     // Helper for raw handlers: the address to install as the next raster vector.
     // Returns next_*[current_] and advances the chain index.
+    //
+    // The C++ mirror of the backend's raw chain tail, and it carries the same clamp
+    // the tail gets from prepare_chain's terminal fill: an index at or past the live
+    // slot count reads the terminal entry rather than walking off the table, so a
+    // hook that fires before the frame service re-armed the chain ends the chain for
+    // the frame instead of installing a garbage vector.
     u16 next_raster_addr() {
-        const u16 a = static_cast<u16>(next_lo_[current_]) |
-                      (static_cast<u16>(next_hi_[current_]) << 8);
-        ++current_;
-        return a;
+        const u8 i = (current_ < total_count_) ? current_ : total_count_;
+        current_ = static_cast<u8>(i + 1);
+        return static_cast<u16>(next_lo_[i]) |
+               (static_cast<u16>(next_hi_[i]) << 8);
     }
 
     // ── Queries ──
@@ -286,6 +337,9 @@ public:
     u8 static_raster_hook_count() const { return static_count_; }
     static constexpr u8 capacity() { return MaxRasterHooks; }
     u8 frame_hook_count() const { return hook_count_; }
+
+    // Position of the chain walk: the slot the next raster interrupt will service.
+    u8 chain_index() const { return current_; }
 
     // Direct table access (for the dispatcher and for tests).
     const RasterSlot& slot(u8 i) const { return chain_[i]; }
@@ -358,7 +412,10 @@ private:
     u8 next_lo_[MaxRasterHooks + 1] = {};
     u8 next_hi_[MaxRasterHooks + 1] = {};
 
-    void (*hooks_[MaxFrameHooks])() = {};
+    // One spare entry when the game declares zero frame hooks: a zero-length array
+    // is a compiler extension, and add_frame_hook's capacity check already makes the
+    // slot unreachable, so the table costs one pointer and no code.
+    void (*hooks_[MaxFrameHooks ? MaxFrameHooks : 1])() = {};
     u8 hook_count_ = 0;
 
     u16 first_entry_ = 0;

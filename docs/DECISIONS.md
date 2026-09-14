@@ -842,6 +842,43 @@ User C++ DLI handlers have limited useful cycle budget.
 Documentation must be clear about the overhead and when to
 switch to raw handlers.
 
+**Addendum (chain-index safety on the raw path, 2026-09-03):**
+The dispatcher re-syncs an out-of-range `current_` at its head;
+a raw handler is entered by ANTIC directly and never passes that
+check, so it reads `next_*[current_]` unguarded. `current_` sits
+one past the end whenever a DLI fires before the frame service
+has re-armed the chain, and the entry there used to be zero — so
+the shared tail installed VDSLST = $0000 and the next DLI jumped
+to zero page. Bounds-checking the tail was rejected: it is the
+hot path this ADR exists to keep lean, and the check would cost
+~7 cycles on every hook of every frame, including the
+multiplexer's zone-boundary hook that must stay under one mode
+line. Instead `prepare_chain` terminal-fills every unused
+`next_*` entry (`engine/interrupt.h`), which costs nothing at
+interrupt time and turns the case from a wild jump into a chain
+that ends early for one frame. The asymmetry is deliberate: the
+C++ path re-syncs and keeps the rest of the chain in step, the
+raw path drops the remainder. Reaching an index past the last
+entry is impossible by construction — a raw handler runs at
+index `i` only because `next_*[i-1]` named it — which is why
+`next_*` carries exactly one entry more than the chain can hold.
+
+**Addendum (the guarded vector write, sized and settled, 2026-09-13):**
+The VDSLST pair write stays out of line, not inlined into
+`prepare_chain` and `rearm_delivery`. Both callers are frame-service
+code and never run inside a DLI, so the `jsr` is not on the path this
+ADR protects, and inlining a guard at every caller cost a client its
+link (ATank: 59 B). The write takes `NmiLeafGuard`, not `NmiGuard`,
+because it is a leaf: two stores that open no guard and call nothing.
+The leaf guard stores its mask twice. The second store settles the
+mask against a DLI that ANTIC asserted before the first store
+landed: that NMI is taken one instruction after a late mask store,
+which without the settle is inside the pair. No simulator can see
+this, so a structural oracle in `test_atari_interrupt` requires it.
+The one-slot terminal fill is specialised under the same
+`MaxRasterHooks` gate as the sort, for size alone: identical writes
+and invariant.
+
 ---
 
 ## ADR-020: Non-Capturing Lambdas Only for C++ Raster-Hook Handlers

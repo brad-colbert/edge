@@ -279,7 +279,31 @@ struct Hal {
 
     // Point the OS DLI vector (os::VDSLST, $0200/1) at the chain head the VBI
     // computed; the dispatcher rewrites it mid-frame as it walks the chain.
-    static void set_raster_vector(uint16_t a) {
+    //
+    // The pair MUST be written with the DLI masked. VDSLST is two bytes and its
+    // reader is an unmaskable NMI, so a DLI landing between the stores takes a
+    // HYBRID vector -- the low byte of one address with the high byte of the other,
+    // a value neither writer can produce -- and jumps to it. Captured on a wedged
+    // machine (ATank, 2026-08-30): VDSLST = $4574 = lo(terminal $4474) : hi(raw hook
+    // $452B). The NMI entered an ordinary compiled function mid-body with no
+    // prologue; its `rts` popped two of the NMI's three pushed bytes as a return
+    // address, and the skipped setup ran a row loop against the interrupted thread's
+    // zero page. The window is the few cycles between the two `sta abs` and this runs
+    // twice a frame, so it lands on the order of once a minute of display time.
+    //
+    // The mask is NmiLeafGuard (nmi.h): the NMI cannot fire inside its scope, and
+    // under an enclosing NmiGuard it leaves the restore to the outer scope. Both
+    // os::VDSLST and reg::NMIEN are volatile, so neither store may be hoisted or sunk
+    // out of the guarded region. Masking the VBI too costs nothing here -- every
+    // caller (prepare_chain and rearm_delivery, from the frame service; shutdown, from
+    // the main thread on the way out) already runs with this frame's VBI taken.
+    //
+    // Out of line and leaf-guarded for size (ATank, 2026-09-12): the counted guard
+    // inlined at all three call sites cost 59 bytes a client did not have. Neither
+    // choice touches the interrupt path -- this runs from the frame service and
+    // shutdown, never from inside a DLI.
+    [[gnu::noinline]] static void set_raster_vector(uint16_t a) {
+        NmiLeafGuard g;
         os::VDSLST[0] = static_cast<uint8_t>(a & 0xFF);
         os::VDSLST[1] = static_cast<uint8_t>(a >> 8);
     }
@@ -409,6 +433,12 @@ struct Hal {
     // arms the GTIA P/M latches. Full DMACTL P/M-DMA bit setup arrives with the
     // live display path.
     static constexpr uint16_t sprite_area_bytes = 2048;
+    // Bytes at the START of the sprite area that the display hardware never
+    // fetches in the single-line layout: P/M DMA begins at the missile strip
+    // (pm_missile_base), so everything below it is dead space the engine would
+    // otherwise reserve for nothing. Exposed so a game that supplies its own
+    // sprite-memory block can use this head region as general storage.
+    static constexpr uint16_t sprite_area_head_bytes = atari::pm_missile_base(true);
     static void set_sprite_base(uint8_t page) { *reg::PMBASE = page; }
     // Latch the GTIA P/M DMA (GRACTL, a chip register the OS does not shadow) and
     // OR the P/M DMA bits into SDMCTL alongside whatever DL/playfield bits the
