@@ -64,6 +64,11 @@
 #define NS_DBYTHI     0x0309
 #define NS_DAUX1      0x030A
 #define NS_DAUX2      0x030B
+; nsInitStatus sentinels for the two failures that never reach SIOV. Real SIO
+; DSTATS failure codes are all >= 0x8A ($8A timeout, $8B NAK, $8F checksum,
+; $90 device error), so these low values cannot collide with a raw DSTATS byte.
+#define NS_INIT_ST_GUARD    0x02  // init called while already streaming
+#define NS_INIT_ST_PREPARE  0x03  // bad host, or baud absent from BaudTable
 
 ;==========================================================================
 ; Handler tunables (buffer sizes / payload limits)

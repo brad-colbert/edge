@@ -11,6 +11,35 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
 
 ## [Unreleased]
 
+### Added
+- **The realtime lane now reports *why* an open failed.** `Ops::init` reduced every
+  failure to a single "1", and the adapter discarded even that — `last_error()` came back
+  as `TransportError` with `detail = 0` for a bad hostname, a bus NAK and a corrupted data
+  frame alike, so `demo/tank_dual_net`'s red "NO NET" border carried no information and a
+  real transport fault could only be identified by reading the firmware's own log. The
+  handler now keeps the SIO `DSTATS` byte it already re-reads (`nsInitStatus`, one byte of
+  `.bss`) and exposes it as `_ns_get_init_status()`, which the adapter puts in
+  `NetError::detail`: `$01` success, `$8A` timeout, `$8B` NAK, `$8F` checksum, `$90` device
+  error, plus `$02` (init while already streaming) and `$03` (bad host / baud absent from
+  `BaudTable`) for the two failures that return before SIOV. Real DSTATS failure codes are
+  all `>= $8A`, so the low sentinels cannot collide. `netstream_datapath_altirra_probe`
+  dumps the byte at `$0653`. Costs one byte of handler `.bss` (359 -> 360).
+
+  `init_status()` is a **required** member of the `Ops` policy, not one the adapter detects.
+  Probing for it (`if constexpr (requires ...)`) compiles either way, so dropping or renaming
+  the backend getter would have silently gone back to reporting `detail = 0` with every test
+  still green; it is now a compile error instead. The byte is zero-extended into the signed
+  `NetError::detail`, so a raw DSTATS stays positive (`$90` -> 144, not -112).
+
+  Covered under mos-sim: the guard arm returns before the DCB fill, so
+  `test_netstream_init_prepare` drives the real `_ns_init_netstream`, and
+  `test_netstream_adapter_lifecycle` asserts the adapter propagates the backend's byte
+  (a second failure with a different reason, to separate propagation from a constant),
+  zero-extends it, and clears it on a successful open. The SIOV arms stay Altirra-only.
+  Both halves are mutation-proven: dropping the handler's status write, swapping the two
+  sentinels, dropping the adapter's propagation, reporting a constant, and sign-extending
+  each fail the intended arm.
+
 ### Fixed
 - **The raster vector was written non-atomically against its own interrupt.**
   `Hal::set_raster_vector` (`engine/platform/atari/hal.h`) wrote VDSLST as two bare

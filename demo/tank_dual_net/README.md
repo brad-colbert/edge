@@ -67,6 +67,18 @@ type, no extra round-trip:
 > aligned drop-oldest). Older firmware byte-drops the unframed stream and desyncs the
 > adversaries. Same constraint as `demo/tank_net`.
 
+> **Set `hsioindex=-1` in fujinet-pc's `fnconfig.ini`** (the firmware's own compiled
+> default) for the `LiveSession` build. Phase 1 makes fujinet-lib negotiate high-speed SIO,
+> which leaves the Atari at a POKEY rate the firmware never followed; the Phase-2 netstream
+> ENABLE then has its 64-byte payload deliberately corrupted by NetSIO's baud-mismatch
+> check, and Phase 2 fails with a red **"NO NET"** border and five `ERROR!` lines in the
+> firmware log. A *valid* index does not help — only disabling HSIO stops the negotiation.
+> Costs a slower Phase-1 download. Unique to this demo: it is the only one that runs a
+> session before the realtime open. Full mechanism in
+> [`documents/PLATFORM_ATARI.md`](../../documents/PLATFORM_ATARI.md) ("Netstream Mode B
+> emulator validation"). If it does fail, `Game::net.realtime.last_error().detail` now
+> reports the reason (`$8F` = checksum, i.e. exactly this).
+
 ## Phase-1 asset source (`EDGE_TANK_DUAL_ASSET_SOURCE`)
 
 | Value | Phase 1 | fujinet-lib? | Server? |

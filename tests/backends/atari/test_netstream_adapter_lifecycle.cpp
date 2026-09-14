@@ -26,6 +26,7 @@ struct FakeOps {
     static uint16_t last_baud;
     static uint16_t last_port;
     static uint8_t  init_rc;      // scripted init result (0 = success, 1 = failure)
+    static uint8_t  init_why;     // scripted init_status() byte (raw DSTATS or sentinel)
     static uint8_t  status_val;   // scripted get_status byte
     static int init_calls, begin_calls, end_calls, status_calls, settle_calls;
     static int release_calls, release_seq, end_seq, seq_counter;
@@ -46,6 +47,9 @@ struct FakeOps {
         last_host = host; last_flags = flags; last_baud = baud; last_port = port;
         ++init_calls; return init_rc;
     }
+    // Required by the Ops policy: why the last init returned as it did. init() alone
+    // collapses every failure to 1, so the adapter reads this for NetError::detail.
+    static uint8_t init_status() { return init_why; }
     static void    begin()  { ++begin_calls; }
     static void    end()    { ++end_calls; end_seq = seq_counter++; }
     // Device-side stream exit. Ordering witness: it MUST run before end(), because
@@ -72,6 +76,7 @@ uint8_t  FakeOps::last_flags = 0;
 uint16_t FakeOps::last_baud = 0;
 uint16_t FakeOps::last_port = 0;
 uint8_t  FakeOps::init_rc = 0;
+uint8_t  FakeOps::init_why = 0;
 uint8_t  FakeOps::status_val = 0;
 int FakeOps::init_calls = 0, FakeOps::begin_calls = 0, FakeOps::end_calls = 0,
     FakeOps::status_calls = 0, FakeOps::settle_calls = 0;
@@ -197,6 +202,7 @@ int main() {
     // ----- open init failure: TransportError, inactive, begin NOT called -----
     {
         FakeOps::init_rc = 1;
+        FakeOps::init_why = 0x8F;  // raw DSTATS: checksum (the baud-mismatch signature)
         const int begin_before = FakeOps::begin_calls;
         const int settle_before = FakeOps::settle_calls;
         CHECK(A::realtime_open_udp_seq(host, 1234, 1) == n::NetStatus::TransportError);
@@ -204,6 +210,45 @@ int main() {
         CHECK(FakeOps::begin_calls == begin_before);    // begin not entered on init failure
         CHECK(FakeOps::settle_calls == settle_before);  // settle not entered either
         CHECK(A::realtime_last_error().status == n::NetStatus::TransportError);
+        // The WHY reaches the caller. Without this the red "NO NET" border is all the
+        // caller ever sees, and a bad host looks exactly like a corrupted data frame.
+        CHECK(A::realtime_last_error().detail == 0x8F);
+    }
+
+    // ----- init failure detail is the backend's byte, not a constant -----
+    // Distinguishes real propagation from "always reports the same thing": a second
+    // failure with a different backend reason must report THAT reason.
+    {
+        FakeOps::init_rc = 1;
+        FakeOps::init_why = 0x02;  // guard: init called while already streaming
+        CHECK(A::realtime_open_udp_seq(host, 1234, 1) == n::NetStatus::TransportError);
+        CHECK(A::realtime_last_error().detail == 0x02);
+    }
+
+    // ----- the byte is zero-extended into the signed field, not sign-extended -----
+    // detail is i16; every real DSTATS failure code has bit 7 set, so a sign-extending
+    // conversion would report $90 as -112 and no caller could match it against the
+    // documented codes.
+    {
+        FakeOps::init_rc = 1;
+        FakeOps::init_why = 0x90;  // device error
+        CHECK(A::realtime_open_udp_seq(host, 1234, 1) == n::NetStatus::TransportError);
+        CHECK(A::realtime_last_error().detail == 144);   // NOT -112
+        CHECK(A::realtime_last_error().detail > 0);
+    }
+
+    // ----- a SUCCEEDING open does not leave a stale reason behind -----
+    {
+        FakeOps::init_rc = 0;
+        FakeOps::init_why = 0x8A;  // backend still reports the previous timeout
+        CHECK(A::realtime_open_udp_seq(host, 1234, 1) == n::NetStatus::Ok);
+        CHECK(A::realtime_last_error().status == n::NetStatus::Ok);
+        CHECK(A::realtime_last_error().detail == 0);  // cleared, not carried over
+        A::realtime_close();
+        FakeOps::init_rc = 1;  // restore the inactive-state precondition for what follows
+        FakeOps::init_why = 0;
+        CHECK(A::realtime_open_udp_seq(host, 1234, 1) == n::NetStatus::TransportError);
+        CHECK(!A::realtime_active());
     }
 
     // ================= 9R.2 data path (TX all-or-nothing / RX full-packet) =================
