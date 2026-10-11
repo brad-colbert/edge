@@ -2,9 +2,12 @@
 
 **Answering:** ATank's "EDGE writeup — the size diet (pay-for-what-you-use)",
 2026-08-12 (Slice 18, Prompt 5)
-**Branch:** `size_diet`
+**Branch:** `size_diet`; round 2 on `size_diet_2`
 **Status:** revision 3, after ATank's stage-A field measurement. Stages A, B1 and
 C are **landed**; C's code half measures **845 B**, not the ~1,500 B estimated.
+**Round 2** (items 1-3 of ATank writeup 19's shortlist) is landed and measured —
+see "Round 2" at the end: **-973 B** on ATank's wall 1 against an estimated -930.
+
 
 ## Revision 3 — C-code measured, and it is smaller than estimated
 
@@ -299,3 +302,117 @@ which is why the demo does **not** set it.
    smaller, self-contained, and runs once rather than per frame, so it carries no
    gameplay-timing risk. If the answer to (1) is the fallback, D may be
    unnecessary entirely.
+
+## Round 2 — the shortlist from ATank writeup 19, measured
+
+**Answering:** ATank's "EDGE writeup — size diet, round 2" (2026-09-17) and its
+2026-10-10 addendum, items 1-3 of the Round-2 shortlist. Items 4-6 were out of
+scope. **Branch:** `size_diet_2`, three commits, one per item, each with its own
+ablation number.
+
+### Method, and why the baseline needed saying twice
+
+Measured on ATank itself, not on a proxy: a measurement build of ATank against this
+working tree (`build-diet2-base`), never flown, per charter §3.3. The method was
+validated first by reproducing ATank's leg of record from a worktree at the pin
+`61ce793` — `.text` 22,539 + `.rodata` 962 ending `$7BF7`, `.xex` 37,093 B, every
+figure matching the leg exactly.
+
+That reference mattered, because **the branch point does not link in ATank**.
+`b7df758` (the netstream init-status reporting, landed on `master` before this round)
+costs ATank **19 B of `.text`** and **1 B of `.bss`**, which puts `.text`+`.rodata`
+at `$7C0A` — 10 bytes *past* the charset at `$7C00`. Writeup 17 set the budget for
+the next engine commit at "fewer than 10 bytes, or return some"; that commit spent
+19 and broke the client's link. So the round-2 ledger reads: `61ce793` +9 B free ->
+`master` **10 B over** -> item 1 -> item 2 -> item 3. The diet repays it many times,
+but ATank cannot pin `master` without this branch.
+
+Five walls were tracked on every build, because code that moves between sections can
+break any of them while wall 1 improves:
+
+| wall | limit | `61ce793` | after round 2 |
+|---|---|---|---|
+| 1 `.text`+`.rodata` | `$7C00` | +9 | **+963** |
+| 2 `.data` | `$A800` | +28 | +9 |
+| 3 `.bss` | `$B578` | +2 | **+95** |
+| 4 init gap + 384 B stack | `$BC20` | +17 | **+55** |
+| 5 `.atank_hiram` | `$BFF6` | +0 | **+64** |
+
+### The three items
+
+| item | addendum estimate | measured | zone |
+|---|---|---|---|
+| 1 display-list emitters | -480 | **-517** | `.text`, init path |
+| 2 multiplexer under `Direct` | -300 | **-288** | `.text`, frame path |
+| 3 scroll geometry | -150 | **-168** | `.text`, frame path |
+| **total** | **-930** | **-973** | |
+
+**Item 1 — one emitter for every layout** (`22fde08`). `emit_lms`/`emit_load` were
+private members of `DisplayProgram<Layout>`, so each layout got its own copy, and
+each took the write index by `u16&` — every `p++` an indirect 16-bit
+read-modify-write. 682 B (226 ×2 + 230) for a three-byte-store helper. Now one
+`detail::dl_emit_load` parameterised on the index width, never on `Layout`, through a
+cursor: **165 B**, and 39 B off the placed init section as well.
+
+**Item 2 — the multiplexer under a direct binding** (`308c2d4`). The per-frame
+boundary-table build, hook registration, fire index, init-time arming and the
+frame-service "split across zones" test all compile out; `zones_`/`mux_table_` size to
+the one zone the binding can produce. Also **-94 B `.bss`** and **-64 B hiram**, the
+two walls that were full. Cost: **+19 B `.data`**, which is `Core::interrupts`
+evicted from zero page by the compiler's allocator after the change — a reshuffle,
+not new data (zero-page statics fell 45 -> 33 B; the VBI save range is unchanged at
+`[$DB,$FF]`).
+
+**Item 3 — the scroll region's geometry** (`dd79bb2`). `ScrollManager` now takes an
+`engine::ScrollGeometry` template argument that `Core` derives from the game's own
+screens. The divisors the addendum named were worth only **52 B**; the two inversion
+conventions — the same kind of runtime copy of a compile-time fact, in the same
+functions — were worth **116**, which is where the item's return actually is.
+
+### What was tried and rejected
+
+1. **Unconditional `noinline` on the shared emitter** (item 1). Correct for a
+   consumer that places init code, wrong for one that does not: `atari_tank_demo`
+   **+143 B**, `atari_mode4_geometry_probe` **+101 B**, because they inline `build()`
+   outright. Gated instead behind a new `EDGE_INIT_SHARED`, which is `EDGE_COLD` only
+   when the consumer has opted into init placement — the same measurement that keeps
+   `EDGE_INIT_FN` empty by default. Gated, every demo gains from the cursor alone.
+2. **Dropping the `Direct` staging round-trip** (item 2, ~95 B). `update_zones` stages
+   `zones_[0].hpos/color` from `sprites_`, and `commit_pm` reads them straight back
+   one step later — a copy serving no one under this binding. It was **not** removed,
+   because it is not free: the staging happens at the *end* of the previous frame's
+   service, so the X register is written from a sample one frame older than the shape
+   and Y, which `commit_pm` takes live from `sprites_`. Reading `sprites_` directly
+   would be 95 B cheaper *and* make X agree with Y — a behaviour change, out of scope
+   for a round whose contract is that nothing changes. **It is also a finding in its
+   own right: under `Direct`, a sprite's horizontal position currently lags its shape
+   and vertical position by one frame**, which shows up as a slight shear on
+   diagonally-moving sprites. Worth a deliberate decision rather than a silent fix.
+3. **Removing the backend's raw boundary handler** (item 2). It is module-level
+   assembly in the backend, so nothing garbage-collects it: with every call site gone
+   it stays in the image, unreferenced. Gating it would mean teaching the platform
+   layer about a game-level binding, which the layering does not allow.
+
+### ATank's side
+
+- **`__udivmodhi4` (248 B) is still linked.** Item 3 removed the engine's two call
+  sites, but ATank's own `menu_num` still divides, so the helper stays. Moving that
+  one site off it drops 248 B more — the ATank half of shortlist item 3, as the
+  addendum scoped it.
+- **`master` cannot be pinned as-is** (the `b7df758` 19 B above). A pin to this
+  branch's tip gets both that commit and its repayment.
+- **`atari_tank_net_demo`'s zero-page link failure is pre-existing** and unrelated:
+  it fails 3/3 at `61ce793` and at `master` in a parallel build, and links when built
+  alone. Known saturated-zero-page nondeterminism, untouched by this round.
+
+### Gates
+
+Every commit: 48/48 host tests, all demos build at `-O2`, and the ATank measurement
+build links with the item's number in the commit message. Items 2 and 3 are frame-path
+work and took the dual-emulator check round 1 used: `atari_tank_demo` — a direct-bound
+sprite over a scrolled map, exercising both items — renders **pixel-identical**
+(`compare -metric AE` = 0) to the pre-diet build on **Altirra** and on **Fujisan**,
+each capture confirmed to show the live demo rather than a blank screen. Item 3 is an
+arithmetic identity and is proven under mos-sim besides: 300 positions per
+configuration against the runtime form, both inversion conventions, a wider cell, and
+a cell height that is not a power of two. Items 2 and 3 are mutation-proven.
