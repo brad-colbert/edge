@@ -68,6 +68,7 @@
 .global _ns_get_final_flags
 .global _ns_get_final_audf3
 .global _ns_get_final_audf4
+.global _ns_get_init_status
 .global _ns_tx_space
 
 ;==========================================================================
@@ -499,13 +500,15 @@ _ns_init_netstream:
     ; --- init-while-active guard (BEFORE prepare / any nsFinal* / SIOV) ---
     lda hardwareActivated
     beq .Linit_guard_ok
+    lda #NS_INIT_ST_GUARD        ; why-code for the caller (see nsInitStatus)
+    sta nsInitStatus
     lda #1                       ; already streaming -> fail closed, nsFinal* untouched
     plp                          ; restore caller I-flag
     sec                          ; carry set AFTER plp (plp reloads carry)
     rts
 .Linit_guard_ok:
     jsr ns_init_prepare          ; DetectPAL + prepare_core; C=1 = host/baud fail (nsFinal* untouched)
-    bcs .Linit_fail
+    bcs .Linit_prepare_fail
     ; --- fill the Atari SIO DCB ($0300-$030B) for $70/$F0 enable-netstream ---
     lda #0x70
     sta NS_DDEVIC                ; $0300 device = $70 (FujiNet)
@@ -537,14 +540,18 @@ _ns_init_netstream:
     sei                          ; <-- re-mask immediately after SIOV returns
     ; --- EDGE completion check (upstream omits this) ---
     lda NS_DSTATS               ; re-read $0303 (auditable; not Y across the sei)
+    sta nsInitStatus             ; keep the RAW byte: $01 ok, >=$8A the SIO failure code
     cmp #0x01                    ; SIO success == $01
     bne .Linit_fail
     lda #0                       ; success
     plp                          ; restore caller I-flag
     clc                          ; carry clear AFTER plp
     rts
+.Linit_prepare_fail:
+    lda #NS_INIT_ST_PREPARE      ; bad host / baud not in BaudTable (never reached SIOV)
+    sta nsInitStatus
 .Linit_fail:
-    lda #1                       ; failure (prepare fail, or SIOV/DSTATS != $01)
+    lda #1                       ; failure (guard, prepare fail, or SIOV/DSTATS != $01)
     plp                          ; restore caller I-flag
     sec                          ; carry set AFTER plp
     rts
@@ -555,6 +562,20 @@ _ns_init_netstream:
 ; Output: A = cached value. Reads translated state (0 until init writes it).
 _ns_get_final_flags:
     lda nsFinalFlags
+    rts
+
+;==========================================================================
+; _ns_get_init_status
+; Output: A = why the last _ns_init_netstream returned as it did.
+;   $00        no init attempted yet
+;   $01        success (raw DSTATS)
+;   $02        guard: init called while already streaming
+;   $03        prepare failed (bad host, or baud absent from BaudTable)
+;   >= $8A     raw SIO DSTATS: $8A timeout, $8B NAK, $8F checksum, $90 device error
+; Real SIO failure codes are all >= $8A, so the low sentinels cannot collide.
+; Read-only getter; touches no hardware.
+_ns_get_init_status:
+    lda nsInitStatus
     rts
 
 _ns_get_final_audf3:
@@ -1382,6 +1403,7 @@ nsHostPtrLo:     .zero 1    ; hostname pointer lo (payload-builder SMC seed; ups
 nsHostPtrHi:     .zero 1    ; hostname pointer hi
 nsInitFlags:     .zero 1    ; caller flags seed (untouched); derived -> nsFinalFlags
 nsPayloadLen:    .zero 1    ; built payload length (=64); upstream NetstreamPayloadLen
+nsInitStatus:    .zero 1    ; why the last init returned (see _ns_get_init_status); EDGE-only
 
 ; Stage 9L hardware-lifecycle state (declared ahead of its consumers; no HW yet):
 ; serialVecSave saves vserin..vseroc before the (deferred) vector install;

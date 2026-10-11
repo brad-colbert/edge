@@ -78,6 +78,19 @@ extern uint8_t nsPortLo, nsPortHi;         // DCB daux1/daux2
 // 1 = failure. Drives the real SIOV path -- do NOT call from mos-sim tests.
 extern uint8_t _edge_ns_init_run(void);
 
+// uint8_t _ns_get_init_status(void)
+// Why the last init returned as it did. _edge_ns_init_run collapses every failure to
+// 1, which cannot distinguish a bus-level fault from a bad argument; this keeps the
+// underlying reason so callers can report it.
+//   0x00       no init attempted yet
+//   0x01       success (raw DSTATS)
+//   0x02       guard: init called while already streaming (NS_INIT_ST_GUARD)
+//   0x03       prepare failed: bad host / baud not in BaudTable (NS_INIT_ST_PREPARE)
+//   >= 0x8A    raw SIO DSTATS: 0x8A timeout, 0x8B NAK, 0x8F checksum, 0x90 device error
+// Read-only getter; safe to call after a failed init (and from mos-sim for the
+// non-SIOV paths).
+extern uint8_t _ns_get_init_status(void);
+
 // void edge_ns_begin_stream(void)
 // Starts streaming operation.
 extern void _edge_ns_begin_stream(void);

@@ -874,6 +874,37 @@ begin (`RealNetstreamOps::settle()`) so the external clock renegotiates before t
 transmit — without it the first ~5–9 stream bytes corrupt. `netstream_txirq_diag_probe` (built
 with `EDGE_NETSTREAM_TEST_HOOKS`) dumps the serial-IRQ counters if the TX path regresses.
 
+**HSIO must be disabled when a fujinet-lib session precedes the netstream open**
+(`hsioindex=-1` in fujinet-pc's `fnconfig.ini` — which is the firmware's own compiled
+default). This only bites in the two-lane order used by `demo/tank_dual_net`; the
+netstream-only demos and probes never trigger it.
+
+The failure is silent and looks nothing like a speed problem. fujinet-lib polls the **N:**
+device for the high-speed index (`CF: 71 3f`) while opening its TCP session, which arms
+`hsio_pending` in Altirra's `netsio.atdevice`. Altirra then switches both directions
+locally and *deliberately does not tell the firmware* ("would cause data corruption"), so
+Phase 1 works only because Altirra is translating. By the time the netstream `$F0` ENABLE
+goes out, `hsio_pending` has been consumed, so that clock change takes the other branch and
+**does** post the peer baud — telling a firmware still at 19200 that the Atari is at 68836
+(POKEY divisor 6). NetSIO then XOR-corrupts every byte of the 64-byte payload on purpose
+(`lib/bus/sio/NetSIO.cpp`, the ±10% `_baud_peer` vs `_baud` window), so the checksum fails
+and the firmware logs `ERROR!` five times with no hint that baud was involved. The command
+frame survives because the speed change is announced after it, so it still gets `ACK+!`.
+
+Setting a *valid* index does not help — any index still lets fujinet-lib negotiate HSIO,
+and the firmware never toggles its own bus speed for a Fuji-device transaction (unlike the
+disk device's `$3F`, which calls `toggleBaudrate()`). Nor can the link self-heal: the
+firmware's auto-baud-toggle counts only *command*-frame checksum failures, and each retry's
+command frame is valid, which resets the counter. With `hsioindex=-1` the `$3F` reply is
+`40` ("no high speed"), so the negotiation never starts and the Atari stays at 19200. The
+cost is a slower Phase-1 asset download.
+
+Diagnosing it: `Game::net.realtime.last_error().detail` now carries the reason — the raw
+SIO `DSTATS` (`$8F` checksum, `$8A` timeout, `$8B` NAK, `$90` device error), or `$02`
+(init while already streaming) / `$03` (bad host or baud absent from `BaudTable`) for the
+failures that never reach SIOV. `netstream_datapath_altirra_probe` reports the same byte at
+`$0653`.
+
 ## Current Limits
 
 - display layouts still use the Atari mode enum (`atari::Mode`) as the concrete backend token, supplied

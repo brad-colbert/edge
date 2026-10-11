@@ -36,6 +36,7 @@ namespace fujinet_netstream {
 
 using engine::u8;
 using engine::u16;
+using engine::i16;   // NetError::detail
 using engine::net::NetError;
 using engine::net::NetStatus;
 
@@ -104,6 +105,10 @@ struct RealNetstreamOps {
     static u8 init(const char* host, u8 flags, u16 baud, u16 port) {
         return edge_ns_init_netstream(host, flags, baud, port);
     }
+    // Why the last init returned as it did (raw DSTATS, or a low sentinel for the
+    // failures that never reach SIOV). init() only reports pass/fail, which is not
+    // enough to tell a bus fault from a bad argument.
+    static u8 init_status() { return _ns_get_init_status(); }
     static void begin() { _edge_ns_begin_stream(); }
     static void end()   { _edge_ns_end_stream(); }
 
@@ -184,7 +189,15 @@ struct NetstreamRealtimeAdapterT {
                                 to_netstream_port_arg(remote_port));
         if (rc != 0) {
             s.active = false;  // fail closed; nsFinal* policy handled in the backend
-            s.last_error = NetError{NetStatus::TransportError, 0};
+            // Carry the backend's reason out in `detail` rather than a bare 0: a silent
+            // "open failed" is indistinguishable between a bad host, a NAK and a
+            // corrupted data frame, and the caller has no other way to tell them apart.
+            // init_status() is a REQUIRED part of the Ops policy, not a detected one: a
+            // `requires`-guarded call would compile either way, so losing the backend
+            // getter would silently go back to reporting detail = 0. The u8 is
+            // zero-extended, so a raw DSTATS stays positive ($8F -> 143).
+            s.last_error = NetError{NetStatus::TransportError,
+                                    static_cast<i16>(Ops::init_status())};
             return NetStatus::TransportError;
         }
 

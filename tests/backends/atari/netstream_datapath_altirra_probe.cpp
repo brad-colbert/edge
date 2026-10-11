@@ -44,6 +44,7 @@ extern "C" {
     uint8_t  _edge_ns_tx_space(void);     // diagnostic only
     uint16_t _edge_ns_bytes_avail(void);  // diagnostic only
     uint8_t  _edge_ns_get_status(void);   // clears on read; post-poll may be 0
+    uint8_t  _ns_get_init_status(void);   // why init returned: raw DSTATS, or $02/$03
 }
 
 namespace nsr = atari::fujinet_netstream;
@@ -135,6 +136,10 @@ int main() {
     // clocked the buffered bytes OUT (they left the Atari -> bridge dropped them); if it
     // stayed ~113, the output IRQ never drained (transmitter not clocking in this setup).
     *(volatile uint8_t*)0x0652 = tx_postwait;
+    // Why init returned as it did: $01 on the success path, $02/$03 for the failures that
+    // never reach SIOV, else the raw DSTATS ($8A timeout / $8B NAK / $8F checksum). A
+    // baud-mismatch corruption of the 64-byte payload shows up here as $8F.
+    *(volatile uint8_t*)0x0653 = _ns_get_init_status();
 
     edge_host_dump("H1:NSDUMP.BIN", (const void*)0x0600, 0x60);
 
