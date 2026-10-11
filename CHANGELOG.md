@@ -40,6 +40,34 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
   sentinels, dropping the adapter's propagation, reporting a constant, and sign-extending
   each fail the intended arm.
 
+### Changed
+- **The display-list emitters are one shared body, not one per layout** (size diet
+  round 2, item 1). `DisplayProgram<Layout>::emit_lms` / `emit_load` were private
+  members, so every layout in a program got its own copy, and each copy took the write
+  index by `u16&` — making every `p++` an indirect 16-bit read-modify-write and every
+  table write a 16-bit-indexed store. On ATank's image that was **682 B of `.text`**
+  for a three-byte-store helper (`emit_lms` 226 ×2 + `emit_load` 230) reached only
+  from `build()`, the init path. `build()` now emits through `detail::DlCursor<Idx>`
+  and one `detail::dl_emit_load`, parameterised on the INDEX WIDTH only — never on
+  `Layout` — so every layout shares a body, and a list that fits in a page indexes
+  with a `u8`. Measured on ATank: **682 B -> 165 B of `.text`, -517 B** against wall 1
+  (`.text`+`.rodata` ends `$7A05`, 507 B free, from 10 B *over*), plus 39 B off the
+  placed init section (`build()` 254+673 -> 249+639). Zero behaviour change: the
+  emitted display-list bytes are asserted by `test_atari_display` /
+  `test_atari_scroll`, 48/48 host tests unchanged.
+
+  The out-of-lining is gated on the consumer, by the new `EDGE_INIT_SHARED` in
+  `engine/attributes.h`: with the init-placement opt-in the callers sit in a placed
+  section, where inlining would copy the helper in once per call site and per type,
+  so the attribute is `EDGE_COLD`; without the opt-in there is no section to protect,
+  inlining is cheaper, and it expands to nothing — the same measurement that keeps
+  `EDGE_INIT_FN` empty by default. Forcing `noinline` unconditionally was measured
+  first and cost the demos that inline `build()` outright: `atari_tank_demo` +143 B,
+  `atari_mode4_geometry_probe` +101 B. Gated, every demo gains from the cursor alone:
+  `arena_native` -528, `atari_scroll_test` -276, `multiplex_demo` -113,
+  `atari_tank_demo` -97, `atari_mode4_geometry_probe` -92; `arena_vbxe` is the one
+  regression at +24 B, all of it in its own `play_enter()`, which inlines `build()`.
+
 ### Fixed
 - **The VBI frame service ran on the main thread's zero-page static stack.**
   llvm-mos allocates leaf-function locals in `.zp.noinit` and overlays the frames of

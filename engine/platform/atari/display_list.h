@@ -113,6 +113,52 @@ constexpr u16 scroll_map_height() {
     return 0;
 }
 
+
+// ── The display-list write cursor ─────────────────────────────────────
+//
+// `build()` emits through this rather than through per-layout member helpers.
+// The emitter is parameterised on the INDEX WIDTH only — never on Layout — so a
+// consumer that has opted into init placement (EDGE_INIT_SHARED) gets ONE body
+// for every layout in the program instead of a copy per layout, left in ordinary
+// code rather than inlined into the placed section. A list that fits in a page
+// indexes with a u8, which is the other half of the win: the earlier form took
+// the write index by `u16&`, so every `p++` was an indirect 16-bit
+// read-modify-write. Without the opt-in the emitter inlines as before and the
+// cursor is pure bookkeeping the compiler folds away.
+template <bool C, typename T, typename F> struct dl_if      { using type = T; };
+template <typename T, typename F> struct dl_if<false, T, F> { using type = F; };
+
+// Index type for a `Cap`-byte list: a byte while the whole list fits in a page.
+template <u16 Cap>
+using dl_index_t = typename dl_if<(Cap <= 255), u8, u16>::type;
+
+template <typename Idx>
+struct DlCursor {
+    u8*  bytes;          // the list being emitted
+    u16* lms_pos;        // the position table being filled
+    Idx  p         = 0;  // next write index
+    Idx  lms_count = 0;  // positions recorded so far
+
+    // A plain instruction byte (mode line, blank line, JVB opcode). One store;
+    // left inline, exactly as it was when `build()` wrote `bytes[p++]` itself.
+    void put(u8 b) { bytes[p++] = b; }
+};
+
+// Emit instruction `op` followed by the 2-byte address `a`, record the address's
+// position in the table, and advance the cursor past all three bytes. Returns
+// that position (callers index the list by it later to repoint the address).
+template <typename Idx>
+EDGE_INIT_SHARED u16 dl_emit_load(DlCursor<Idx>& c, u8 op, u16 a) {
+    u8* const w   = c.bytes + c.p;
+    const Idx pos = static_cast<Idx>(c.p + 1);
+    w[0] = op;
+    w[1] = static_cast<u8>(a & 0xFF);
+    w[2] = static_cast<u8>(a >> 8);
+    c.p  = static_cast<Idx>(c.p + 3);
+    c.lms_pos[c.lms_count++] = pos;
+    return pos;
+}
+
 } // namespace detail
 
 // ── DisplayProgram ────────────────────────────────────────────────────
@@ -150,6 +196,8 @@ struct DisplayProgram {
     // list is rewritten per frame (the coarse LMS patch). Everything else keeps a
     // 1-byte stub so non-scroll screens are unaffected.
     static constexpr bool double_buffered = Layout::has_scroll;
+    // Write-index width for this layout's list (a byte while it fits a page).
+    using idx_t = detail::dl_index_t<capacity>;
 
     u8  bytes[capacity]              = {};
     u16 size                         = 0;   // bytes actually used by build()
@@ -176,7 +224,6 @@ struct DisplayProgram {
     // Build the display list for screen memory based at `screen_base`, with the
     // list itself residing at `dl_base` (used by the JVB to loop the list).
     EDGE_INIT_FN(build) void build(u16 screen_base, u16 dl_base) {
-        u16 p   = 0;
         lms_count = 0;
         scroll_lms_count = 0;
         front_b = 0;
@@ -193,10 +240,12 @@ struct DisplayProgram {
             return;
         }
 
+        detail::DlCursor<idx_t> cur{bytes, lms_pos};
+
         // Three 8-blank-line instructions (24 scanlines) to centre vertically.
-        bytes[p++] = dl_blank(8);
-        bytes[p++] = dl_blank(8);
-        bytes[p++] = dl_blank(8);
+        cur.put(dl_blank(8));
+        cur.put(dl_blank(8));
+        cur.put(dl_blank(8));
 
         for (u8 r = 0; r < region_count; ++r) {
             const u8  mode = Layout::region_mode_byte[r];
@@ -209,7 +258,7 @@ struct DisplayProgram {
                 u16 blanks = Layout::region_height[r];
                 while (blanks > 0) {
                     u8 n = blanks > 8 ? static_cast<u8>(8) : static_cast<u8>(blanks);
-                    bytes[p++] = dl_blank(n);
+                    cur.put(dl_blank(n));
                     blanks = static_cast<u16>(blanks - n);
                 }
                 region_lms_pos[r] = 0;   // sentinel: no LMS for overlay regions
@@ -246,12 +295,13 @@ struct DisplayProgram {
                 const u16 stride = Layout::region_map_width[r];
                 u16 line_start   = static_cast<u16>(screen_base + Layout::offset(r));
                 for (u8 i = 0; i < Layout::region_height[r]; ++i) {
-                    const u16 pos = emit_load(p, op, line_start);
+                    const u16 pos = detail::dl_emit_load(cur, op, line_start);
                     scroll_lms_pos[scroll_lms_count++] = pos;
                     if (i == 0) region_lms_pos[r] = pos;
                     line_start = static_cast<u16>(line_start + stride);
                 }
-                scroll_lms_pos[scroll_lms_count++] = emit_load(p, buf_op, line_start);
+                scroll_lms_pos[scroll_lms_count++] =
+                    detail::dl_emit_load(cur, buf_op, line_start);
                 continue;
             }
 
@@ -259,27 +309,28 @@ struct DisplayProgram {
             u16 line_start = static_cast<u16>(screen_base + Layout::offset(r));
 
             // First mode line of the region always loads the address.
-            region_lms_pos[r] = emit_lms(p, mode, line_start);
+            region_lms_pos[r] = detail::dl_emit_load(cur, lms_op(mode), line_start);
 
             for (u8 i = 1; i < Layout::region_height[r]; ++i) {
                 const u16 next = static_cast<u16>(line_start + bpl);
                 if ((next & 0xF000) != (line_start & 0xF000)) {
                     // This line enters a new 4K page: reload the full address so
                     // ANTIC's 12-bit scan counter doesn't wrap within the page.
-                    emit_lms(p, mode, next);
+                    detail::dl_emit_load(cur, lms_op(mode), next);
                 } else {
-                    bytes[p++] = mode;
+                    cur.put(mode);
                 }
                 line_start = next;
             }
         }
 
         // JVB loops the display list back to its own start each frame.
-        bytes[p++] = DL_JVB;
-        jvb_pos = p;
-        bytes[p++] = lo(dl_base);
-        bytes[p++] = hi(dl_base);
-        size = p;
+        cur.put(DL_JVB);
+        jvb_pos = cur.p;
+        cur.put(lo(dl_base));
+        cur.put(hi(dl_base));
+        size      = cur.p;
+        lms_count = cur.lms_count;
 
         // Mirror the list into the back copy for scroll layouts: byte-identical
         // (so the shared lms_pos/scroll_lms_pos tables index both) except the
@@ -355,21 +406,11 @@ struct DisplayProgram {
     }
 
 private:
-    // Emit display-list opcode `op` + the 2-byte address `a`; record and return
-    // the low-byte position. `p` is advanced past the 3 emitted bytes.
-    constexpr u16 emit_load(u16& p, u8 op, u16 a) {
-        bytes[p++] = op;
-        const u16 pos = p;
-        bytes[p++] = lo(a);
-        bytes[p++] = hi(a);
-        lms_pos[lms_count++] = pos;
-        return pos;
-    }
-    constexpr u16 emit_lms(u16& p, u8 mode, u16 a) {
-        return emit_load(p, static_cast<u8>(mode | DL_LMS), a);
-    }
+    // A mode byte with the load-address bit set (emission goes through the
+    // shared detail::dl_emit_load, which takes the opcode already formed).
     static constexpr u8 lo(u16 a) { return static_cast<u8>(a & 0xFF); }
     static constexpr u8 hi(u16 a) { return static_cast<u8>(a >> 8); }
+    static constexpr u8 lms_op(u8 mode) { return static_cast<u8>(mode | DL_LMS); }
 };
 
 } // namespace atari
