@@ -62,6 +62,28 @@ namespace atari {
 // So edge_vbi_busy stays set THROUGH XITVBV and is released only after the main
 // loop has consumed the frame — Core::frame_consumed() -> Hal::frame_consumed()
 // (loop.h, run/run_until). A VBI in the XITVBV window then also sees busy and skips.
+// ZERO-PAGE STATIC STACK (the other half of the gap, found 2026-10-10): llvm-mos
+// gives non-recursive functions a *static* frame for their locals, placed in zero
+// page (`.zp`, the region above .zp.bss, "noinit") while it has room, and it
+// OVERLAYS the frames of functions that its call graph says are never live at the
+// same time. The service's tree has no C++ caller — its address is patched into
+// the jsr below — so the allocator lays its leaf frames (e.g. the display
+// program's patch_scroll, reached through ScreenManager::apply_scroll's type-erased
+// pointer every frame) over the game's leaf frames. A VBI landing while such a
+// game function runs then overwrites its locals (ATank: a sprite-slot counter
+// became 152..255 and sprite_hide zeroed bytes of this engine's own init code).
+// Saving $80-$9F does not cover it; the trampoline therefore also saves the whole
+// `.zp` static-stack range around the service — onto the HARDWARE stack, so there
+// is no save area and no install-time patching: the range is [__zp_bss_start +
+// __zp_bss_size, $FF], its start computed from the two link-time low bytes on
+// entry, and `lda $00,x` / `sta $00,x` (zp,x with a zero operand) address it by
+// the index alone. Cost: up to 96 pushes and pulls per frame (37 for ATank), the
+// same bytes of 6502 stack while the service runs, 36 bytes of code. (The
+// interrupt_norecurse attribute is the compiler's own answer, but its entry
+// reserves a 256-byte soft-stack red zone per interrupt — more than some
+// consumers' whole C stack.) The DLI dispatcher's C++ hook path has the same gap
+// and is not yet covered; the .noinit (RAM) static stack is not covered either and
+// must be empty for the guarantee to be complete — it is for ATank.
 extern "C" {
 [[gnu::naked]] void edge_vbi_trampoline();
 extern uint8_t edge_vbi_jsr;   // first byte of the JSR; operand begins at +1
@@ -82,8 +104,32 @@ edge_vbi_trampoline:
     sta edge_vbi_zp_save,x
     dex
     bpl .Ledge_vbi_save
+    lda #<__zp_bss_start       ; the zero-page static stack: [.zp.bss end, $FF] → hardware stack
+    clc
+    adc #<__zp_bss_size
+    beq .Ledge_vbi_zs_saved    ; ends at $100: nothing above .zp.bss
+    tax
+.Ledge_vbi_zs_push:
+    lda $00,x                  ; zp,x with operand 0: the address IS the index
+    pha
+    inx
+    bne .Ledge_vbi_zs_push     ; X wrapped: [start, $FF] pushed
+.Ledge_vbi_zs_saved:
 edge_vbi_jsr:
     jsr $ffff                  ; → vbi_service (operand patched by install_vbi)
+    lda #<__zp_bss_start
+    clc
+    adc #<__zp_bss_size
+    beq .Ledge_vbi_zs_restored
+    sta edge_vbi_zs_start
+    ldx #0
+.Ledge_vbi_zs_pull:
+    dex                        ; $FF first: the reverse of the pushes
+    pla
+    sta $00,x
+    cpx edge_vbi_zs_start
+    bne .Ledge_vbi_zs_pull
+.Ledge_vbi_zs_restored:
     ldx #31
 .Ledge_vbi_restore:
     lda edge_vbi_zp_save,x
@@ -93,6 +139,8 @@ edge_vbi_jsr:
 .Ledge_vbi_skip:
     jmp $e462                  ; XITVBV (busy stays set across it; main loop clears)
 edge_vbi_busy:
+    .byte 0
+edge_vbi_zs_start:
     .byte 0
 edge_vbi_zp_save:
     .fill 32
