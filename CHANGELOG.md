@@ -12,6 +12,25 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
 ## [Unreleased]
 
 ### Fixed
+- **The VBI frame service ran on the main thread's zero-page static stack.**
+  llvm-mos allocates leaf-function locals in `.zp.noinit` and overlays the frames of
+  call trees it believes disjoint; `Core::frame_service` has no C++ caller (the
+  trampoline's `jsr` operand is patched at install), so the compiler folded its tree
+  into the main thread's and `patch_scroll`'s zero-page locals (reached every frame
+  through `apply_scroll`'s function pointer) overlaid the interrupted render pass's.
+  A VBI landing inside a frame overrun corrupted the game's camera and sprite-slot
+  counter; in ATank the next `sprite_hide` then stored zeros into the engine's own
+  init code and left a `BRK` on the Lobby-return path. The trampoline saved `$80–$9F`
+  (the imaginary registers) only. It now pushes the zero-page static stack —
+  `[__zp_bss_start + __zp_bss_size, $FF]`, the linker's own symbols — onto the
+  hardware stack before the `jsr` and pulls it after: 36 B of code, ≈ 900 cycles a
+  frame, 37 B of 6502 stack for ATank's `$DB–$FF`. `interrupt_norecurse` on the
+  entry was measured and rejected (its prologue reserves a `0x111`-B soft-stack
+  frame — a 256-B red zone plus the saved registers — more than a small game's C
+  stack). Proven on Fujisan 2.0.5: a two-minute ATank match with the overlay intact
+  left 0 changed bytes in the init region (15 within 16 s before). Not covered: the
+  DLI dispatcher's C++ hook path has the same gap, and `.noinit` static frames
+  (none in ATank) would stay overlaid. ATank writeup 20.
 - **The raster vector was written non-atomically against its own interrupt.**
   `Hal::set_raster_vector` (`engine/platform/atari/hal.h`) wrote VDSLST as two bare
   stores. VDSLST is read by ANTIC to enter a DLI, which is an unmaskable NMI, so a DLI
