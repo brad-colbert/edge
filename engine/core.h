@@ -263,7 +263,11 @@ public:
     using Sprites   = SpriteManager<Platform, GameConfig::max_sprites, 4,
                                     cdetail::sprite_binding<GameConfig>::value>;
     using Sound     = SoundManager<Platform, GameConfig::sound_channels>;
-    using Scroll    = ScrollManager<Platform>;
+    // The scroll geometry comes from the screens themselves (see ScreenSet):
+    // supplied, the manager's per-frame fine/coarse split is masks and shifts with
+    // no inversion branch; defaulted where the set has no scroll region or scrolls
+    // in modes that disagree, which keeps the old runtime behaviour exactly.
+    using Scroll    = ScrollManager<Platform, screens::scroll_geometry>;
     using Tiles     = TileDisplay<Platform>;
     using Interrupts = InterruptManager<Platform, kMaxRasterHooks, kMaxFrameHooks>;
     using GfxRegion = typename cdetail::gfx_region<GameConfig>::type;

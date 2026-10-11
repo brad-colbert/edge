@@ -41,6 +41,41 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
   each fail the intended arm.
 
 ### Changed
+- **The scroll region's geometry is a fact of its mode, not runtime state** (size diet
+  round 2, item 3). `ScrollManager` stored the fine-scroll modulus, the cell height and
+  the two inversion conventions as `u8`/`bool` members filled in by `activate()`, then
+  divided and branched on them in `write_fine()` / `coarse_col()` / `coarse_row()` —
+  every frame, for four numbers the scroll region's display mode fixes at compile time.
+  The two `u16 / u8` divisions were the frame service's only calls to `__udivmodhi4`.
+  The manager now takes an `engine::ScrollGeometry` template argument: supplied, the
+  remainder and quotient are a mask and a shift (for the usual power-of-two cell) and
+  the inversion branch disappears; defaulted, every axis behaves exactly as before, so
+  a game that mixes scroll modes across screens is unaffected. `engine::Core` derives
+  the value from the game's own screens — `ScreenSet::scroll_geometry` folds every
+  scrolling screen's mode through a "do these agree" test and yields a defaulted
+  geometry unless all four facts are settled, never a mix. `bind_scroll_map`
+  `static_assert`s the manager's geometry against the region it is binding, so a
+  manager fixed to one mode cannot be bound to a region of another.
+
+  Measured on ATank: **-168 B** against wall 1 (`.text`+`.rodata` ends `$795D`, 675 B
+  free, from 507), `frame_service` **2,923 -> 2,756 B**. The divisors alone were worth
+  only 52 B of that; the inversion conventions — the same kind of runtime copy of a
+  compile-time fact, and the thing that made the fine/coarse split branchy — were
+  worth 116. `__udivmodhi4` (248 B) is still linked for ATank's own `menu_num`; it
+  leaves the image when that moves off the helper, which is ATank's side of the item.
+  Demos (increment over item 1): `atari_mode4_geometry_probe` -844,
+  `atari_tank_demo` -418, `atari_scroll_test` -158, `atari_tank_dual_net_demo` -537
+  cumulative; `arena_native` unchanged, as it has no scroll region.
+
+  Arithmetic identity is the contract, so `test_scroll` sweeps 300 positions per
+  configuration comparing the fixed form against the runtime one — both inversion
+  conventions each way, a wider cell, and a cell height that is NOT a power of two
+  (where the compiler's constant-division path replaces the shift) — plus absolute
+  oracles for the fixed form. Mutation-proven: doubling the fixed modulus, dividing
+  one axis by the other's cell, and an off-by-one quotient each fail, and the first
+  fails *only* the new test, which is what proves it covers the fixed path.
+
+### Changed
 - **The display-list emitters are one shared body, not one per layout** (size diet
   round 2, item 1). `DisplayProgram<Layout>::emit_lms` / `emit_load` were private
   members, so every layout in a program got its own copy, and each copy took the write

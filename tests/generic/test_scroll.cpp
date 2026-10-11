@@ -170,6 +170,78 @@ static void test_flags() {
     CHECK(!sm.active());
 }
 
+// ── Compile-time divisors == runtime divisors ──────────────────────────
+//
+// The divisors are facts of the scroll region's mode, so a manager declared with
+// them divides by constants (a mask and a shift for a power-of-two cell) instead
+// of by stored copies. That is a size/speed change only: the arithmetic must be
+// identical to the runtime form for every position, on both axes, with either
+// inversion convention, and for a cell size that is NOT a power of two (where the
+// compiler's constant-division path replaces the shift).
+template <u8 FINE, u8 LINES, bool IX, bool IY>
+static void check_static_matches_runtime() {
+    constexpr bool ix = IX, iy = IY;
+    ScrollManager<MockPlatform, engine::ScrollGeometry{FINE, LINES, IX, IY}> stat;
+    ScrollManager<MockPlatform>                                             dyn;
+
+    // The fixed geometry is really in force (an unfixed one here would silently
+    // re-test the runtime path against itself).
+    CHECK(decltype(stat)::geometry_fixed);
+    CHECK(decltype(stat)::static_geometry.fine_modulus == FINE);
+    CHECK(decltype(stat)::static_geometry.cell_lines   == LINES);
+    CHECK(!decltype(dyn)::geometry_fixed);
+
+    stat.activate(MAP_W, MAP_H, VIS, FETCH, LINES, FINE, ix, iy);
+    dyn.activate (MAP_W, MAP_H, VIS, FETCH, LINES, FINE, ix, iy);
+
+    unsigned mismatches = 0, checked = 0;
+    for (u16 v = 0; v < 300; ++v) {
+        const u16 x = v;
+        const u16 y = static_cast<u16>((v * 7u + 3u) % 301u);
+        stat.set(x, y);
+        dyn.set(x, y);
+
+        MockHal::reset();
+        stat.write_fine();
+        const u8 sh = MockHal::hscrol, sv = MockHal::vscrol;
+        MockHal::reset();
+        dyn.write_fine();
+
+        if (sh != MockHal::hscrol || sv != MockHal::vscrol ||
+            stat.coarse_col() != dyn.coarse_col() ||
+            stat.coarse_row() != dyn.coarse_row()) ++mismatches;
+        ++checked;
+    }
+    CHECK(mismatches == 0);
+    CHECK(checked == 300);
+}
+
+static void test_static_divisors() {
+    // The pairs a text mode supplies (4 fine units per cell, 8 lines per cell),
+    // both inversion conventions...
+    check_static_matches_runtime<FSR, SPLPL, true,  false>();
+    check_static_matches_runtime<FSR, SPLPL, false, false>();
+    check_static_matches_runtime<FSR, SPLPL, true,  true>();
+    check_static_matches_runtime<FSR, SPLPL, false, true>();
+    // ...a wider cell...
+    check_static_matches_runtime<8, 16, true, false>();
+    // ...and a cell height that is not a power of two, so the constant-divisor
+    // path is exercised rather than a shift.
+    check_static_matches_runtime<4, 10, true, false>();
+
+    // An absolute oracle for the specialized form, not just agreement with the
+    // runtime one: the same numbers test_fine_and_coarse() asserts.
+    MockHal::reset();
+    ScrollManager<MockPlatform, engine::ScrollGeometry{FSR, SPLPL, true, false}> sm;
+    sm.activate(MAP_W, MAP_H, VIS, FETCH, SPLPL, FSR, /*invert_x=*/true, /*invert_y=*/false);
+    sm.set(20, 17);
+    sm.write_fine();
+    CHECK(MockHal::hscrol == 0);        // 20 % 4 == 0 -> no inversion, no carry
+    CHECK(MockHal::vscrol == 1);        // 17 % 8
+    CHECK(sm.coarse_col() == 5);        // 20 / 4
+    CHECK(sm.coarse_row() == 2);        // 17 / 8
+}
+
 int main() {
     test_zero();
     test_fine_only();
@@ -177,6 +249,7 @@ int main() {
     test_edge_clamp();
     test_move();
     test_flags();
+    test_static_divisors();
 
     if (g_failures == 0) {
         printf("ALL TESTS PASSED\n");
