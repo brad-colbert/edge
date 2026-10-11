@@ -6,7 +6,7 @@
 **Status:** revision 3, after ATank's stage-A field measurement. Stages A, B1 and
 C are **landed**; C's code half measures **845 B**, not the ~1,500 B estimated.
 **Round 2** (items 1-3 of ATank writeup 19's shortlist) is landed and measured —
-see "Round 2" at the end: **-973 B** on ATank's wall 1 against an estimated -930.
+see "Round 2" at the end: **-993 B** on ATank's wall 1 against an estimated -930.
 
 
 ## Revision 3 — C-code measured, and it is smaller than estimated
@@ -332,11 +332,11 @@ break any of them while wall 1 improves:
 
 | wall | limit | `61ce793` | after round 2 |
 |---|---|---|---|
-| 1 `.text`+`.rodata` | `$7C00` | +9 | **+963** |
+| 1 `.text`+`.rodata` | `$7C00` | +9 | **+983** |
 | 2 `.data` | `$A800` | +28 | +9 |
-| 3 `.bss` | `$B578` | +2 | **+95** |
+| 3 `.bss` | `$B578` | +2 | **+111** |
 | 4 init gap + 384 B stack | `$BC20` | +17 | **+55** |
-| 5 `.atank_hiram` | `$BFF6` | +0 | **+64** |
+| 5 `.atank_hiram` | `$BFF6` | +0 | **+92** |
 
 ### The three items
 
@@ -344,8 +344,8 @@ break any of them while wall 1 improves:
 |---|---|---|---|
 | 1 display-list emitters | -480 | **-517** | `.text`, init path |
 | 2 multiplexer under `Direct` | -300 | **-288** | `.text`, frame path |
-| 3 scroll geometry | -150 | **-168** | `.text`, frame path |
-| **total** | **-930** | **-973** | |
+| 3 scroll geometry | -150 | **-168** (+20 storage follow-up) | `.text`, frame path |
+| **total** | **-930** | **-993** | |
 
 **Item 1 — one emitter for every layout** (`22fde08`). `emit_lms`/`emit_load` were
 private members of `DisplayProgram<Layout>`, so each layout got its own copy, and
@@ -363,11 +363,15 @@ evicted from zero page by the compiler's allocator after the change — a reshuf
 not new data (zero-page statics fell 45 -> 33 B; the VBI save range is unchanged at
 `[$DB,$FF]`).
 
-**Item 3 — the scroll region's geometry** (`dd79bb2`). `ScrollManager` now takes an
+**Item 3 — the scroll region's geometry** (`dd79bb2`, completed by `HEAD`). `ScrollManager` now takes an
 `engine::ScrollGeometry` template argument that `Core` derives from the game's own
 screens. The divisors the addendum named were worth only **52 B**; the two inversion
 conventions — the same kind of runtime copy of a compile-time fact, in the same
-functions — were worth **116**, which is where the item's return actually is.
+functions — were worth **116**, which is where the item's return actually is. A
+follow-up commit finished the item on the storage side: a fixed geometry no longer
+*stores* the four values it never reads (a further **-20 B** wall 1, -16 `.bss`,
+-28 hiram), which is also what returned `atari_tank_dual_net_demo`'s link — see
+Gates.
 
 ### What was tried and rejected
 
@@ -406,6 +410,20 @@ functions — were worth **116**, which is where the item's return actually is.
   alone. Known saturated-zero-page nondeterminism, untouched by this round.
 
 ### Gates
+
+Two gate failures of this round's own making are worth recording, because both were
+found after the commit that caused them and neither was visible in its own measurement:
+
+1. **`atari_tank_dual_net_demo` stopped linking at item 2.** That demo sits at
+   *exactly* 96/96 bytes of zero page (47 `.zp.data` + 7 `.zp.bss` + 42 static
+   stack) at `master` and after items 1 and 3; item 2's compile-outs changed the
+   static-frame overlay enough to need one byte more, and the link failed
+   deterministically, 3/3. Item 2's commit message claims "all demos build at -O2";
+   that was premature. Item 3's storage follow-up returns the byte and makes it true.
+   The saturation is pre-existing (and a documented dead end), but this round tipped it.
+2. **Item 2's dual-emulator check was first run on a stale binary** — a demo built
+   before that item's edits. It was re-run on the finished tree, where it passes on
+   both emulators; the numbers quoted are the re-run's.
 
 Every commit: 48/48 host tests, all demos build at `-O2`, and the ATank measurement
 build links with the item's number in the commit message. Items 2 and 3 are frame-path

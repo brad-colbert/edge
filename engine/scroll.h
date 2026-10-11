@@ -53,6 +53,35 @@ struct ScrollGeometry {
     bool inverts_y    = false;
 };
 
+namespace detail {
+
+// Conditional type selection (avoids <type_traits>).
+template <bool C, typename T, typename F> struct cond      { using type = T; };
+template <typename T, typename F> struct cond<false, T, F> { using type = F; };
+
+// The runtime copies of a scroll region's geometry. A manager whose geometry is
+// fixed reads none of them, so it must not carry them either — storing four numbers
+// that nothing will read is exactly the cost the fixed form exists to avoid.
+// activate() is handed the same values in both forms; this one keeps them.
+struct RuntimeScrollGeometry {
+    u8   cell_x    = 0;      // fine units per cell, horizontal
+    u8   cell_y    = 0;      // display lines per cell
+    bool inverts_x = false;
+    bool inverts_y = false;
+    void set(u8 cx, u8 cy, bool ix, bool iy) {
+        cell_x = cx; cell_y = cy; inverts_x = ix; inverts_y = iy;
+    }
+    void clear() { set(0, 0, false, false); }
+};
+
+// ...and this one drops them.
+struct NoScrollGeometry {
+    void set(u8, u8, bool, bool) {}
+    void clear() {}
+};
+
+} // namespace detail
+
 template <typename Platform, ScrollGeometry Fixed = ScrollGeometry{}>
 class ScrollManager {
     // Both divisors known is the gate: the producer only supplies a geometry when
@@ -114,18 +143,15 @@ public:
         map_height_    = map_height;
         visible_lines_ = visible_lines;
         fetch_         = fetch_width;
-        splpl_         = scanlines_per_line;
-        fsr_           = fine_scroll_range;
-        invert_x_      = invert_x;
-        invert_y_      = invert_y;
+        geom_.set(fine_scroll_range, scanlines_per_line, invert_x, invert_y);
         active_        = true;
     }
 
     void deactivate() {
         active_ = false;
         map_width_ = map_height_ = 0;
-        visible_lines_ = fetch_ = splpl_ = fsr_ = 0;
-        invert_x_ = invert_y_ = false;
+        visible_lines_ = fetch_ = 0;
+        geom_.clear();
     }
 
     // ── Fine scroll → hardware ────────────────────────────────────────
@@ -177,10 +203,10 @@ private:
     // constant here (a mask and a shift for a power-of-two cell); with 0 it is the
     // stored value and the division stands. activate() keeps the members filled
     // either way, so the two forms are the same arithmetic on the same numbers.
-    u8  cell_x() const { if constexpr (kFixed) return Fixed.fine_modulus; else return fsr_; }
-    u8  cell_y() const { if constexpr (kFixed) return Fixed.cell_lines;   else return splpl_; }
-    bool inverts_x() const { if constexpr (kFixed) return Fixed.inverts_x; else return invert_x_; }
-    bool inverts_y() const { if constexpr (kFixed) return Fixed.inverts_y; else return invert_y_; }
+    u8  cell_x() const { if constexpr (kFixed) return Fixed.fine_modulus; else return geom_.cell_x; }
+    u8  cell_y() const { if constexpr (kFixed) return Fixed.cell_lines;   else return geom_.cell_y; }
+    bool inverts_x() const { if constexpr (kFixed) return Fixed.inverts_x; else return geom_.inverts_x; }
+    bool inverts_y() const { if constexpr (kFixed) return Fixed.inverts_y; else return geom_.inverts_y; }
     u8  fine_x() const { return static_cast<u8>(scroll_x_ % cell_x()); }
     u8  fine_y() const { return static_cast<u8>(scroll_y_ % cell_y()); }
     u16 cells_x() const { return static_cast<u16>(scroll_x_ / cell_x()); }
@@ -202,10 +228,10 @@ private:
     u16  map_height_    = 0;   // full map height     (native units) — coarse-row bound
     u8   visible_lines_ = 0;   // on-screen scroll mode lines
     u8   fetch_         = 0;   // fetch_width        — cells fetched per scrolled line
-    u8   splpl_         = 0;   // scanlines_per_line — vertical fine modulus / row divisor
-    u8   fsr_           = 0;   // fine_scroll_range  — horizontal fine modulus / col divisor
-    bool invert_x_      = false; // fine X register opposes the coarse pointer
-    bool invert_y_      = false; // fine Y register opposes the coarse pointer
+    // Present only when the geometry is NOT fixed (see RuntimeScrollGeometry).
+    using geometry_storage = typename detail::cond<kFixed, detail::NoScrollGeometry,
+                                                   detail::RuntimeScrollGeometry>::type;
+    [[no_unique_address]] geometry_storage geom_{};
 };
 
 } // namespace engine

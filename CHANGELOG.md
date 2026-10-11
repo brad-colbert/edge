@@ -73,7 +73,9 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
   change means. Dual-emulator check (frame path, as round 1): `atari_tank_demo`
   (direct-bound sprite over a scrolled map) renders **pixel-identical** to the
   pre-diet build on **Altirra** and on **Fujisan**, with both captures confirmed to
-  show the live demo rather than a blank screen.
+  show the live demo rather than a blank screen. (That check was first run against a
+  demo binary built before this item's edits and was re-run on the finished tree; the
+  result quoted here is the re-run.)
 
 ### Changed
 - **The scroll region's geometry is a fact of its mode, not runtime state** (size diet
@@ -101,6 +103,15 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
   Demos (increment over item 1): `atari_mode4_geometry_probe` -844,
   `atari_tank_demo` -418, `atari_scroll_test` -158, `atari_tank_dual_net_demo` -537
   cumulative; `arena_native` unchanged, as it has no scroll region.
+
+  A fixed geometry also stops *storing* what it never reads: the four runtime copies
+  `activate()` used to fill are now present only in the runtime form
+  (`[[no_unique_address]]` over a conditional storage type). Worth a further **-20 B**
+  on wall 1 (963 -> 983 B free), **-16 B `.bss`** and **-28 B hiram** — and it is what
+  returns `atari_tank_dual_net_demo`'s link: that demo sits at exactly 96/96 bytes of
+  zero page, and item 2's compile-outs changed the static-frame overlay enough to need
+  one byte more than exists. (The 96/96 saturation is pre-existing and documented;
+  this round did not create it, but it did tip it.)
 
   Arithmetic identity is the contract, so `test_scroll` sweeps 300 positions per
   configuration comparing the fixed form against the runtime one — both inversion
