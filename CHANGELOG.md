@@ -41,6 +41,41 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
   each fail the intended arm.
 
 ### Changed
+- **The multiplexer's machinery compiles out under a direct sprite binding** (size diet
+  round 2, item 2). With `SpriteBinding::Direct` every slot keeps its own hardware
+  player for the whole frame, so `update_zones` always reports a single zone — but the
+  code that serves *more* than one zone was still emitted and still ran: a per-frame
+  loop building the boundary register table and registering boundary raster hooks, the
+  fire index, the hook arming at init, and a frame-service test for "sprites split
+  across zones" that is a compile-time false under this binding. The loop's body never
+  executed (its bound is always 1); it was paid for in bytes alone. All of it is now
+  gated on the binding, and the per-zone storage (`zones_`, `mux_table_`) is sized to
+  the one zone the binding can produce.
+
+  Measured on ATank: **-288 B** against wall 1 (`.text`+`.rodata` ends `$783D`, 963 B
+  free, from 675), `frame_service` **2,756 -> 2,493 B**, and two walls that were full:
+  `.bss` **-94 B** (1 -> 95 B free) and `.atank_hiram` **-64 B** (0 -> 64 B free).
+  One cost: `.data` **+19 B** (28 -> 9 B free). The 19 bytes are `Core::interrupts`,
+  which the compiler's zero-page allocator had placed at `$00A0` and, after the
+  change, placed in `.data` instead — a reshuffle, not new data: zero-page statics
+  fell 45 -> 33 B overall and the VBI trampoline's static-stack save range is
+  unchanged at `[$DB,$FF]` (37 B), so the per-frame cost is the same.
+
+  The backend's raw boundary handler is module-level assembly, so it stays in the
+  image even with nothing left to reference it; what goes is the table, the index and
+  every call site. The single-zone premise is what makes the compile-outs sound, so
+  `test_sprites` now asserts it directly: across six Y orders that split a multiplexed
+  manager into two zones, with slots hidden and with all slots hidden, a `Direct`
+  manager reports one zone and `build_raster_hooks` adds **no** dynamic hook to a
+  chain that already holds a static one. Mutation-proven in both directions: making
+  `update_zones` report two zones fails the test, while restoring the deleted loop
+  does **not** — it is the same behaviour, only larger, which is what zero behaviour
+  change means. Dual-emulator check (frame path, as round 1): `atari_tank_demo`
+  (direct-bound sprite over a scrolled map) renders **pixel-identical** to the
+  pre-diet build on **Altirra** and on **Fujisan**, with both captures confirmed to
+  show the live demo rather than a blank screen.
+
+### Changed
 - **The scroll region's geometry is a fact of its mode, not runtime state** (size diet
   round 2, item 3). `ScrollManager` stored the fine-scroll modulus, the cell height and
   the two inversion conventions as `u8`/`bool` members filled in by `activate()`, then

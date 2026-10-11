@@ -65,6 +65,8 @@ struct MockPlatform {
 using SM = engine::SpriteManager<MockPlatform, 9, 4>;
 // Direct-bind manager: 2 slots pinned 1:1 to hardware players (no multiplexer).
 using SMD = engine::SpriteManager<MockPlatform, 2, 4, engine::SpriteBinding::Direct>;
+// Direct at the binding's own maximum (one slot per hardware player).
+using SMD4 = engine::SpriteManager<MockPlatform, 4, 4, engine::SpriteBinding::Direct>;
 using IM = engine::InterruptManager<MockPlatform>;
 
 // A shape whose rows are all 0xFF, so committed bytes are easy to spot.
@@ -345,6 +347,58 @@ static void test_raster_hook_registration() {
     CHECK(im.slot(0).scanline == mgr.zone(1).boundary_scanline);
 }
 
+// ── Direct binding never uses the boundary machinery ───────────────────
+//
+// Every slot keeps its own hardware player for the whole frame, so update_zones
+// reports ONE zone whatever the sprites do, and build_raster_hooks has no
+// boundary left to hook. That invariant is exactly what lets the mux table build,
+// the hook registration, the fire index and the hook arming compile out under
+// this binding (sprites.h), and what lets the frame service treat "sprites split
+// across zones" as a compile-time false (core.h). If it ever stopped holding, the
+// compiled-out code would be needed again and nothing else would say so.
+static void test_direct_never_registers_boundary_hooks() {
+    static SMD4 mgr;
+    static IM im;
+
+    // A static hook first: "no DYNAMIC hooks" must be distinguishable from
+    // "no hooks at all", which would pass even if the chain were simply empty.
+    im.add_raster_hook(100, nullptr);
+    const u8 statics = im.static_raster_hook_count();
+    CHECK(statics == 1);
+
+    // Y orders that split a multiplexed manager into two zones, including all four
+    // slots crowded into one band and spread the full height of the screen.
+    const u8 ys[][4] = {
+        {  0,   0,   0,   0},
+        { 10,  30,  50,  70},
+        { 70,  50,  30,  10},
+        {  8,   9,  10,  11},
+        {  0,  80, 160, 240},
+        {240, 160,  80,   0},
+    };
+    for (u8 c = 0; c < 6; ++c) {
+        for (u8 i = 0; i < 4; ++i) mgr.sprite(i, g_shape, (u8)(20 + i * 30), ys[c][i]);
+        mgr.update_zones();
+        CHECK(mgr.zone_count() == 1);
+        mgr.build_raster_hooks(im);
+        CHECK(im.raster_hook_count() == statics);   // no boundary hook was added
+    }
+
+    // Hidden slots, and every slot hidden, keep the invariant too.
+    mgr.sprite_hide(2);
+    mgr.update_zones();
+    CHECK(mgr.zone_count() == 1);
+    mgr.build_raster_hooks(im);
+    CHECK(im.raster_hook_count() == statics);
+
+    mgr.sprite_hide_all();
+    mgr.update_zones();
+    CHECK(mgr.zone_count() == 1);
+    CHECK(mgr.active_count() == 0);
+    mgr.build_raster_hooks(im);
+    CHECK(im.raster_hook_count() == statics);
+}
+
 // ── Missiles: shared strip render, 2-bit field per missile, hide clears ────
 
 static void test_missile_render_and_hide() {
@@ -386,6 +440,7 @@ int main() {
     test_direct_bind_no_swap();
     test_direct_bind_hide();
     test_raster_hook_registration();
+    test_direct_never_registers_boundary_hooks();
     test_missile_render_and_hide();
 
     if (g_failures == 0) {

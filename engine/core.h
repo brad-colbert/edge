@@ -227,6 +227,8 @@ public:
     // none (uses_missiles=false), the buffer is dropped to free RAM. Non-blitter
     // backends always need it (hardware sprites live here).
     static constexpr bool kUsesMissiles  = cdetail::uses_missiles<GameConfig>::value;
+    static constexpr SpriteBinding kSpriteBinding =
+        cdetail::sprite_binding<GameConfig>::value;
     static constexpr bool kUsesHwCollisions =
         cdetail::uses_hw_collisions<GameConfig>::value;
     static constexpr bool kDeferInitialScreen =
@@ -647,9 +649,17 @@ public:
         //    scanline: the service runs past the scanline while raster interrupts are
         //    disabled. (That was the atari_hw_test regression — a whole-service
         //    disable_raster() at the top of frame_service.)
+        //    Under a direct sprite binding the multiplexer never splits sprites
+        //    across zones — update_zones always reports one — so that disjunct is a
+        //    compile-time false and the only chain left to protect is one the GAME
+        //    added dynamic hooks to.
+        bool zone_split = false;
+        if constexpr (kSpriteBinding != SpriteBinding::Direct) {
+            zone_split = sprites.zone_count() > 1;
+        }
         const bool gate_raster =
             !caps::has_blitter &&
-            (sprites.zone_count() > 1 ||
+            (zone_split ||
              interrupts.raster_hook_count() > interrupts.static_raster_hook_count());
         if (gate_raster) Platform::hal::disable_raster();
         if constexpr (!caps::has_blitter) {

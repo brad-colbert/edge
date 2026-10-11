@@ -533,6 +533,15 @@ public:
         // A blitter backend has no hardware players to reposition mid-frame, so no
         // zone-boundary raster hooks are needed — just clear any stale dynamic hooks.
         if constexpr (caps::has_blitter) return;
+        // Neither does a directly-bound one: every slot keeps its own hardware
+        // player for the whole frame, so update_zones always reports a single zone
+        // and the loop below never had an iteration to run. Compiling it out takes
+        // the whole table build, the hook registration and the fire index with it,
+        // and leaves the backend's raw boundary handler unreferenced (see
+        // arm_multiplex_hook). Unreferenced is not unlinked: that handler is
+        // module-level assembly in the backend, so its bytes stay in the image —
+        // what goes is the table, the index and every call site.
+        if constexpr (Binding == SpriteBinding::Direct) return;
 
         mux_index_ = 0;
         void (*const h)() = Platform::hal::multiplex_dli();
@@ -551,7 +560,10 @@ public:
     // fire index (the single instance never moves). engine::Core::init calls this on
     // baseline backends; discarded on blitter backends, which have no boundary raster hooks.
     void arm_multiplex_hook() {
-        if constexpr (!caps::has_blitter) {
+        // Direct binding registers no zone-boundary hooks at all
+        // (build_raster_hooks), so binding the raw hook to this manager's table
+        // would arm something that can never fire.
+        if constexpr (!caps::has_blitter && Binding != SpriteBinding::Direct) {
             Platform::hal::install_multiplex_dli(
                 static_cast<u16>(reinterpret_cast<uintptr_t>(mux_table_)),
                 static_cast<u16>(reinterpret_cast<uintptr_t>(&mux_index_)));
@@ -608,7 +620,10 @@ private:
     }
 
     LogicalSprite sprites_[MaxSprites] = {};
-    ZoneInfo      zones_[MaxZones]     = {};
+    // Direct binding builds exactly one zone (update_zones) and commits from it,
+    // so the rest of the array is storage for a reassignment that never happens.
+    static constexpr u8 kZones = Binding == SpriteBinding::Direct ? 1 : MaxZones;
+    ZoneInfo      zones_[kZones]       = {};
     u8            zone_count_          = 0;
     u8            active_count_        = 0;
 
@@ -646,8 +661,11 @@ private:
     // order. mux_index_ is the row the next boundary hook will consume; reset to 0
     // each frame by build_raster_hooks and bumped by the hook (the engine HAL and the
     // backend's raster-dispatch code own the hardware side).
-    static constexpr u8 kMuxRow = kPlayers * 2;   // 4 position + 4 colour
-    u8 mux_table_[MaxZones * kMuxRow] = {};
+    // Directly-bound sprites never cross a boundary, so they need no row at all;
+    // the array stays one row wide rather than zero-length, which is not C++.
+    static constexpr u8 kMuxRow   = kPlayers * 2;   // 4 position + 4 colour
+    static constexpr u8 kMuxRows  = Binding == SpriteBinding::Direct ? 1 : MaxZones;
+    u8 mux_table_[kMuxRows * kMuxRow] = {};
     u8 mux_index_ = 0;
 };
 
