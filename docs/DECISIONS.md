@@ -2030,6 +2030,14 @@ gained a third state — service finished, frame not yet consumed — so the imm
 entry can tell that apart from a service in flight; both states still turn a new
 frame away, so the service's own re-entry behaviour is unchanged.
 
+The display-list copy is deliberately *not* gated the way the re-arm is, although the
+service writes that shadow pair as two stores too. The frame that could catch it
+half-written is one that interrupted the service, which runs with interrupts enabled —
+so the OS's own deferred stage runs on that frame and reads the identical half-written
+pair. The copy adds no case the OS did not already have, and a torn display-list
+pointer costs one frame of wrong list on an already-overrunning frame, where a torn
+raster vector is *jumped to*. The asymmetry is the consequence, not an oversight.
+
 The copies are straight-line stores, not the indexed loop that the contiguous
 shadow-to-register mapping invites. The entry runs at the top of the frame interrupt
 with interrupts masked, ahead of the OS's own first stage, so its whole length is

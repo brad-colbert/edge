@@ -373,6 +373,21 @@ follow-up commit finished the item on the storage side: a fixed geometry no long
 -28 hiram), which is also what returned `atari_tank_dual_net_demo`'s link — see
 Gates.
 
+### Gate 2 — the contract demo is untouched
+
+Round 2's check, repeated on the finished tree: `atari_tank_demo` built at `d137def`
+and at the branch tip, captured static on each emulator, `compare -metric AE`:
+
+| | Altirra | Fujisan |
+|---|---|---|
+| `d137def` vs round 3 | **0** | **0** |
+
+Pixel-identical on both, each capture `Read` and confirmed to show the live demo (the
+tank over its walls, not a blank or wedged screen). That is the "nothing else moved"
+half of the contract: the colour copy writes exactly what the OS's deferred stage
+wrote, and a stationary direct-bound sprite's live X equals its staged X, so the two
+items reach nothing here.
+
 ### What was tried and rejected
 
 1. **Unconditional `noinline` on the shared emitter** (item 1). Correct for a
@@ -598,6 +613,21 @@ resync — one lost byte costs the datagram stream — and because the OS's stag
 an estimate rather than a measurement. That is the operator's call, and the number is
 on the table.
 
+### Gate 2 — the contract demo is untouched
+
+Round 2's check, repeated on the finished tree: `atari_tank_demo` built at `d137def`
+and at the branch tip, captured static on each emulator, `compare -metric AE`:
+
+| | Altirra | Fujisan |
+|---|---|---|
+| `d137def` vs round 3 | **0** | **0** |
+
+Pixel-identical on both, each capture `Read` and confirmed to show the live demo (the
+tank over its walls, not a blank or wedged screen). That is the "nothing else moved"
+half of the contract: the colour copy writes exactly what the OS's deferred stage
+wrote, and a stationary direct-bound sprite's live X equals its staged X, so the two
+items reach nothing here.
+
 ### What was tried and rejected
 
 1. **An indexed loop for the colour copy** — 11 bytes against 54, but 128 cycles
@@ -628,6 +658,13 @@ on the table.
   now reports them directly so the split can be read off a running image.
 - **The interrupts-off windows in the netstream handler** are the only thing that
   removes class A at the root. Untouched: the handler is proven and delicate.
+- **Item B's live check on a moving sprite was not run on either emulator.** The host
+  test covers it under mos-sim and is mutation-proven, and gate 2 above covers the
+  static half on both emulators, but the moving half — the position register written in
+  service N against the slot's X in memory for the same frame — is not done. The
+  register is write-only, so a page-6 probe cannot read it back, and this repo's probe
+  runner cannot drive Altirra's debugger (its command line takes a single space-free
+  token). ATank's `run.atdbg` mechanism is the way to do it if the operator wants it.
 - The `hpos`/`color` members of the zone record are dead under a direct binding but
   still declared, because the multiplex path references them in code that is compiled
   though unreachable there. Conditional storage would return 8 B of `.bss`; not worth

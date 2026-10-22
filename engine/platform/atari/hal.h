@@ -267,6 +267,18 @@ edge_imm_vbi_trampoline:
     sta $d402                  ; DLISTL  <- SDLSTL: the coarse-scroll list swap.
     lda $0231                  ;           ANTIC latches this at the top of the
     sta $d403                  ;           frame, so vertical blank is its window.
+                               ; NOT gated on the busy state the way the chain-head
+                               ; re-arm below is, although the service writes these
+                               ; two shadow bytes as two stores and a frame landing
+                               ; between them copies a torn pointer. The exposure is
+                               ; pre-existing and unchanged: that frame's interrupted
+                               ; code is the service itself, which runs with
+                               ; interrupts enabled, so the OS's stage 2 runs and
+                               ; reads the identical half-written pair. Copying it
+                               ; here adds no case the OS did not already have, and
+                               ; the result is one frame of wrong list on a frame
+                               ; already overrunning — not a wedge, unlike a torn
+                               ; raster vector, which is jumped to.
     lda $02c0
     sta $d012                  ; COLPM0  <- PCOLR0
     lda $02c1
