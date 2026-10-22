@@ -334,6 +334,53 @@ static void test_direct_bind_hide() {
     CHECK(z0.player_assignment[1] == 1);
 }
 
+// ── Direct binding: X and colour commit from the SAME loop update as the shape ──
+//
+// The frame service commits sprites at step 3 and recomputes the zones at step 5,
+// so the two run in that order with a whole frame of game-loop updates BETWEEN
+// one service's step 5 and the next one's step 3. A Direct commit that took X and
+// colour from the zone therefore wrote what the loop had set one frame earlier,
+// while the shape and Y it wrote alongside came live out of the slot: a sprite
+// stepping diagonally put last frame's X under this frame's shape and sheared by a
+// pixel for the frame (ADR-037, the behaviour this round changed deliberately).
+//
+// The other Direct tests cannot see it: they call update_zones() immediately before
+// commit(), which stages and commits in one breath. This one drives the service's
+// real order, with a move in the gap — the only arrangement in which a stale
+// snapshot differs from a live read.
+static void service(SMD4& mgr, u8* buf) {
+    mgr.commit(buf);        // step 3
+    mgr.update_zones();     // step 5
+}
+
+static void test_direct_commit_is_same_frame() {
+    static SMD4 mgr;
+    static u8 buf[2048] = {};
+
+    mgr.sprite_color(0, 0xAA);
+    mgr.sprite(0, g_shape, 100, 50);
+    service(mgr, buf);
+    CHECK(MockHal::hposp[0] == 100);        // live from the first service onward:
+    CHECK(MockHal::colpm[0] == 0xAA);       // the zone was still empty here
+
+    // One game-loop update, diagonal: X and Y both move, and the colour with them.
+    mgr.sprite(0, g_shape, 108, 58);
+    mgr.sprite_color(0, 0xCC);
+    service(mgr, buf);
+
+    // The shape landed at Y 58, so the X and colour beside it must be 108/0xCC —
+    // taken from the same update, not from the snapshot of the previous one (100/0xAA).
+    for (u8 r = 0; r < 8; ++r) CHECK(buf[pbase(0) + 58 + r] == 0xFF);
+    CHECK(MockHal::hposp[0] == 108);
+    CHECK(MockHal::colpm[0] == 0xCC);
+
+    // Hidden slots still write 0, as the staging did for them.
+    mgr.sprite_hide(0);
+    service(mgr, buf);
+    CHECK(MockHal::hposp[0] == 0);
+    CHECK(MockHal::colpm[0] == 0);
+}
+
 // ── build_raster_hooks registers one boundary hook per extra zone ───────
 
 static void test_raster_hook_registration() {
@@ -439,6 +486,7 @@ int main() {
     test_sprite_color_follows_sprite();
     test_direct_bind_no_swap();
     test_direct_bind_hide();
+    test_direct_commit_is_same_frame();
     test_raster_hook_registration();
     test_direct_never_registers_boundary_hooks();
     test_missile_render_and_hide();

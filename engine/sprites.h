@@ -234,14 +234,24 @@ public:
         // player p's position/colour with p fixed for the whole frame. zone_count_ == 1
         // means build_raster_hooks installs no boundary hooks. (On a blitter backend
         // there are no hardware-player limits, so Direct is a no-op — fall through.)
+        //
+        // X AND COLOUR ARE NOT SNAPSHOTTED HERE. This step runs at the END of a frame
+        // service, so a snapshot taken here is what the game loop had set as of the
+        // PREVIOUS service — and commit_pm, which writes it, runs in the NEXT one. The
+        // shape and Y it writes alongside come live out of sprites_, so a snapshotted X
+        // arrived at the hardware one frame behind the shape it belongs to and a sprite
+        // moving diagonally sheared by a pixel for a frame. A fixed binding has no
+        // reason to snapshot: player p shows slot p whoever else moved, so commit_pm
+        // reads the slot directly and all four of shape, Y, X and colour come from one
+        // loop update (ADR-037). The multiplex path below still snapshots — there the
+        // zone's assignment is itself per-frame state, and the boundary hooks read the
+        // snapshot during the visible frame, after sprites_ may have moved on.
         if constexpr (Binding == SpriteBinding::Direct && !caps::has_blitter) {
             active_count_ = 0;
             ZoneInfo& zi = zones_[0];
             for (u8 p = 0; p < kPlayers; ++p) {
                 const bool shown = (p < MaxSprites) && is_shown(sprites_[p]);
                 zi.player_assignment[p] = shown ? p : ZoneInfo::UNUSED;
-                zi.hpos[p]  = shown ? sprites_[p].x : 0;
-                zi.color[p] = shown ? sprites_[p].color : 0;
                 if (shown) ++active_count_;
             }
             zi.boundary_scanline = 0;
@@ -412,12 +422,25 @@ public:
                     prev_shape_[p]  = nullptr;
                 }
             }
-            // Single-zone positions + colours. Direct keeps slot p on player p, so
-            // (unlike the multiplex path) there is no per-frame reassignment; the writes
-            // are cheap and idempotent.
-            for (u8 p = 0; p < kPlayers; ++p) {
-                Platform::hal::set_sprite_x(p, zones_[0].hpos[p]);
-                Platform::hal::set_color_pm(p, zones_[0].color[p]);
+            // Single-zone positions + colours, read LIVE from the slot — the same
+            // sprites_ entry this loop just drew the shape and Y from, so all four
+            // reach the hardware from one game-loop update (ADR-037; update_zones no
+            // longer stages them). Direct keeps slot p on player p, so (unlike the
+            // multiplex path) there is no per-frame reassignment to consult; the writes
+            // are cheap and idempotent. A hidden or absent slot writes 0, which is what
+            // the staging wrote for it — the position register of a player whose strip
+            // was just erased shows nothing wherever it points.
+            for (u8 p = 0; p < MaxSprites; ++p) {
+                const LogicalSprite& s = sprites_[p];
+                const bool shown = is_shown(s);
+                Platform::hal::set_sprite_x(p, shown ? s.x : 0);
+                Platform::hal::set_color_pm(p, shown ? s.color : 0);
+            }
+            // Hardware players this game has no slot for: parked at 0, as the staging
+            // left them. Compile-time empty when the game uses every player.
+            for (u8 p = MaxSprites; p < kPlayers; ++p) {
+                Platform::hal::set_sprite_x(p, 0);
+                Platform::hal::set_color_pm(p, 0);
             }
             commit_missiles(sprite_base);
             return;

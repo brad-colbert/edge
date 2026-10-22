@@ -64,6 +64,36 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
   it is a custom target, not a CTest.
 
 ### Changed
+- **A direct-bound sprite's X and colour now commit from the same frame as its shape**
+  (round 3, item B; DECISIONS.md ADR-037). **This is a deliberate behaviour change.**
+  The frame service commits sprites at step 3 and recomputes the zones at step 5, so a
+  whole frame of game-loop updates sits between one service's step 5 and the next one's
+  step 3. `commit_pm`'s `Direct` path took X and colour from the zone the earlier step 5
+  had staged, while the shape and Y beside them came live out of the slot — so a sprite
+  stepping diagonally put last frame's X under this frame's shape and sheared by a pixel
+  for the frame, every frame it moved. A fixed binding has no reason to stage: player p
+  shows slot p whoever else moved. `update_zones` no longer snapshots the two (the
+  multiplex path still does — there the assignment is itself per-frame state, and the
+  boundary hooks read the snapshot during the visible frame), and `commit_pm` reads the
+  slot.
+
+  A first commit now also writes the live position instead of the zeros the empty zone
+  held, so a sprite is correctly placed from the very first frame rather than the second.
+
+  **Pixel-identity on a moving sprite is no longer the right check and must not be
+  restored as one** — the whole point is that those frames differ. `test_sprites`'
+  `test_direct_commit_is_same_frame` drives the service's real order with a move in the
+  gap, which is the only arrangement in which a stale snapshot differs from a live read;
+  the existing `test_direct_bind_no_swap` / `test_direct_bind_hide` stage and commit in
+  one breath and stayed green under a mutation that restores the staging, which is why
+  they never caught this.
+
+  It does NOT pay for itself in bytes: **+19 B** in `frame_service` on the consumer's
+  image (round 2 sized the staging machinery at ~95 B, but that measured deleting it,
+  not replacing it — the live read indexes a 7-byte-stride slot where the snapshot was
+  a flat array). Folding the reads into the strip loop, which already has the slot's
+  address in hand, measured worse still (+82 B).
+
 - **The multiplexer's machinery compiles out under a direct sprite binding** (size diet
   round 2, item 2). With `SpriteBinding::Direct` every slot keeps its own hardware
   player for the whole frame, so `update_zones` always reports a single zone — but the
