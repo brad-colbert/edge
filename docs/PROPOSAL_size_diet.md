@@ -521,8 +521,9 @@ disassembly of the measurement build:
 
 The contiguous shadow-to-register mapping (`$02C0`→`$D012` through `$02C8`→`$D01A`)
 would do the colour copy in an 11-byte indexed loop instead of 54 bytes of
-straight-line stores — but in 128 cycles instead of 72. Cycles are the scarcer
-resource here, so the bytes were spent. If the window ever has to come down, the four
+straight-line stores — but in 128 cycles instead of 72. The bytes were spent on the
+margin; see "the lane, measured end to end" below for what the margin actually is, and
+for the circumstances in which the 43 bytes are worth taking back. If the window ever has to come down, the four
 player-colour copies (32 cycles) are the droppable ones under a direct binding:
 nothing clobbers those registers during the frame there, so they only carry
 propagation of a colour *change*, which is latency-tolerant. Under a multiplexed
@@ -549,10 +550,53 @@ reproduced on purpose. The residual 3 frames in the "after" legs is a **constant
 offset at the measurement window's edges: tripling the run to 900 jiffies gives
 900/903, the same 3.
 
-The colour half cannot be counted from inside (the background register is
-write-only), so it is a pixel A/B with the skip forced on 83 % of frames: before, the
-hook's palette covers the screen top to bottom; after, the playfield's palette above
-the seam and the hook's below.
+**Both legs reproduce byte-for-byte on Fujisan** (round 2's gate 2): 50/305 before and
+300/305 after, the same dump bytes as Altirra's at the same knob setting.
+
+The colour half cannot be counted from inside — the background register is write-only —
+so it is a pixel A/B, and the probe's terminal state is built for it: after the dump it
+holds interrupts off forever, so not one further frame is serviced and the state under
+test is permanent instead of a coin flip. Without the immediate restore the marker
+palette covers the whole screen and the band does not even redraw (the chain tail
+leaves the raster vector on the terminal and only a service would re-point it); with it,
+the playfield's palette sits above the seam and the marker's below, held steady. Both
+pictures carry the map's stripes, which is what shows the capture is the live probe.
+Confirmed on **Altirra and Fujisan**, same two binaries.
+
+That terminal state was added after a first Fujisan capture read as a pass it had not
+earned: taken while the measurement loop was still running, a capture lands on a
+serviced frame about one time in six and shows the healthy picture either way. Altirra
+had happened to catch a skipped frame and Fujisan a serviced one, from the same build.
+
+### The lane, measured end to end
+
+`edge_net_realtime_meter` against the docker echo peer on its own IP, Altirra Mode B
+with the real NetSIO bridge and fujinet-pc, 40 s per leg, the two builds differing only
+by this branch:
+
+| | TX | RX | DELAY | TXHZ/RXHZ | LOSS RT / FWD / REV | FRM DROP |
+|---|---|---|---|---|---|---|
+| `d137def` | 00525 | 00523 | 0033 ms | 014 / 014 | 01 % / 01 % / 00 % | 0 of 02101 |
+| round 3 | 00525 | 00523 | 0033 ms | 014 / 014 | **00 % / 00 % / 00 %** | 0 of 02101 |
+
+Identical throughput, delay and frame count; loss did not rise. (The 01 % in the
+baseline leg is one early packet — both runs report WORST 01 %, BEST 00 %.)
+
+**And the budget was never as tight as the kickoff assumed.** The kickoff put a byte at
+"~150 µs ≈ 260 cycles, at hsioindex 6" — that is the *session* lane's high-speed SIO
+rate. The realtime lane does not run at the SIO index: it runs at
+`kNetstreamNominalBaud`, 31,250 nominal (~31,960 bps actual), and ATank does not
+override it. Ten bits at that rate is **~560 cycles**, so the masked window — this
+handler's measured 137 plus the NMI dispatch and the OS's own first stage, which is not
+measured here but is on the order of 150 — sits at roughly 300 against a 560-cycle byte
+time. A received byte cannot be overtaken.
+
+Which means the 43 bytes the indexed colour loop would save **are available if ATank
+wants them**: at 193 cycles for the handler the window would be ~360, still inside 560.
+It is not taken here because the margin is the safety property on a lane that has no
+resync — one lost byte costs the datagram stream — and because the OS's stage-1 cost is
+an estimate rather than a measurement. That is the operator's call, and the number is
+on the table.
 
 ### What was tried and rejected
 

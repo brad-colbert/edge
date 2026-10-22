@@ -340,17 +340,28 @@ int main() {
 
     edge_host_dump("H1:NSDUMP.BIN", (const void*)0x0600, kDumpBytes);
 
-    // Leave the picture up: the colour half of the result is read from the screen,
-    // not from this block, and the scroll must keep moving for the screenshot leg
-    // to show a live frame rather than a frozen one.
-    for (;;) {
-        while (!Game::frame_ready_) { }
-        Game::frame_ready_ = false;
-        probe_busy_window();
-        Game::frame_consumed();
-        engine::sync_after_vbi();
-        scroll_x = static_cast<u16>((scroll_x + 1) % (kMapW * 4));
-        Game::scroll.set(scroll_x, 0);
-        probe_sei_window();
-    }
+    // Terminal state for the screenshot leg, which is where the colour half of the
+    // result is read (COLBK is write-only and cannot be counted from inside).
+    //
+    // Interrupts stay off FOREVER here, so from this point not one frame is ever
+    // serviced and the state under test is permanent rather than a coin flip. A
+    // capture taken while the loop above was still running lands on a serviced frame
+    // about one time in six and shows the healthy picture either way, which is how a
+    // run on the second emulator first read as a pass it had not earned. The two
+    // outcomes are now stable and tell themselves apart at a glance:
+    //
+    //   without the immediate restore  the marker palette covers the WHOLE screen.
+    //       Nothing puts the colour registers back, so the band's colours — written
+    //       by the last hook that fired — survive every following frame. The hook
+    //       itself stops firing after that one frame too: the chain tail leaves the
+    //       raster vector on the terminal and only a service would re-point it, so
+    //       the band does not even redraw.
+    //   with it                        the playfield's palette above the seam and
+    //       the marker's below it, held steady, because the immediate entry restores
+    //       the registers and re-points the chain head on every frame without a
+    //       service.
+    //
+    // The map's stripes are on screen in both, which is what shows the capture is
+    // this probe and not a blank or crashed machine.
+    for (;;) probe_sei_window();
 }
