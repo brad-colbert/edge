@@ -1165,6 +1165,7 @@ if(MOS_ATARI8_CXX)
     # Build at -Os to match the consumer whose image these numbers are judged on.
     set(EDGE_PROBE_SEI_OUTER  "30" CACHE STRING "vbi_skip probe: interrupts-off window, outer iterations")
     set(EDGE_PROBE_BUSY_OUTER "0"  CACHE STRING "vbi_skip probe: guard-held window, outer iterations")
+    set(EDGE_PROBE_SCROLL     "1"  CACHE STRING "vbi_skip probe: scroll the view each iteration (0 = hold still)")
     set(VBI_SKIP_PROBE_XEX ${CMAKE_BINARY_DIR}/vbi_skip_altirra_probe.xex)
     set(VBI_SKIP_PROBE_MAP ${CMAKE_BINARY_DIR}/vbi_skip_altirra_probe.map)
     add_custom_command(
@@ -1173,6 +1174,7 @@ if(MOS_ATARI8_CXX)
                 -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra
                 -DPROBE_SEI_OUTER=${EDGE_PROBE_SEI_OUTER}
                 -DPROBE_BUSY_OUTER=${EDGE_PROBE_BUSY_OUTER}
+                -DPROBE_SCROLL=${EDGE_PROBE_SCROLL}
                 -I${CMAKE_SOURCE_DIR}
                 -I${CMAKE_SOURCE_DIR}/engine/platform/atari
                 ${CMAKE_SOURCE_DIR}/tests/backends/atari/vbi_skip_altirra_probe.cpp

@@ -303,6 +303,21 @@ public:
         Platform::hal::set_raster_vector(first_entry_);
     }
 
+    // True when the backend already re-points delivery at the chain head from an
+    // entry it reaches on EVERY frame, ahead of any visible scanline — including
+    // the frames whose service never runs. A backend that does cannot be helped by
+    // rearm_delivery(): it has already done the same work, earlier in the same
+    // frame, and from a place the frame service cannot be skipped out of. The frame
+    // service therefore drops its own re-arm (engine/core.h). A backend that does
+    // not advertise this keeps it: there, the service is the earliest the chain
+    // head can be re-armed at all.
+    static constexpr bool backend_rearms_delivery() {
+        if constexpr (requires { Platform::hal::frame_entry_rearms_raster; })
+            return Platform::hal::frame_entry_rearms_raster;
+        else
+            return false;
+    }
+
     // One-time setup: patch the backend C++ raster dispatcher's operands with this
     // manager's table and current_ addresses (the single instance never moves, so
     // the addresses are stable). engine::Core::init calls this. Portable: the

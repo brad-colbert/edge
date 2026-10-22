@@ -89,6 +89,14 @@ namespace M = atari;
 #ifndef PROBE_RUN_JIFFIES
 #define PROBE_RUN_JIFFIES 300   // ~5 s at 60 Hz
 #endif
+// Scroll the view every iteration (the default). Set to 0 to hold it still, which
+// is how the residual deficit in the dispatch count is attributed: the scroll's
+// coarse step swaps the double-buffered display list, and the copy swapped in
+// carries the raster hook's display-list bit only once the chain has been prepared
+// against it, so a swap costs that frame's hook no matter how delivery is armed.
+#ifndef PROBE_SCROLL
+#define PROBE_SCROLL 1
+#endif
 
 extern "C" {
 volatile uint8_t probe_sei_outer  = PROBE_SEI_OUTER;
@@ -297,8 +305,10 @@ int main() {
         engine::sync_after_vbi();
 
         ++iterations;
-        scroll_x = static_cast<u16>((scroll_x + 1) % (kMapW * 4));
-        Game::scroll.set(scroll_x, 0);
+        if (PROBE_SCROLL) {
+            scroll_x = static_cast<u16>((scroll_x + 1) % (kMapW * 4));
+            Game::scroll.set(scroll_x, 0);
+        }
 
         if (static_cast<u16>(jiffies() - j0) >= PROBE_RUN_JIFFIES) break;
 

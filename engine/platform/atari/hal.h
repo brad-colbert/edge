@@ -161,6 +161,12 @@ edge_vbi_jsr:
     sta $80,x
     dex
     bpl .Ledge_vbi_restore
+    lda #2                     ; guard = 2: the service FINISHED and the loop has
+    sta edge_vbi_busy          ;   not consumed the frame. Still non-zero, so the
+                               ;   next frame is still turned away — but the
+                               ;   immediate path can tell this apart from a service
+                               ;   in flight (guard == 1) and knows the chain tables
+                               ;   are not mid-rewrite, so it may re-arm delivery.
 .Ledge_vbi_skip:
     jmp $e462                  ; XITVBV (busy stays set across it; main loop clears)
 edge_vbi_busy:
@@ -187,33 +193,125 @@ edge_vbi_zp_save:
 // chip; it only stages the two computed bytes (set_fine_scroll_x/y below), and this
 // handler copies them out.
 //
-// This is a bare naked routine: two LDA abs / STA $D40x pairs and a chain-on. It
-// touches ONLY A (restored by the OS at the eventual XITVBV), uses NO llvm-mos soft
-// stack ($80-$9F) so it needs no save/restore, and deliberately does NOT consult
-// edge_vbi_busy — the flush is idempotent (re-flushing the same staged bytes during
-// a deferred overrun is visually identical) and must stay independent of the
-// deferred re-entry guard. It exits via JMP SYSVBV ($E45F), the immediate-VBI
+// This is a bare naked routine: LDA abs / STA abs pairs and a chain-on. It touches
+// ONLY A and the processor flags (both restored by the OS at the eventual XITVBV),
+// uses NO llvm-mos soft stack ($80-$9F) and no zero-page static frame so it needs
+// no save/restore, and every store is idempotent — re-running it against the same
+// staged bytes is invisible. It exits via JMP SYSVBV ($E45F), the immediate-VBI
 // continuation (NOT XITVBV — see os.h). Never executed under mos-sim (no NMI).
+//
+// ── EVERYTHING A FRAME MUST NOT LOSE LIVES HERE ──────────────────────
+//
+// The OS runs its own VBLANK in two stages. Stage 1 (which this routine chains
+// into) always runs. Stage 2 — which copies the OS colour shadows to GTIA, copies
+// SDLSTL to ANTIC's display-list pointer, and only then jumps through VVBLKD to the
+// engine's frame service — runs only when the interrupted code had interrupts
+// enabled and CRITIC clear. A game whose loop holds short interrupts-off windows
+// (the netstream handler's per-byte ring operations do) loses stage 2, and with it
+// the frame service, on a large fraction of frames. Measured on the consumer's Play
+// screen: 47 % of frames unserviced. Every one of them showed:
+//
+//   * the scroll holding last frame's view (jitter),
+//   * the raster hook not dispatched, so its band wore the playfield's palette,
+//   * and the playfield wearing the hook's background colour for the whole frame,
+//     because the only thing that put COLBK back was that stage-2 copy.
+//
+// So the per-frame work whose absence is VISIBLE is done here instead, where it
+// cannot be skipped: the fine scroll (always was), the display-list pointer, the
+// colour registers, and the raster chain's head. What is NOT here, deliberately, is
+// the sprite commit: it stays whole and deferred, so a frame whose service is
+// skipped holds the whole sprite — shape, Y, X and colour together. Flushing a
+// position from here on a frame whose strips were never written would produce the
+// same shear ADR-037 just removed, in the other direction.
+//
+// COST. This runs at the top of the NMI with interrupts masked, in front of the
+// OS's own stage 1, so its whole length is added to the window in which the serial
+// IRQ cannot be taken — and POKEY buffers exactly one received byte. That is why
+// the copies below are straight-line stores rather than the obvious indexed loop:
+// the shadow-to-register mapping is contiguous ($02C0->$D012 through $02C8->$D01A),
+// so nine iterations of `lda $02c0,x / sta $d012,x / dex / bpl` would do the same
+// work in 11 bytes instead of 54 — but in 128 cycles instead of 72, and the byte
+// wall is not the one this sits closest to.
+//
+// The colours are copied FROM THE OS SHADOWS, which is where this engine stages
+// every persistent colour (Hal::set_color_pf / set_color_pm, and the sprite
+// commit's zone-0 colours). Reading them here does not depend on stage 2 running —
+// that is the whole point — and it keeps this restore bit-identical to stage 2's by
+// construction, so a serviced frame and a skipped one cannot show different
+// colours. The one case where the two would differ is attract mode, which applies
+// a dim/cycle transform to stage 2's copy and not to this one; the frame service
+// zeroes ATRACT every frame, so attract can only engage after minutes with no
+// service at all.
 extern "C" {
 [[gnu::naked]] void edge_imm_vbi_trampoline();
 extern volatile uint8_t edge_fine_hscrol;   // staged HSCROL, flushed by the immediate VBI
 extern volatile uint8_t edge_fine_vscrol;   // staged VSCROL
+extern uint8_t edge_imm_op_cur;             // STA current_ (=0); operand begins at +1
+extern volatile uint8_t edge_imm_dli_lo;    // staged raster-chain head, lo
+extern volatile uint8_t edge_imm_dli_hi;    // staged raster-chain head, hi
 }
 
 asm(R"(
     .globl edge_imm_vbi_trampoline
     .globl edge_fine_hscrol
     .globl edge_fine_vscrol
+    .globl edge_imm_op_cur
+    .globl edge_imm_dli_lo
+    .globl edge_imm_dli_hi
 edge_imm_vbi_trampoline:
     lda edge_fine_hscrol
     sta $d404                  ; HSCROL — lands in VBLANK, before scanline 0
     lda edge_fine_vscrol
     sta $d405                  ; VSCROL
+    lda $0230
+    sta $d402                  ; DLISTL  <- SDLSTL: the coarse-scroll list swap.
+    lda $0231                  ;           ANTIC latches this at the top of the
+    sta $d403                  ;           frame, so vertical blank is its window.
+    lda $02c0
+    sta $d012                  ; COLPM0  <- PCOLR0
+    lda $02c1
+    sta $d013                  ; COLPM1  <- PCOLR1
+    lda $02c2
+    sta $d014                  ; COLPM2  <- PCOLR2
+    lda $02c3
+    sta $d015                  ; COLPM3  <- PCOLR3
+    lda $02c4
+    sta $d016                  ; COLPF0  <- COLOR0
+    lda $02c5
+    sta $d017                  ; COLPF1  <- COLOR1
+    lda $02c6
+    sta $d018                  ; COLPF2  <- COLOR2
+    lda $02c7
+    sta $d019                  ; COLPF3  <- COLOR3
+    lda $02c8
+    sta $d01a                  ; COLBK   <- COLOR4
+    ; Re-point raster delivery at the chain head and restart the walk, so a hook
+    ; fires on a frame whose service never ran to re-arm it. SKIPPED while a service
+    ; is actually executing (guard == 1): that service's chain rebuild writes the
+    ; staged head below as two separate stores, and installing a half-updated vector
+    ; is the torn-vector wedge of writeups 15-16. Guard == 2 means the service
+    ; finished and the loop has not consumed the frame — nothing is mid-rewrite, and
+    ; that is precisely the frame this re-arm exists for.
+    lda edge_vbi_busy
+    cmp #1
+    beq .Ledge_imm_done
+    lda #0
+edge_imm_op_cur:
+    sta $ffff                  ; chain walk index = 0 (abs operand patched)
+    lda edge_imm_dli_lo
+    sta $0200                  ; VDSLST
+    lda edge_imm_dli_hi
+    sta $0201
+.Ledge_imm_done:
     jmp $e45f                  ; SYSVBV: finish OS VBLANK, then JMP (VVBLKD)
 edge_fine_hscrol:
     .byte 0
 edge_fine_vscrol:
     .byte 0
+edge_imm_dli_lo:
+    .byte $ee                  ; the OS's own no-op RTI ($E4EE) until the first
+edge_imm_dli_hi:               ; chain is built: harmless if ever taken, where a
+    .byte $e4                  ; zero vector would not be
 )");
 
 // All-static HAL (no instance state); the engine calls it via Platform::hal
@@ -261,7 +359,16 @@ struct Hal {
                                      uint16_t handler_lo, uint16_t handler_hi,
                                      uint16_t next_lo, uint16_t next_hi) {
         install_dispatch(cur, count, handler_lo, handler_hi, next_lo, next_hi);
+        // The immediate frame entry restarts the same chain walk before it
+        // re-points delivery, so it needs the index's address too.
+        (&edge_imm_op_cur)[1] = static_cast<uint8_t>(cur & 0xFF);
+        (&edge_imm_op_cur)[2] = static_cast<uint8_t>(cur >> 8);
     }
+
+    // The backend re-points raster delivery at the chain head from an entry it
+    // reaches on EVERY frame, ahead of any visible scanline, so the frame service
+    // need not re-arm delivery itself (engine/interrupt.h, rearm_delivery).
+    static constexpr bool frame_entry_rearms_raster = true;
 
     // The raw zone-boundary handler the sprite multiplexer registers as its
     // dynamic raster hook (engine/sprites.h), and the patch step that binds it to
@@ -379,6 +486,13 @@ struct Hal {
         NmiLeafGuard g;
         os::VDSLST[0] = static_cast<uint8_t>(a & 0xFF);
         os::VDSLST[1] = static_cast<uint8_t>(a >> 8);
+        // Stage the same head for the immediate frame entry, which re-points
+        // delivery at it on every frame — including the frames whose service never
+        // runs to call this. Staging here rather than through a second seam keeps
+        // the two in step by construction: the chain head the engine last asked
+        // for is the one that gets re-armed.
+        edge_imm_dli_lo = static_cast<uint8_t>(a & 0xFF);
+        edge_imm_dli_hi = static_cast<uint8_t>(a >> 8);
     }
 
     // Arm/disarm the DLI NMI. NMIEN is write-only (reads return NMIST) so it can't
@@ -642,8 +756,11 @@ struct Hal {
     // the engine net facade before this. Never executed under mos-sim (no NMI/ANTIC).
     static void shutdown() {
         disable_raster();                            // DLI off (NMIEN = VBI only)
-        set_raster_vector(0xE4EE);                   // VDSLST -> OS no-op RTI (belt & braces)
+        // Order matters: the engine's immediate frame entry re-points VDSLST at the
+        // staged chain head on every frame, so it must be uninstalled BEFORE the
+        // belt-and-braces vector is parked, or the next frame would undo it.
         uninstall_frame_isr();                       // stop engine VBI; restore OS VBI
+        set_raster_vector(0xE4EE);                   // VDSLST -> OS no-op RTI (belt & braces)
         sprite_dma_disable();                        // P/M DMA + GRACTL off
         // Disabling P/M DMA stops ANTIC reloading the GTIA player/missile graphics
         // registers, but GTIA keeps displaying their LAST latched byte on every

@@ -64,6 +64,58 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
   it is a custom target, not a CTest.
 
 ### Changed
+- **The per-frame work a skipped frame service used to lose now happens anyway**
+  (round 3, item A; DECISIONS.md ADR-037). **This is a deliberate behaviour change.**
+  The frame service rides the OS's *deferred* vertical-blank vector, which the OS
+  reaches only when the code it interrupted had interrupts enabled — so a game whose
+  loop holds short interrupts-off windows (the netstream handler's per-byte ring
+  operations do) loses the whole service on a large fraction of frames. Measured on
+  the consumer's Play screen: 47 % unserviced. Each of those frames showed it: the
+  scroll held last frame's view, the raster hook was not dispatched so its band wore
+  the playfield's palette, and the playfield wore the hook's background colour for the
+  whole frame, because the only thing that put `COLBK` back was the OS's own deferred
+  shadow copy — which is skipped by exactly the same rule.
+
+  The engine's immediate frame entry — which already ran on every frame to flush the
+  fine scroll — now also copies the display-list pointer out of its shadow (the
+  coarse-scroll swap rode the deferred copy too, so fine and coarse desynced for a
+  frame whenever the coarse column changed), copies the nine colour registers out of
+  the shadows the engine stages them in, and re-points raster delivery at the chain
+  head so a hook fires on a frame whose service never ran to re-arm it. `frame_service`
+  drops its own `rearm_delivery()` on a backend that advertises it does this
+  (`backend_rearms_delivery`); a backend that does not keeps it.
+
+  **The sprite commit deliberately stays whole and deferred.** A frame whose service is
+  skipped holds the whole sprite — shape, Y, X and colour together. Flushing a position
+  from the immediate path on a frame whose strips were never written would reintroduce
+  item B's shear in the other direction.
+
+  Measured on Altirra with a probe that manufactures the skip
+  (`vbi_skip_altirra_probe`), ~5 s runs: the raster hook went from being dispatched on
+  **24.8 %** of frames to **every** frame, in both classes of skip — before 75/303 with
+  the OS's deferred stage skipped and 75/302 with the engine's guard shut, after
+  300/303 and 298/302 (a constant 3-frame offset at the measurement window's edges,
+  unchanged when the run is tripled, not a rate). The colour half cannot be counted
+  from inside — `COLBK` is write-only — so it is a pixel A/B: with the skip forced on
+  83 % of frames, the screen before wears the hook's palette top to bottom and after
+  shows the playfield's palette above the seam and the hook's below.
+
+  Costs: the immediate path grows from 15 to 105 bytes and from **19 to 137 cycles**,
+  all of it inside the window where the serial IRQ cannot be taken, which is why the
+  copies are straight-line stores rather than the 11-byte indexed loop the contiguous
+  shadow-to-register mapping would allow (that loop costs 128 cycles against 72). Wall
+  1 pays **59 B** of it; `.bss` returns 17 and the zero-page allocator reshuffled
+  (`.zp.data` 42 -> 23, `.zp.bss` 19 -> 36), which moves the VBI save range to
+  `[$DB,$FF]` = 37 B.
+
+  The colours are read from the OS shadows because that is where the engine stages
+  every persistent colour already. Doing the copy here removes the dependency on the
+  OS's deferred stage *running* — the actual defect — and keeps the restore
+  bit-identical to that stage's by construction, so a serviced frame and a skipped one
+  cannot show different colours. The one divergence is attract mode, whose dim
+  transform the OS applies and this does not; the frame service zeroes `ATRACT` every
+  frame, so attract can only engage after minutes with no service at all.
+
 - **A direct-bound sprite's X and colour now commit from the same frame as its shape**
   (round 3, item B; DECISIONS.md ADR-037). **This is a deliberate behaviour change.**
   The frame service commits sprites at step 3 and recomputes the zones at step 5, so a

@@ -575,7 +575,13 @@ public:
         //     for the frame (a flicker, e.g. a high colour split dropping out during
         //     motion). This makes an early hook fire reliably every frame; step 6
         //     rebuilds and re-arms again. No-op until the chain has been built once.
-        interrupts.rearm_delivery();
+        //
+        //     Skipped entirely on a backend that re-arms delivery from an entry it
+        //     reaches on every frame: it has already done this, earlier in the same
+        //     frame, and on the frames this service never runs at all — which is
+        //     where the hook was being lost (interrupt.h, backend_rearms_delivery).
+        if constexpr (!decltype(interrupts)::backend_rearms_delivery())
+            interrupts.rearm_delivery();
 
         // (Raster interrupts are gated off only around the chain rewrite in step 6,
         //  not for the whole service — see the comment there. Disabling for the
