@@ -504,9 +504,25 @@ public:
     // frames_dropped() is the number of frames the game loop failed to consume in
     // time; frames_serviced() is the total frames the service ran. reset_frame_stats()
     // zeroes both so a demo can measure a clean window (e.g. after warm-up/setup).
+    //
+    // frames_skipped() is the third number, and it comes from the backend: frames
+    // whose frame interrupt arrived and was turned away because the previous frame
+    // was still in flight, so the service never ran and frames_dropped_ — which is
+    // tested inside the service — could not see them. A backend that cannot turn a
+    // frame away reports 0. Reading the three together accounts for every frame the
+    // hardware delivered.
     static u16 frames_dropped()  { return frames_dropped_; }
     static u16 frames_serviced() { return frames_serviced_; }
-    static void reset_frame_stats() { frames_dropped_ = 0; frames_serviced_ = 0; }
+    static u16 frames_skipped() {
+        if constexpr (requires { Platform::hal::frame_isr_skips(); })
+            return Platform::hal::frame_isr_skips();
+        else return 0;
+    }
+    static void reset_frame_stats() {
+        frames_dropped_ = 0; frames_serviced_ = 0;
+        if constexpr (requires { Platform::hal::reset_frame_isr_skips(); })
+            Platform::hal::reset_frame_isr_skips();
+    }
 
     // Quiesce every subsystem so a program can hand control back to its host
     // environment instead of running forever. Closes any open network lanes, then

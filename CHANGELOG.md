@@ -40,6 +40,29 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
   sentinels, dropping the adapter's propagation, reporting a constant, and sign-extending
   each fail the intended arm.
 
+### Added
+- **The frames the frame-interrupt guard turns away are counted** (`Core::frames_skipped()`,
+  round 3 instrument). The service's own overrun counter (`frames_dropped_`) is tested
+  *inside* the service, and the backend's re-entry guard turns a frame away before the
+  service is entered, so a consumer reading the pair saw "0 drops" beside a service
+  ratio well under 1 and had no way to tell the two kinds of unserviced frame apart:
+  the ones where the OS never reached the deferred vector (interrupts were disabled in
+  the code it interrupted) and the ones where it did and the guard was shut. With the
+  new counter the split is exact arithmetic against the OS frame clock:
+  `jiffies - (serviced + skipped)` is the first kind, `skipped` the second. 16-bit, in
+  `.bss`, and `edge_vbi_skips` is a plain global symbol so a harness can resolve it from
+  the map file without the game surfacing it. Costs **11 B of `.text`** and 2 B of
+  `.bss` on the consumer's image; no behaviour change.
+
+  `tests/backends/atari/vbi_skip_altirra_probe.cpp` manufactures each class on demand
+  (an interrupts-off window longer than a frame for the first, an interrupts-on window
+  with the guard still held for the second) and counts the per-frame outcome, which is
+  what proves the counter counts the right one: with only the first window `skipped` is
+  **0** while 75 % of frames go unserviced, and with only the second it equals **every**
+  unserviced frame and `serviced + skipped == jiffies`. Emulator-only (neither class
+  reproduces under mos-sim, and no ordinary demo holds interrupts off long enough), so
+  it is a custom target, not a CTest.
+
 ### Changed
 - **The multiplexer's machinery compiles out under a direct sprite binding** (size diet
   round 2, item 2). With `SpriteBinding::Direct` every slot keeps its own hardware

@@ -84,19 +84,44 @@ namespace atari {
 // consumers' whole C stack.) The DLI dispatcher's C++ hook path has the same gap
 // and is not yet covered; the .noinit (RAM) static stack is not covered either and
 // must be empty for the guarantee to be complete — it is for ATank.
+// THE GUARD'S SKIPS ARE COUNTED (edge_vbi_skips). The overrun counter inside the
+// service (frames_dropped_) cannot see them: it tests frame_ready_ on entry, and
+// the guard turns the frame away BEFORE the jsr, so a consumer reading the pair saw
+// "0 drops" beside a service ratio well under 1. The counter below is the missing
+// half — every frame the deferred vector was reached and the guard turned away —
+// and with the frame clock it decomposes the unserviced frames exactly: frames the
+// OS skipped its own deferred stage on = jiffies - (serviced + skipped).
+//
+// It is 16-bit, and it lives in .bss rather than in this asm block's own bytes (a
+// `.byte` here lands in .text, which is the image's tight wall). A single byte was
+// the first shape; it wraps every 256 skips, which is under two seconds of play at
+// the measured ratio, so the teardown read of a multi-minute session was useless.
 extern "C" {
 [[gnu::naked]] void edge_vbi_trampoline();
 extern uint8_t edge_vbi_jsr;   // first byte of the JSR; operand begins at +1
 extern volatile uint8_t edge_vbi_busy;   // in-service guard; released by the main loop
+extern volatile uint16_t edge_vbi_skips; // frames the guard turned away (.bss)
 }
 
 asm(R"(
     .globl edge_vbi_trampoline
     .globl edge_vbi_jsr
     .globl edge_vbi_busy
+    .globl edge_vbi_skips
+
+    .section .bss.edge_vbi_skips,"aw",@nobits
+edge_vbi_skips:
+    .zero 2
+    .text
+
 edge_vbi_trampoline:
     lda edge_vbi_busy
-    bne .Ledge_vbi_skip        ; busy (mid-service OR prev frame not yet consumed) → skip
+    beq .Ledge_vbi_service     ; guard open → service this frame
+    inc edge_vbi_skips         ; busy (mid-service OR prev frame not yet consumed):
+    bne .Ledge_vbi_skip        ;   count the turned-away frame and leave
+    inc edge_vbi_skips+1
+    jmp .Ledge_vbi_skip
+.Ledge_vbi_service:
     inc edge_vbi_busy
     ldx #31
 .Ledge_vbi_save:
@@ -569,6 +594,13 @@ struct Hal {
     // still running — sees the guard and skips instead of piling up and corrupting
     // the stack. See the edge_vbi_busy comment above.
     static void frame_consumed() { edge_vbi_busy = 0; }
+
+    // How many frames the re-entry guard turned away (engine::Core::frames_skipped).
+    // A diagnostic read, not part of the frame path; `edge_vbi_skips` is also a
+    // plain global symbol so an external harness can resolve it from the map file
+    // without the game having to surface it.
+    static uint16_t frame_isr_skips() { return edge_vbi_skips; }
+    static void reset_frame_isr_skips() { edge_vbi_skips = 0; }
 
     // Diagnostic hook (EDGE_SIM_VBI_LATE in engine/core.h): burn ~30 scanlines of
     // WSYNC waits at the top of the deferred service to fake the start drift that
