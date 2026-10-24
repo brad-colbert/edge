@@ -40,6 +40,220 @@ The canonical version number lives in [`engine/version.h`](engine/version.h);
   sentinels, dropping the adapter's propagation, reporting a constant, and sign-extending
   each fail the intended arm.
 
+### Added
+- **The frames the frame-interrupt guard turns away are counted** (`Core::frames_skipped()`,
+  round 3 instrument). The service's own overrun counter (`frames_dropped_`) is tested
+  *inside* the service, and the backend's re-entry guard turns a frame away before the
+  service is entered, so a consumer reading the pair saw "0 drops" beside a service
+  ratio well under 1 and had no way to tell the two kinds of unserviced frame apart:
+  the ones where the OS never reached the deferred vector (interrupts were disabled in
+  the code it interrupted) and the ones where it did and the guard was shut. With the
+  new counter the split is exact arithmetic against the OS frame clock:
+  `jiffies - (serviced + skipped)` is the first kind, `skipped` the second. 16-bit, in
+  `.bss`, and `edge_vbi_skips` is a plain global symbol so a harness can resolve it from
+  the map file without the game surfacing it. Costs **11 B of `.text`** and 2 B of
+  `.bss` on the consumer's image; no behaviour change.
+
+  `tests/backends/atari/vbi_skip_altirra_probe.cpp` manufactures each class on demand
+  (an interrupts-off window longer than a frame for the first, an interrupts-on window
+  with the guard still held for the second) and counts the per-frame outcome, which is
+  what proves the counter counts the right one: with only the first window `skipped` is
+  **0** while 75 % of frames go unserviced, and with only the second it equals **every**
+  unserviced frame and `serviced + skipped == jiffies`. Emulator-only (neither class
+  reproduces under mos-sim, and no ordinary demo holds interrupts off long enough), so
+  it is a custom target, not a CTest.
+
+### Changed
+- **The per-frame work a skipped frame service used to lose now happens anyway**
+  (round 3, item A; DECISIONS.md ADR-037). **This is a deliberate behaviour change.**
+  The frame service rides the OS's *deferred* vertical-blank vector, which the OS
+  reaches only when the code it interrupted had interrupts enabled — so a game whose
+  loop holds short interrupts-off windows (the netstream handler's per-byte ring
+  operations do) loses the whole service on a large fraction of frames. Measured on
+  the consumer's Play screen: 47 % unserviced. Each of those frames showed it: the
+  scroll held last frame's view, the raster hook was not dispatched so its band wore
+  the playfield's palette, and the playfield wore the hook's background colour for the
+  whole frame, because the only thing that put `COLBK` back was the OS's own deferred
+  shadow copy — which is skipped by exactly the same rule.
+
+  The engine's immediate frame entry — which already ran on every frame to flush the
+  fine scroll — now also copies the display-list pointer out of its shadow (the
+  coarse-scroll swap rode the deferred copy too, so fine and coarse desynced for a
+  frame whenever the coarse column changed), copies the nine colour registers out of
+  the shadows the engine stages them in, and re-points raster delivery at the chain
+  head so a hook fires on a frame whose service never ran to re-arm it. `frame_service`
+  drops its own `rearm_delivery()` on a backend that advertises it does this
+  (`backend_rearms_delivery`); a backend that does not keeps it.
+
+  **The sprite commit deliberately stays whole and deferred.** A frame whose service is
+  skipped holds the whole sprite — shape, Y, X and colour together. Flushing a position
+  from the immediate path on a frame whose strips were never written would reintroduce
+  item B's shear in the other direction.
+
+  Measured on Altirra with a probe that manufactures the skip
+  (`vbi_skip_altirra_probe`), ~5 s runs: the raster hook went from being dispatched on
+  **24.8 %** of frames to **every** frame, in both classes of skip — before 75/303 with
+  the OS's deferred stage skipped and 75/302 with the engine's guard shut, after
+  300/303 and 298/302 (a constant 3-frame offset at the measurement window's edges,
+  unchanged when the run is tripled, not a rate). The colour half cannot be counted
+  from inside — `COLBK` is write-only — so it is a pixel A/B: with the skip forced on
+  83 % of frames, the screen before wears the hook's palette top to bottom and after
+  shows the playfield's palette above the seam and the hook's below.
+
+  Costs: the immediate path grows from 15 to 105 bytes and from **19 to 137 cycles**,
+  all of it inside the window where the serial IRQ cannot be taken, which is why the
+  copies are straight-line stores rather than the 11-byte indexed loop the contiguous
+  shadow-to-register mapping would allow (that loop costs 128 cycles against 72). Wall
+  1 pays **59 B** of it; `.bss` returns 17 and the zero-page allocator reshuffled
+  (`.zp.data` 42 -> 23, `.zp.bss` 19 -> 36), which moves the VBI save range to
+  `[$DB,$FF]` = 37 B.
+
+  The colours are read from the OS shadows because that is where the engine stages
+  every persistent colour already. Doing the copy here removes the dependency on the
+  OS's deferred stage *running* — the actual defect — and keeps the restore
+  bit-identical to that stage's by construction, so a serviced frame and a skipped one
+  cannot show different colours. The one divergence is attract mode, whose dim
+  transform the OS applies and this does not; the frame service zeroes `ATRACT` every
+  frame, so attract can only engage after minutes with no service at all.
+
+- **A direct-bound sprite's X and colour now commit from the same frame as its shape**
+  (round 3, item B; DECISIONS.md ADR-037). **This is a deliberate behaviour change.**
+  The frame service commits sprites at step 3 and recomputes the zones at step 5, so a
+  whole frame of game-loop updates sits between one service's step 5 and the next one's
+  step 3. `commit_pm`'s `Direct` path took X and colour from the zone the earlier step 5
+  had staged, while the shape and Y beside them came live out of the slot — so a sprite
+  stepping diagonally put last frame's X under this frame's shape and sheared by a pixel
+  for the frame, every frame it moved. A fixed binding has no reason to stage: player p
+  shows slot p whoever else moved. `update_zones` no longer snapshots the two (the
+  multiplex path still does — there the assignment is itself per-frame state, and the
+  boundary hooks read the snapshot during the visible frame), and `commit_pm` reads the
+  slot.
+
+  A first commit now also writes the live position instead of the zeros the empty zone
+  held, so a sprite is correctly placed from the very first frame rather than the second.
+
+  **Pixel-identity on a moving sprite is no longer the right check and must not be
+  restored as one** — the whole point is that those frames differ. `test_sprites`'
+  `test_direct_commit_is_same_frame` drives the service's real order with a move in the
+  gap, which is the only arrangement in which a stale snapshot differs from a live read;
+  the existing `test_direct_bind_no_swap` / `test_direct_bind_hide` stage and commit in
+  one breath and stayed green under a mutation that restores the staging, which is why
+  they never caught this.
+
+  It does NOT pay for itself in bytes: **+19 B** in `frame_service` on the consumer's
+  image (round 2 sized the staging machinery at ~95 B, but that measured deleting it,
+  not replacing it — the live read indexes a 7-byte-stride slot where the snapshot was
+  a flat array). Folding the reads into the strip loop, which already has the slot's
+  address in hand, measured worse still (+82 B).
+
+- **The multiplexer's machinery compiles out under a direct sprite binding** (size diet
+  round 2, item 2). With `SpriteBinding::Direct` every slot keeps its own hardware
+  player for the whole frame, so `update_zones` always reports a single zone — but the
+  code that serves *more* than one zone was still emitted and still ran: a per-frame
+  loop building the boundary register table and registering boundary raster hooks, the
+  fire index, the hook arming at init, and a frame-service test for "sprites split
+  across zones" that is a compile-time false under this binding. The loop's body never
+  executed (its bound is always 1); it was paid for in bytes alone. All of it is now
+  gated on the binding, and the per-zone storage (`zones_`, `mux_table_`) is sized to
+  the one zone the binding can produce.
+
+  Measured on ATank: **-288 B** against wall 1 (`.text`+`.rodata` ends `$783D`, 963 B
+  free, from 675), `frame_service` **2,756 -> 2,493 B**, and two walls that were full:
+  `.bss` **-94 B** (1 -> 95 B free) and `.atank_hiram` **-64 B** (0 -> 64 B free).
+  One cost: `.data` **+19 B** (28 -> 9 B free). The 19 bytes are `Core::interrupts`,
+  which the compiler's zero-page allocator had placed at `$00A0` and, after the
+  change, placed in `.data` instead — a reshuffle, not new data: zero-page statics
+  fell 45 -> 33 B overall and the VBI trampoline's static-stack save range is
+  unchanged at `[$DB,$FF]` (37 B), so the per-frame cost is the same.
+
+  The backend's raw boundary handler is module-level assembly, so it stays in the
+  image even with nothing left to reference it; what goes is the table, the index and
+  every call site. The single-zone premise is what makes the compile-outs sound, so
+  `test_sprites` now asserts it directly: across six Y orders that split a multiplexed
+  manager into two zones, with slots hidden and with all slots hidden, a `Direct`
+  manager reports one zone and `build_raster_hooks` adds **no** dynamic hook to a
+  chain that already holds a static one. Mutation-proven in both directions: making
+  `update_zones` report two zones fails the test, while restoring the deleted loop
+  does **not** — it is the same behaviour, only larger, which is what zero behaviour
+  change means. Dual-emulator check (frame path, as round 1): `atari_tank_demo`
+  (direct-bound sprite over a scrolled map) renders **pixel-identical** to the
+  pre-diet build on **Altirra** and on **Fujisan**, with both captures confirmed to
+  show the live demo rather than a blank screen. (That check was first run against a
+  demo binary built before this item's edits and was re-run on the finished tree; the
+  result quoted here is the re-run.)
+
+### Changed
+- **The scroll region's geometry is a fact of its mode, not runtime state** (size diet
+  round 2, item 3). `ScrollManager` stored the fine-scroll modulus, the cell height and
+  the two inversion conventions as `u8`/`bool` members filled in by `activate()`, then
+  divided and branched on them in `write_fine()` / `coarse_col()` / `coarse_row()` —
+  every frame, for four numbers the scroll region's display mode fixes at compile time.
+  The two `u16 / u8` divisions were the frame service's only calls to `__udivmodhi4`.
+  The manager now takes an `engine::ScrollGeometry` template argument: supplied, the
+  remainder and quotient are a mask and a shift (for the usual power-of-two cell) and
+  the inversion branch disappears; defaulted, every axis behaves exactly as before, so
+  a game that mixes scroll modes across screens is unaffected. `engine::Core` derives
+  the value from the game's own screens — `ScreenSet::scroll_geometry` folds every
+  scrolling screen's mode through a "do these agree" test and yields a defaulted
+  geometry unless all four facts are settled, never a mix. `bind_scroll_map`
+  `static_assert`s the manager's geometry against the region it is binding, so a
+  manager fixed to one mode cannot be bound to a region of another.
+
+  Measured on ATank: **-168 B** against wall 1 (`.text`+`.rodata` ends `$795D`, 675 B
+  free, from 507), `frame_service` **2,923 -> 2,756 B**. The divisors alone were worth
+  only 52 B of that; the inversion conventions — the same kind of runtime copy of a
+  compile-time fact, and the thing that made the fine/coarse split branchy — were
+  worth 116. `__udivmodhi4` (248 B) is still linked for ATank's own `menu_num`; it
+  leaves the image when that moves off the helper, which is ATank's side of the item.
+  Demos (increment over item 1): `atari_mode4_geometry_probe` -844,
+  `atari_tank_demo` -418, `atari_scroll_test` -158, `atari_tank_dual_net_demo` -537
+  cumulative; `arena_native` unchanged, as it has no scroll region.
+
+  A fixed geometry also stops *storing* what it never reads: the four runtime copies
+  `activate()` used to fill are now present only in the runtime form
+  (`[[no_unique_address]]` over a conditional storage type). Worth a further **-20 B**
+  on wall 1 (963 -> 983 B free), **-16 B `.bss`** and **-28 B hiram** — and it is what
+  returns `atari_tank_dual_net_demo`'s link: that demo sits at exactly 96/96 bytes of
+  zero page, and item 2's compile-outs changed the static-frame overlay enough to need
+  one byte more than exists. (The 96/96 saturation is pre-existing and documented;
+  this round did not create it, but it did tip it.)
+
+  Arithmetic identity is the contract, so `test_scroll` sweeps 300 positions per
+  configuration comparing the fixed form against the runtime one — both inversion
+  conventions each way, a wider cell, and a cell height that is NOT a power of two
+  (where the compiler's constant-division path replaces the shift) — plus absolute
+  oracles for the fixed form. Mutation-proven: doubling the fixed modulus, dividing
+  one axis by the other's cell, and an off-by-one quotient each fail, and the first
+  fails *only* the new test, which is what proves it covers the fixed path.
+
+### Changed
+- **The display-list emitters are one shared body, not one per layout** (size diet
+  round 2, item 1). `DisplayProgram<Layout>::emit_lms` / `emit_load` were private
+  members, so every layout in a program got its own copy, and each copy took the write
+  index by `u16&` — making every `p++` an indirect 16-bit read-modify-write and every
+  table write a 16-bit-indexed store. On ATank's image that was **682 B of `.text`**
+  for a three-byte-store helper (`emit_lms` 226 ×2 + `emit_load` 230) reached only
+  from `build()`, the init path. `build()` now emits through `detail::DlCursor<Idx>`
+  and one `detail::dl_emit_load`, parameterised on the INDEX WIDTH only — never on
+  `Layout` — so every layout shares a body, and a list that fits in a page indexes
+  with a `u8`. Measured on ATank: **682 B -> 165 B of `.text`, -517 B** against wall 1
+  (`.text`+`.rodata` ends `$7A05`, 507 B free, from 10 B *over*), plus 39 B off the
+  placed init section (`build()` 254+673 -> 249+639). Zero behaviour change: the
+  emitted display-list bytes are asserted by `test_atari_display` /
+  `test_atari_scroll`, 48/48 host tests unchanged.
+
+  The out-of-lining is gated on the consumer, by the new `EDGE_INIT_SHARED` in
+  `engine/attributes.h`: with the init-placement opt-in the callers sit in a placed
+  section, where inlining would copy the helper in once per call site and per type,
+  so the attribute is `EDGE_COLD`; without the opt-in there is no section to protect,
+  inlining is cheaper, and it expands to nothing — the same measurement that keeps
+  `EDGE_INIT_FN` empty by default. Forcing `noinline` unconditionally was measured
+  first and cost the demos that inline `build()` outright: `atari_tank_demo` +143 B,
+  `atari_mode4_geometry_probe` +101 B. Gated, every demo gains from the cursor alone:
+  `arena_native` -528, `atari_scroll_test` -276, `multiplex_demo` -113,
+  `atari_tank_demo` -97, `atari_mode4_geometry_probe` -92; `arena_vbxe` is the one
+  regression at +24 B, all of it in its own `play_enter()`, which inlines `build()`.
+
 ### Fixed
 - **The VBI frame service ran on the main thread's zero-page static stack.**
   llvm-mos allocates leaf-function locals in `.zp.noinit` and overlays the frames of

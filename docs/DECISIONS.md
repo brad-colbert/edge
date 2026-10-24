@@ -1958,3 +1958,116 @@ row below the region measures a full 8 scanlines with a fixed top edge at every
 VSCROL phase (pre-fix: `VSCROL + 1` scanlines, bottom-anchored), and the tank
 demo (region-last layout) is pixel-identical before/after. See the "Scrolling
 on Atari" section of `documents/PLATFORM_ATARI.md`.
+
+---
+
+## ADR-037: Two Deliberate Behaviour Changes — What a Skipped Frame Service Costs, and When a Direct Sprite's X Commits
+
+**Status:** Accepted
+
+**Context:**
+Two defects routed to the engine shared one cause: the frame service is not
+guaranteed to run, and the per-frame work was arranged as though it were.
+
+The backend installs the service on the OS's **deferred** vertical-blank vector.
+The OS reaches that vector only when the code it interrupted had interrupts
+enabled, so a game whose loop holds short interrupts-off windows loses the whole
+service on those frames. On the consumer's Play screen 47 % of frames were
+unserviced (EDGE writeup 18). The same rule skips the OS's own deferred stage, and
+that stage is what copies the colour shadows to the colour registers and the
+display-list shadow to the display chip — so the engine's recovery for a missed
+frame was itself missed by the same rule. Three symptoms, all per-frame and all
+visible: the scroll held the previous frame's view, the raster hook was not
+dispatched so its band wore the playfield's palette, and the playfield wore the
+hook's background colour for the whole frame. The engine's two frame counters could
+not even see it: the overrun counter is tested inside the service, and the backend's
+re-entry guard turns a frame away before the service is entered.
+
+Separately (writeup 19 item 21), `commit_pm`'s `Direct` path wrote the shape and Y
+live out of the slot and the X and colour out of the zone that `update_zones` had
+staged at step 5 of the **previous** service. A whole frame of game-loop updates
+sits in that gap, so a sprite stepping diagonally put last frame's X under this
+frame's shape and sheared by a pixel for the frame, every frame it moved.
+
+**Decision:**
+Change both behaviours deliberately, with an A/B for each.
+
+1. **The visible per-frame work moves to the backend's immediate frame entry** — the
+   one the OS reaches unconditionally. It already flushed the fine scroll; it now
+   also publishes the display-list pointer from its shadow, the nine colour registers
+   from the shadows the engine stages persistent colours in, and the raster chain's
+   head with the walk index reset. `frame_service` drops its own re-arm on a backend
+   that advertises doing this (`InterruptManager::backend_rearms_delivery`). The
+   frames the re-entry guard turns away are counted (`Core::frames_skipped`), which
+   makes the two kinds of unserviced frame separable arithmetic.
+
+2. **A `Direct` commit reads X and colour from the slot**, so shape, Y, X and colour
+   all come from one game-loop update; `update_zones` no longer stages them under
+   that binding. The multiplex path keeps its snapshot — there the assignment is
+   itself per-frame state and the boundary hooks read it during the visible frame.
+
+**What deliberately did NOT change:** the sprite commit stays whole and deferred. A
+frame whose service is skipped holds the whole sprite together. Publishing a
+position from the immediate entry on a frame whose strips were never written would
+reintroduce decision 2's shear in the other direction.
+
+**Rationale:**
+The colours are copied *from the OS shadows* rather than from a second engine-owned
+staging area. Those shadows are already where the engine stages every persistent
+colour, so this is the engine's own staged value; doing the copy at an entry that
+always runs removes the dependency on the OS stage *running*, which is the whole
+defect, while keeping the restore bit-identical to that stage's by construction — a
+separate staging area could diverge from it and would then make a serviced frame and
+a skipped frame show different colours, which is the very signature being removed.
+The one divergence left is attract mode, whose dim transform the OS applies and this
+copy does not; the service zeroes the attract timer every frame, so attract can only
+engage after minutes with no service at all.
+
+The re-arm is **skipped while a service is executing**. That service's chain rebuild
+writes the staged head as two separate stores, and installing a half-updated vector
+is the torn-vector wedge of ADR-019's neighbourhood (writeups 15–16). The guard byte
+gained a third state — service finished, frame not yet consumed — so the immediate
+entry can tell that apart from a service in flight; both states still turn a new
+frame away, so the service's own re-entry behaviour is unchanged.
+
+The display-list copy is deliberately *not* gated the way the re-arm is, although the
+service writes that shadow pair as two stores too. The frame that could catch it
+half-written is one that interrupted the service, which runs with interrupts enabled —
+so the OS's own deferred stage runs on that frame and reads the identical half-written
+pair. The copy adds no case the OS did not already have, and a torn display-list
+pointer costs one frame of wrong list on an already-overrunning frame, where a torn
+raster vector is *jumped to*. The asymmetry is the consequence, not an oversight.
+
+The copies are straight-line stores, not the indexed loop that the contiguous
+shadow-to-register mapping invites. The entry runs at the top of the frame interrupt
+with interrupts masked, ahead of the OS's own first stage, so its whole length is
+added to the window in which the serial interrupt cannot be taken — and the serial
+hardware buffers one received byte. The loop would be 11 bytes instead of 54 but 128
+cycles instead of 72; cycles are the scarcer resource at that spot.
+
+**Consequences:**
+Pixel-identity on a *moving direct-bound sprite* is no longer a valid regression
+check and must not be restored as one: those frames differ by design, which is the
+point. Static frames stay identical. A first commit now writes the live position
+rather than the zeros an unbuilt zone held, so a sprite is placed correctly from
+frame 1 rather than frame 2. Colour stops lagging the shape by a service, but still
+reaches the hardware through the shadow copy at the next vertical blank, one frame
+after the shape — that residual belongs to the shadow, not to the staging, and is
+invisible while a colour is constant.
+
+The immediate entry grows from 19 to 137 cycles (116 when the re-arm is skipped) and
+from 15 to 105 bytes; any future addition there is spending the same interrupts-off
+budget and must be measured against it. A backend that does not advertise
+`frame_entry_rearms_raster` is unaffected: it keeps the service's re-arm.
+
+Verified by `tests/backends/atari/vbi_skip_altirra_probe.cpp`, which manufactures
+each class of skip independently — an interrupts-off window longer than a frame, and
+an interrupts-on window with the guard still held. The raster hook's dispatch rate
+went from 75/303 and 75/302 (serviced frames only) to 300/303 and 298/302, in both
+classes; the residual 3 is a constant offset at the measurement window's edges,
+unchanged when the run is tripled. The colour half is a pixel A/B, the background
+register being write-only. Decision 2 is covered under mos-sim by
+`test_sprites::test_direct_commit_is_same_frame`, which drives the service's real
+order (commit, then recompute zones) with a move in the gap — the only arrangement
+in which a stale snapshot differs from a live read, and the reason the existing
+direct-binding tests never caught it.

@@ -1152,6 +1152,42 @@ if(MOS_ATARI8_CXX)
         VERBATIM)
     add_custom_target(raster_vector_tear_probe DEPENDS ${RASTER_TEAR_PROBE_XEX})
 
+    # Deferred-VBI skip probe (EDGE writeup 18). Manufactures BOTH classes of
+    # unserviced frame -- the OS skipping its deferred stage (interrupts off in the
+    # loop) and the engine's own re-entry guard turning a frame away -- and counts,
+    # against the OS frame clock, how many frames got a service and how many got
+    # their raster hook. Read as a before/after A/B across the immediate-path
+    # change, plus a screenshot for the colour half (COLBK is write-only, so the
+    # probe cannot read it back). Neither class reproduces under mos-sim (no ANTIC,
+    # no NMI) or in an ordinary demo, so this is emulator-only and intentionally
+    # NOT a CTest. PROBE_SEI_OUTER / PROBE_BUSY_OUTER select which class is forced
+    # (-DEDGE_PROBE_SEI_OUTER=n / -DEDGE_PROBE_BUSY_OUTER=n at configure time).
+    # Build at -Os to match the consumer whose image these numbers are judged on.
+    set(EDGE_PROBE_SEI_OUTER  "30" CACHE STRING "vbi_skip probe: interrupts-off window, outer iterations")
+    set(EDGE_PROBE_BUSY_OUTER "0"  CACHE STRING "vbi_skip probe: guard-held window, outer iterations")
+    set(EDGE_PROBE_SCROLL     "1"  CACHE STRING "vbi_skip probe: scroll the view each iteration (0 = hold still)")
+    set(VBI_SKIP_PROBE_XEX ${CMAKE_BINARY_DIR}/vbi_skip_altirra_probe.xex)
+    set(VBI_SKIP_PROBE_MAP ${CMAKE_BINARY_DIR}/vbi_skip_altirra_probe.map)
+    add_custom_command(
+        OUTPUT ${VBI_SKIP_PROBE_XEX}
+        COMMAND ${MOS_ATARI8_CXX}
+                -std=c++20 -fno-exceptions -fno-rtti -Os -Wall -Wextra
+                -DPROBE_SEI_OUTER=${EDGE_PROBE_SEI_OUTER}
+                -DPROBE_BUSY_OUTER=${EDGE_PROBE_BUSY_OUTER}
+                -DPROBE_SCROLL=${EDGE_PROBE_SCROLL}
+                -I${CMAKE_SOURCE_DIR}
+                -I${CMAKE_SOURCE_DIR}/engine/platform/atari
+                ${CMAKE_SOURCE_DIR}/tests/backends/atari/vbi_skip_altirra_probe.cpp
+                -o ${VBI_SKIP_PROBE_XEX}
+                -Wl,--Map=${VBI_SKIP_PROBE_MAP}
+        DEPENDS ${CMAKE_SOURCE_DIR}/tests/backends/atari/vbi_skip_altirra_probe.cpp
+                ${CMAKE_SOURCE_DIR}/tests/backends/atari/atari_hostdump.h
+                ${EDGE_ENGINE_HEADERS}
+        BYPRODUCTS ${VBI_SKIP_PROBE_MAP}
+        COMMENT "Building Atari deferred-VBI skip probe (vbi_skip_altirra_probe.xex)"
+        VERBATIM)
+    add_custom_target(vbi_skip_probe DEPENDS ${VBI_SKIP_PROBE_XEX})
+
     # Stage 9E Atari-only ABI/link smoke for the EDGE-owned Netstream scaffold.
     # Build-only smoke: verifies symbol/link compatibility between:
     # - EDGE ABI shim assembly (fujinet_netstream_realtime_abi.s)

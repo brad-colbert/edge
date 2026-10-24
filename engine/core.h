@@ -227,6 +227,8 @@ public:
     // none (uses_missiles=false), the buffer is dropped to free RAM. Non-blitter
     // backends always need it (hardware sprites live here).
     static constexpr bool kUsesMissiles  = cdetail::uses_missiles<GameConfig>::value;
+    static constexpr SpriteBinding kSpriteBinding =
+        cdetail::sprite_binding<GameConfig>::value;
     static constexpr bool kUsesHwCollisions =
         cdetail::uses_hw_collisions<GameConfig>::value;
     static constexpr bool kDeferInitialScreen =
@@ -263,7 +265,11 @@ public:
     using Sprites   = SpriteManager<Platform, GameConfig::max_sprites, 4,
                                     cdetail::sprite_binding<GameConfig>::value>;
     using Sound     = SoundManager<Platform, GameConfig::sound_channels>;
-    using Scroll    = ScrollManager<Platform>;
+    // The scroll geometry comes from the screens themselves (see ScreenSet):
+    // supplied, the manager's per-frame fine/coarse split is masks and shifts with
+    // no inversion branch; defaulted where the set has no scroll region or scrolls
+    // in modes that disagree, which keeps the old runtime behaviour exactly.
+    using Scroll    = ScrollManager<Platform, screens::scroll_geometry>;
     using Tiles     = TileDisplay<Platform>;
     using Interrupts = InterruptManager<Platform, kMaxRasterHooks, kMaxFrameHooks>;
     using GfxRegion = typename cdetail::gfx_region<GameConfig>::type;
@@ -498,9 +504,25 @@ public:
     // frames_dropped() is the number of frames the game loop failed to consume in
     // time; frames_serviced() is the total frames the service ran. reset_frame_stats()
     // zeroes both so a demo can measure a clean window (e.g. after warm-up/setup).
+    //
+    // frames_skipped() is the third number, and it comes from the backend: frames
+    // whose frame interrupt arrived and was turned away because the previous frame
+    // was still in flight, so the service never ran and frames_dropped_ — which is
+    // tested inside the service — could not see them. A backend that cannot turn a
+    // frame away reports 0. Reading the three together accounts for every frame the
+    // hardware delivered.
     static u16 frames_dropped()  { return frames_dropped_; }
     static u16 frames_serviced() { return frames_serviced_; }
-    static void reset_frame_stats() { frames_dropped_ = 0; frames_serviced_ = 0; }
+    static u16 frames_skipped() {
+        if constexpr (requires { Platform::hal::frame_isr_skips(); })
+            return Platform::hal::frame_isr_skips();
+        else return 0;
+    }
+    static void reset_frame_stats() {
+        frames_dropped_ = 0; frames_serviced_ = 0;
+        if constexpr (requires { Platform::hal::reset_frame_isr_skips(); })
+            Platform::hal::reset_frame_isr_skips();
+    }
 
     // Quiesce every subsystem so a program can hand control back to its host
     // environment instead of running forever. Closes any open network lanes, then
@@ -553,7 +575,13 @@ public:
         //     for the frame (a flicker, e.g. a high colour split dropping out during
         //     motion). This makes an early hook fire reliably every frame; step 6
         //     rebuilds and re-arms again. No-op until the chain has been built once.
-        interrupts.rearm_delivery();
+        //
+        //     Skipped entirely on a backend that re-arms delivery from an entry it
+        //     reaches on every frame: it has already done this, earlier in the same
+        //     frame, and on the frames this service never runs at all — which is
+        //     where the hook was being lost (interrupt.h, backend_rearms_delivery).
+        if constexpr (!decltype(interrupts)::backend_rearms_delivery())
+            interrupts.rearm_delivery();
 
         // (Raster interrupts are gated off only around the chain rewrite in step 6,
         //  not for the whole service — see the comment there. Disabling for the
@@ -643,9 +671,17 @@ public:
         //    scanline: the service runs past the scanline while raster interrupts are
         //    disabled. (That was the atari_hw_test regression — a whole-service
         //    disable_raster() at the top of frame_service.)
+        //    Under a direct sprite binding the multiplexer never splits sprites
+        //    across zones — update_zones always reports one — so that disjunct is a
+        //    compile-time false and the only chain left to protect is one the GAME
+        //    added dynamic hooks to.
+        bool zone_split = false;
+        if constexpr (kSpriteBinding != SpriteBinding::Direct) {
+            zone_split = sprites.zone_count() > 1;
+        }
         const bool gate_raster =
             !caps::has_blitter &&
-            (sprites.zone_count() > 1 ||
+            (zone_split ||
              interrupts.raster_hook_count() > interrupts.static_raster_hook_count());
         if (gate_raster) Platform::hal::disable_raster();
         if constexpr (!caps::has_blitter) {

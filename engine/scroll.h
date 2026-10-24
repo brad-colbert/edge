@@ -31,8 +31,62 @@
 
 namespace engine {
 
-template <typename Platform>
+// ── ScrollGeometry ────────────────────────────────────────────────────
+//
+// The part of a scroll region's geometry that its display mode fixes: the fine
+// units per cell on the horizontal axis, the cell's height in display lines, and
+// whether each axis's fine register moves the picture opposite to the coarse
+// pointer. Handed to ScrollManager as a template argument by whoever declares it
+// (engine::Core derives it from the game's screens), these stop being stored
+// numbers the per-frame split divides and branches on, and become constants: a
+// mask and a shift for the usual power-of-two cell, and no inversion branch at
+// all. A default-constructed value means "not known here" and every axis behaves
+// exactly as it did when all of this was runtime state.
+//
+// The producer supplies a value only when it is sure of all four fields; a game
+// whose screens scroll in modes that disagree leaves the whole thing defaulted
+// rather than picking one screen's facts for another's.
+struct ScrollGeometry {
+    u8   fine_modulus = 0;   // fine units per cell, horizontal (0 = not known)
+    u8   cell_lines   = 0;   // display lines per cell          (0 = not known)
+    bool inverts_x    = false;
+    bool inverts_y    = false;
+};
+
+namespace detail {
+
+// Conditional type selection (avoids <type_traits>).
+template <bool C, typename T, typename F> struct cond      { using type = T; };
+template <typename T, typename F> struct cond<false, T, F> { using type = F; };
+
+// The runtime copies of a scroll region's geometry. A manager whose geometry is
+// fixed reads none of them, so it must not carry them either — storing four numbers
+// that nothing will read is exactly the cost the fixed form exists to avoid.
+// activate() is handed the same values in both forms; this one keeps them.
+struct RuntimeScrollGeometry {
+    u8   cell_x    = 0;      // fine units per cell, horizontal
+    u8   cell_y    = 0;      // display lines per cell
+    bool inverts_x = false;
+    bool inverts_y = false;
+    void set(u8 cx, u8 cy, bool ix, bool iy) {
+        cell_x = cx; cell_y = cy; inverts_x = ix; inverts_y = iy;
+    }
+    void clear() { set(0, 0, false, false); }
+};
+
+// ...and this one drops them.
+struct NoScrollGeometry {
+    void set(u8, u8, bool, bool) {}
+    void clear() {}
+};
+
+} // namespace detail
+
+template <typename Platform, ScrollGeometry Fixed = ScrollGeometry{}>
 class ScrollManager {
+    // Both divisors known is the gate: the producer only supplies a geometry when
+    // the inversion conventions are settled too (see ScreenSet::scroll_geometry).
+    static constexpr bool kFixed = Fixed.fine_modulus != 0 && Fixed.cell_lines != 0;
 public:
     // ── Position ──────────────────────────────────────────────────────
     // Absolute viewport position in the map (horizontal in fine units, vertical
@@ -58,6 +112,13 @@ public:
     bool active()    const { return active_; }
     bool suspended() const { return suspended_; }
 
+    // The geometry this manager was declared with (all-zero = everything stays
+    // runtime state). A caller that knows its own geometry can static_assert
+    // against it; engine::ScreenManager::bind_scroll_map does exactly that, so a
+    // manager fixed to one mode cannot be bound to a region of another.
+    static constexpr ScrollGeometry static_geometry = Fixed;
+    static constexpr bool           geometry_fixed  = kFixed;
+
     // ── Activation (driven by the screen manager, not the user) ────────
     // Called when a scroll-active screen is bound. Geometry and conventions come
     // from the active mode (display traits) and the scroll region's map:
@@ -82,18 +143,15 @@ public:
         map_height_    = map_height;
         visible_lines_ = visible_lines;
         fetch_         = fetch_width;
-        splpl_         = scanlines_per_line;
-        fsr_           = fine_scroll_range;
-        invert_x_      = invert_x;
-        invert_y_      = invert_y;
+        geom_.set(fine_scroll_range, scanlines_per_line, invert_x, invert_y);
         active_        = true;
     }
 
     void deactivate() {
         active_ = false;
         map_width_ = map_height_ = 0;
-        visible_lines_ = fetch_ = splpl_ = fsr_ = 0;
-        invert_x_ = invert_y_ = false;
+        visible_lines_ = fetch_ = 0;
+        geom_.clear();
     }
 
     // ── Fine scroll → hardware ────────────────────────────────────────
@@ -107,10 +165,10 @@ public:
     // keep the two advancing together. Whether each axis inverts is a backend fact
     // passed to activate(), not assumed here.
     void write_fine() const {
-        const u8 rx = static_cast<u8>(scroll_x_ % fsr_);
-        const u8 ry = static_cast<u8>(scroll_y_ % splpl_);
-        Platform::hal::set_fine_scroll_x(invert_x_ ? invert(rx, fsr_)   : rx);
-        Platform::hal::set_fine_scroll_y(invert_y_ ? invert(ry, splpl_) : ry);
+        const u8 rx = fine_x();
+        const u8 ry = fine_y();
+        Platform::hal::set_fine_scroll_x(inverts_x() ? invert(rx, cell_x()) : rx);
+        Platform::hal::set_fine_scroll_y(inverts_y() ? invert(ry, cell_y()) : ry);
     }
 
     // ── Coarse scroll (whole cells), clamped to the map edges ─────────
@@ -119,16 +177,16 @@ public:
     // is the plain quotient. Horizontal stops so the visible window's right edge
     // never passes the map's; vertical likewise at the bottom.
     u16 coarse_col() const {
-        u16 c = static_cast<u16>(scroll_x_ / fsr_);
-        if (invert_x_ && (scroll_x_ % fsr_)) ++c;
+        u16 c = cells_x();
+        if (inverts_x() && fine_x()) ++c;
         // Clamp to the FETCH width: the hardware reads `fetch_` cells per scrolled
         // line, so the last in-map coarse column is map_width - fetch_, not - display.
         const u16 max_c = map_width_ > fetch_ ? static_cast<u16>(map_width_ - fetch_) : 0;
         return c > max_c ? max_c : c;
     }
     u16 coarse_row() const {
-        u16 r = static_cast<u16>(scroll_y_ / splpl_);
-        if (invert_y_ && (scroll_y_ % splpl_)) ++r;
+        u16 r = cells_y();
+        if (inverts_y() && fine_y()) ++r;
         const u16 max_r =
             map_height_ > visible_lines_ ? static_cast<u16>(map_height_ - visible_lines_) : 0;
         return r > max_r ? max_r : r;
@@ -139,6 +197,20 @@ private:
     // coarse pointer: 0 stays 0, otherwise `cell - r` (so the register counts down
     // as coarse, bumped by one cell, counts up). See write_fine().
     static u8 invert(u8 r, u8 cell) { return r ? static_cast<u8>(cell - r) : 0; }
+
+    // Cell size and the split of a position into whole cells + sub-cell remainder,
+    // on each axis. With the divisor supplied at compile time the compiler sees a
+    // constant here (a mask and a shift for a power-of-two cell); with 0 it is the
+    // stored value and the division stands. activate() keeps the members filled
+    // either way, so the two forms are the same arithmetic on the same numbers.
+    u8  cell_x() const { if constexpr (kFixed) return Fixed.fine_modulus; else return geom_.cell_x; }
+    u8  cell_y() const { if constexpr (kFixed) return Fixed.cell_lines;   else return geom_.cell_y; }
+    bool inverts_x() const { if constexpr (kFixed) return Fixed.inverts_x; else return geom_.inverts_x; }
+    bool inverts_y() const { if constexpr (kFixed) return Fixed.inverts_y; else return geom_.inverts_y; }
+    u8  fine_x() const { return static_cast<u8>(scroll_x_ % cell_x()); }
+    u8  fine_y() const { return static_cast<u8>(scroll_y_ % cell_y()); }
+    u16 cells_x() const { return static_cast<u16>(scroll_x_ / cell_x()); }
+    u16 cells_y() const { return static_cast<u16>(scroll_y_ / cell_y()); }
 
     static u16 add_clamped(u16 base, i16 delta) {
         if (delta < 0) {
@@ -156,10 +228,10 @@ private:
     u16  map_height_    = 0;   // full map height     (native units) — coarse-row bound
     u8   visible_lines_ = 0;   // on-screen scroll mode lines
     u8   fetch_         = 0;   // fetch_width        — cells fetched per scrolled line
-    u8   splpl_         = 0;   // scanlines_per_line — vertical fine modulus / row divisor
-    u8   fsr_           = 0;   // fine_scroll_range  — horizontal fine modulus / col divisor
-    bool invert_x_      = false; // fine X register opposes the coarse pointer
-    bool invert_y_      = false; // fine Y register opposes the coarse pointer
+    // Present only when the geometry is NOT fixed (see RuntimeScrollGeometry).
+    using geometry_storage = typename detail::cond<kFixed, detail::NoScrollGeometry,
+                                                   detail::RuntimeScrollGeometry>::type;
+    [[no_unique_address]] geometry_storage geom_{};
 };
 
 } // namespace engine

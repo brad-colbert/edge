@@ -24,6 +24,7 @@
 #include "config/capabilities.h"
 #include "display.h"
 #include "attributes.h"
+#include "scroll.h"     // ScrollGeometry — the facts a layout fixes for the manager
 #include "types.h"
 
 namespace engine {
@@ -41,6 +42,43 @@ constexpr u16 vmax(u16 a, Rest... rest) {
 // Minimal is-same trait (avoids <type_traits>).
 template <typename A, typename B> struct same { static constexpr bool value = false; };
 template <typename A>             struct same<A, A> { static constexpr bool value = true; };
+
+// Variadic "do these agree" fold over u8 values: the shared value when every
+// non-zero argument is equal, else 0. A zero argument contributes nothing (the
+// screen has no scroll region), so a set with one scrolling screen and several
+// static ones still agrees.
+constexpr u8 vagree() { return 0; }
+template <typename... Rest>
+constexpr u8 vagree(u8 a, Rest... rest) {
+    const u8 r = vagree(rest...);
+    if (a == 0) return r;
+    if (r == 0) return a;
+    return a == r ? a : 0;
+}
+
+// The scroll divisors a layout's scroll region implies: the fine units per cell
+// on the scrolled axis, and the cell's height in display lines. Both are facts of
+// the region's display mode. A layout without a scroll region yields 0 for each.
+template <typename Layout, bool HasScroll = Layout::has_scroll>
+struct layout_scroll_divisors {
+    static constexpr u8 fine_modulus = 0;
+    static constexpr u8 cell_lines   = 0;
+    static constexpr u8 inverts_x    = 0;
+    static constexpr u8 inverts_y    = 0;
+};
+template <typename Layout>
+struct layout_scroll_divisors<Layout, true> {
+    static constexpr u8 idx = Layout::scroll_region_index();
+    using region = typename Layout::template region_at<idx>;
+    using tr     = engine::display::traits<typename region::mode_type>;
+    static constexpr u8 fine_modulus = tr::fine_scroll_range(region::mode);
+    static constexpr u8 cell_lines   = tr::scanlines_per_line(region::mode);
+    // The inversion conventions fold through the same "do these agree" test, so
+    // they need a third state for "this layout does not scroll": 1 = false,
+    // 2 = true, 0 = contributes nothing.
+    static constexpr u8 inverts_x = tr::fine_scroll_inverts_x(region::mode) ? 2 : 1;
+    static constexpr u8 inverts_y = tr::fine_scroll_inverts_y(region::mode) ? 2 : 1;
+};
 
 } // namespace detail
 
@@ -65,6 +103,29 @@ struct ScreenSet {
 
     template <u8 I>
     using screen_at = pack_element_t<I, Screens...>;
+
+    // The scroll divisors every scrolling screen in the set agrees on, or 0 when
+    // the set has none or mixes two that disagree. engine::Core hands these to the
+    // ScrollManager, which then holds them as compile-time facts instead of
+    // dividing by stored copies every frame; a set that disagrees keeps the runtime
+    // divisions, so mixing modes across screens stays legal.
+    static constexpr u8 scroll_fine_modulus =
+        detail::vagree(detail::layout_scroll_divisors<typename Screens::display>::fine_modulus...);
+    static constexpr u8 scroll_cell_lines =
+        detail::vagree(detail::layout_scroll_divisors<typename Screens::display>::cell_lines...);
+    static constexpr u8 scroll_inverts_x =
+        detail::vagree(detail::layout_scroll_divisors<typename Screens::display>::inverts_x...);
+    static constexpr u8 scroll_inverts_y =
+        detail::vagree(detail::layout_scroll_divisors<typename Screens::display>::inverts_y...);
+
+    // The whole geometry, or a defaulted one when any part of it is unsettled —
+    // never a mix (see ScrollGeometry). All four come from one scroll region's
+    // mode, so they are settled together or not at all.
+    static constexpr ScrollGeometry scroll_geometry =
+        (scroll_fine_modulus && scroll_cell_lines && scroll_inverts_x && scroll_inverts_y)
+            ? ScrollGeometry{scroll_fine_modulus, scroll_cell_lines,
+                             scroll_inverts_x == 2, scroll_inverts_y == 2}
+            : ScrollGeometry{};
 };
 
 // Bytes of display-program storage a screen set needs on a given platform.
@@ -341,6 +402,18 @@ public:
         using ModeT  = typename Region::mode_type;
         constexpr ModeT mode = Region::mode;
         using tr = engine::display::traits<ModeT>;
+        // A manager specialized for one mode's divisors cannot be bound to a region
+        // of another: its compile-time cell size would disagree with the geometry
+        // activate() is about to be handed, and the fine/coarse split would be wrong
+        // in a way nothing at run time could detect.
+        static_assert(!ScrollT::geometry_fixed ||
+                      (ScrollT::static_geometry.fine_modulus == tr::fine_scroll_range(mode) &&
+                       ScrollT::static_geometry.cell_lines   == tr::scanlines_per_line(mode) &&
+                       ScrollT::static_geometry.inverts_x    == tr::fine_scroll_inverts_x(mode) &&
+                       ScrollT::static_geometry.inverts_y    == tr::fine_scroll_inverts_y(mode)),
+            "the ScrollManager's compile-time geometry does not match this screen's "
+            "scroll region (screens that scroll in modes which disagree must leave "
+            "the geometry runtime)");
         scroll.activate(Layout::region_map_width[idx], Layout::region_map_height[idx],
                         Layout::region_height[idx], tr::scroll_fetch_width(mode),
                         tr::scanlines_per_line(mode), tr::fine_scroll_range(mode),

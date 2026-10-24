@@ -56,6 +56,22 @@
 // pieces separately and lets the link step decide. Subsection names are the
 // engine's placement contract: renaming one is a breaking change for any script
 // that names it, so they are listed in docs/API_DESIGN.md.
+// EDGE_INIT_SHARED marks a small setup-phase HELPER that several callers reach,
+// where those callers are the ones carrying EDGE_INIT_FN. With the opt-in the
+// callers live in a placed section, so inlining the helper copies it into that
+// section once per call site and per instantiating type: one out-of-line body,
+// left in ordinary code, is both smaller and the only form that keeps the placed
+// section (typically a tight hole) from absorbing it. Without the opt-in there is
+// no section to protect and inlining is the cheaper shape — the same measurement
+// that keeps EDGE_INIT_FN empty by default — so this expands to NOTHING. A
+// consumer who has not asked for placement pays exactly zero, and one who has
+// gets the shared body.
+#ifdef EDGE_INIT_SECTION
+#  define EDGE_INIT_SHARED [[gnu::noinline, clang::minsize]]
+#else
+#  define EDGE_INIT_SHARED
+#endif
+
 #ifdef EDGE_INIT_SECTION
 #  define EDGE_INIT_STR2(x) #x
 #  define EDGE_INIT_STR(x)  EDGE_INIT_STR2(x)
